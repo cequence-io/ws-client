@@ -47,7 +47,7 @@ trait WSRequestHelper extends HasWSClient {
   // GET //
   /////////
 
-  protected def execGET(
+  def execGET(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil
@@ -58,7 +58,7 @@ trait WSRequestHelper extends HasWSClient {
       params
     ).map(handleErrorResponse)
 
-  protected def execGETWithStatus(
+  def execGETWithStatus(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -69,7 +69,7 @@ trait WSRequestHelper extends HasWSClient {
     execGETJsonAux(request, Some(endPoint), acceptableStatusCodes)
   }
 
-  protected def execGETJsonAux(
+  def execGETJsonAux(
     request: StandaloneWSRequest,
     endPointForLogging: Option[PEP], // only for logging
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
@@ -81,7 +81,7 @@ trait WSRequestHelper extends HasWSClient {
       endPointForLogging
     )
 
-  protected def execGETStringAux(
+  def execGETStringAux(
     request: StandaloneWSRequest,
     endPointForLogging: Option[PEP], // only for logging
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
@@ -101,7 +101,7 @@ trait WSRequestHelper extends HasWSClient {
    * @param fileParams
    *   the third param in a tuple is a display (header) file name
    */
-  protected def execPOSTMultipart(
+  def execPOSTMultipart(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -120,7 +120,7 @@ trait WSRequestHelper extends HasWSClient {
    * @param fileParams
    *   the third param in a tuple is a display (header) file name
    */
-  protected def execPOSTMultipartWithStatus(
+  def execPOSTMultipartWithStatus(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -141,7 +141,7 @@ trait WSRequestHelper extends HasWSClient {
    * @param fileParams
    *   the third param in a tuple is a display (header) file name
    */
-  protected def execPOSTMultipartWithStatusString(
+  def execPOSTMultipartWithStatusString(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -171,7 +171,7 @@ trait WSRequestHelper extends HasWSClient {
     }
   )
 
-  protected def execPOST(
+  def execPOST(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -184,7 +184,7 @@ trait WSRequestHelper extends HasWSClient {
       bodyParams
     ).map(handleErrorResponse)
 
-  protected def execPOSTWithStatus(
+  def execPOSTWithStatus(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -204,7 +204,7 @@ trait WSRequestHelper extends HasWSClient {
     )
   }
 
-  protected def execPOSTSource(
+  def execPOSTSource(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -217,7 +217,7 @@ trait WSRequestHelper extends HasWSClient {
       bodyParams
     ).map(handleErrorResponse)
 
-  protected def execPOSTSourceWithStatus(
+  def execPOSTSourceWithStatus(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -237,7 +237,7 @@ trait WSRequestHelper extends HasWSClient {
     )
   }
 
-  protected def execPOSTJsonAux[T: BodyWritable](
+  def execPOSTJsonAux[T: BodyWritable](
     request: StandaloneWSRequest,
     body: T,
     endPointForLogging: Option[PEP], // only for logging
@@ -250,7 +250,7 @@ trait WSRequestHelper extends HasWSClient {
       endPointForLogging
     )
 
-  protected def execPOSTStringAux[T: BodyWritable](
+  def execPOSTStringAux[T: BodyWritable](
     request: StandaloneWSRequest,
     body: T,
     endPointForLogging: Option[PEP], // only for logging
@@ -263,7 +263,7 @@ trait WSRequestHelper extends HasWSClient {
       endPointForLogging
     )
 
-  protected def execPOSTSourceAux[T: BodyWritable](
+  def execPOSTSourceAux[T: BodyWritable](
     request: StandaloneWSRequest,
     body: T,
     endPointForLogging: Option[PEP], // only for logging
@@ -280,7 +280,7 @@ trait WSRequestHelper extends HasWSClient {
   // DELETE //
   ////////////
 
-  protected def execDELETE(
+  def execDELETE(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil
@@ -291,7 +291,7 @@ trait WSRequestHelper extends HasWSClient {
       params
     ).map(handleErrorResponse)
 
-  protected def execDELETEWithStatus(
+  def execDELETEWithStatus(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
