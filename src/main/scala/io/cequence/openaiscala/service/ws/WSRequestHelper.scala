@@ -1,4 +1,4 @@
-package io.cequence.openaiscala.wsclient
+package io.cequence.openaiscala.service.ws
 
 import com.fasterxml.jackson.core.JsonParseException
 import com.fasterxml.jackson.databind.JsonMappingException

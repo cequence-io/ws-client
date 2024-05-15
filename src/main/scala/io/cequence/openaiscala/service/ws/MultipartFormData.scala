@@ -1,4 +1,4 @@
-package io.cequence.openaiscala.wsclient
+package io.cequence.openaiscala.service.ws
 
 case class MultipartFormData(
   dataParts: Map[String, Seq[String]] = Map(),

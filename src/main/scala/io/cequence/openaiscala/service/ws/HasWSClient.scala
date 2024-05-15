@@ -1,4 +1,4 @@
-package io.cequence.openaiscala.wsclient
+package io.cequence.openaiscala.service.ws
 
 import akka.stream.Materializer
 import io.cequence.openaiscala.service.CloseableService
