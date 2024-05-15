@@ -1,13 +1,14 @@
-
 // Supported versions
 val scala212 = "2.12.18"
 val scala213 = "2.13.11"
 val scala3 = "3.2.2"
 
+ThisBuild / description := "Generic Play WebServices library"
+
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala212
-ThisBuild / version := "1.0.0"
-ThisBuild / isSnapshot := false
+ThisBuild / version := "0.1-SNAPSHOT"
+ThisBuild / isSnapshot := true
 
 // POM settings for Sonatype
 ThisBuild / homepage := Some(
@@ -51,13 +52,6 @@ inThisBuild(
   )
 )
 
-
-name := "ws-client"
-
-description := "Play WS lib."
-
-version := "0.1"
-
 lazy val playWsVersion = settingKey[String]("Play WS version to use")
 
 playWsVersion := {
@@ -69,7 +63,6 @@ playWsVersion := {
     case _ => "2.1.10"
   }
 }
-
 
 def akkaStreamLibs(scalaVersion: String): Seq[ModuleID] = {
   CrossVersion.partialVersion(scalaVersion) match {
