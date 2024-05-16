@@ -124,7 +124,7 @@ trait WSRequestHelper extends HasWSClient {
       bodyParams
     ).map(handleErrorResponse)
 
-  private val contentTypeByExtension: FilePart => String = file => {
+  def contentTypeByExtension: FilePart => String = file => {
     val fileExtensionContentTypeMap = Map(
       "txt" -> "text/plain",
       "csv" -> "text/csv",
