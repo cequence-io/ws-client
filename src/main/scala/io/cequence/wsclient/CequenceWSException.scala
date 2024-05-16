@@ -1,4 +1,4 @@
-package io.cequence.openaiscala
+package io.cequence.wsclient
 
 class CequenceWSException(
   message: String,

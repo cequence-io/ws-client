@@ -1,4 +1,4 @@
-package io.cequence.openaiscala.service.ws
+package io.cequence.wsclient.service.ws
 
 import akka.stream.Materializer
 import akka.stream.scaladsl.{FileIO, Source}

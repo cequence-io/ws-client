@@ -1,4 +1,4 @@
-package io.cequence.openaiscala
+package io.cequence.wsclient
 
 import play.api.libs.json.{
   Format,
@@ -16,7 +16,7 @@ import play.api.libs.json.{
   Reads
 }
 
-import io.cequence.openaiscala.domain.EnumValue
+import io.cequence.wsclient.domain.EnumValue
 import java.util.Date
 import java.{util => ju}
 

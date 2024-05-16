@@ -1,4 +1,4 @@
-package io.cequence.openaiscala.service
+package io.cequence.wsclient.service
 
 trait CloseableService {
 

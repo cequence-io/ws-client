@@ -1,9 +1,9 @@
-package io.cequence.openaiscala.service.ws
+package io.cequence.wsclient.service.ws
 
 import com.fasterxml.jackson.core.JsonParseException
 import com.fasterxml.jackson.databind.JsonMappingException
-import io.cequence.openaiscala.JsonUtil.toJson
-import io.cequence.openaiscala._
+import io.cequence.wsclient.JsonUtil.toJson
+import io.cequence.wsclient._
 import play.api.libs.json.{JsObject, JsValue}
 import play.api.libs.ws.{BodyWritable, StandaloneWSRequest}
 import play.api.libs.ws.JsonBodyWritables._
@@ -11,7 +11,7 @@ import play.api.libs.ws.JsonBodyReadables._
 import MultipartWritable.writeableOf_MultipartFormData
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
-import io.cequence.openaiscala.domain.{
+import io.cequence.wsclient.domain.{
   CequenceWSTimeoutException,
   CequenceWSUnknownHostException
 }

@@ -1,7 +1,7 @@
-package io.cequence.openaiscala.service.ws
+package io.cequence.wsclient.service.ws
 
 import akka.stream.Materializer
-import io.cequence.openaiscala.service.CloseableService
+import io.cequence.wsclient.service.CloseableService
 import play.api.libs.ws.StandaloneWSClient
 import play.api.libs.ws.ahc.StandaloneAhcWSClient
 

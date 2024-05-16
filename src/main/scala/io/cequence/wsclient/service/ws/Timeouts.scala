@@ -1,4 +1,4 @@
-package io.cequence.openaiscala.service.ws
+package io.cequence.wsclient.service.ws
 
 case class Timeouts(
   requestTimeout: Option[Int] = None,

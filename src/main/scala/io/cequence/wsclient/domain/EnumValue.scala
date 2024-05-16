@@ -1,4 +1,4 @@
-package io.cequence.openaiscala.domain
+package io.cequence.wsclient.domain
 
 trait EnumValue {
 
