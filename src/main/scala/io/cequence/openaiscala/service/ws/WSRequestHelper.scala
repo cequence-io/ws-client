@@ -11,6 +11,7 @@ import play.api.libs.ws.JsonBodyReadables._
 import MultipartWritable.writeableOf_MultipartFormData
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
+import play.shaded.ahc.io.netty.handler.codec.http.HttpHeaderNames
 
 import java.io.File
 import java.net.UnknownHostException
@@ -116,6 +117,38 @@ trait WSRequestHelper extends HasWSClient {
       bodyParams
     ).map(handleErrorResponse)
 
+  private val contentTypeByExtension: FilePart => String = file => {
+    val fileExtensionContentTypeMap = Map(
+      "txt" -> "text/plain",
+      "csv" -> "text/csv",
+      "json" -> "application/json",
+      "xml" -> "application/xml",
+      "pdf" -> "application/pdf",
+      "zip" -> "application/zip",
+      "tar" -> "application/x-tar",
+      "gz" -> "application/x-gzip",
+      "ogg" -> "application/ogg",
+      "mp3" -> "audio/mpeg",
+      "wav" -> "audio/x-wav",
+      "mp4" -> "video/mp4",
+      "webm" -> "video/webm",
+      "png" -> "image/png",
+      "jpg" -> "image/jpeg",
+      "jpeg" -> "image/jpeg",
+      "gif" -> "image/gif",
+      "svg" -> "image/svg+xml"
+    )
+
+    val contentTypeAux = file.contentType.orElse {
+      // Azure expects an explicit content type for files
+      fileExtensionContentTypeMap.get(file.extension)
+    }
+
+    contentTypeAux.map { ct =>
+      s"${HttpHeaderNames.CONTENT_TYPE}: $ct\r\n"
+    }.getOrElse("")
+  }
+
   /**
    * @param fileParams
    *   the third param in a tuple is a display (header) file name
@@ -127,6 +160,8 @@ trait WSRequestHelper extends HasWSClient {
     fileParams: Seq[(PT, File, Option[String])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  )(
+    implicit filePartToContent: FilePart => String = contentTypeByExtension
   ): Future[RichJsResponse] = {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
     val formData = createMultipartFormData(fileParams, bodyParams)
@@ -148,6 +183,8 @@ trait WSRequestHelper extends HasWSClient {
     fileParams: Seq[(PT, File, Option[String])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  )(
+    implicit filePartToContent: FilePart => String = contentTypeByExtension
   ): Future[RichStringResponse] = {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
     val formData = createMultipartFormData(fileParams, bodyParams)

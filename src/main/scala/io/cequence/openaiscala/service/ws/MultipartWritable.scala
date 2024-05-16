@@ -19,32 +19,13 @@ object MultipartWritable {
     val CONTENT_TYPE = "content-type"
   }
 
-  private val fileExtensionContentTypeMap = Map(
-    "txt" -> "text/plain",
-    "csv" -> "text/csv",
-    "json" -> "application/json",
-    "xml" -> "application/xml",
-    "pdf" -> "application/pdf",
-    "zip" -> "application/zip",
-    "tar" -> "application/x-tar",
-    "gz" -> "application/x-gzip",
-    "ogg" -> "application/ogg",
-    "mp3" -> "audio/mpeg",
-    "wav" -> "audio/x-wav",
-    "mp4" -> "video/mp4",
-    "webm" -> "video/webm",
-    "png" -> "image/png",
-    "jpg" -> "image/jpeg",
-    "jpeg" -> "image/jpeg",
-    "gif" -> "image/gif",
-    "svg" -> "image/svg+xml"
-  )
-
   /**
    * `Writeable` for `MultipartFormData`.
    */
   def writeableOf_MultipartFormData(
     charset: String
+  )(
+    implicit filePartToContent: FilePart => String
   ): BodyWritable[MultipartFormData] = {
 
     val boundary: String =
@@ -63,22 +44,8 @@ object MultipartWritable {
     }
 
     def filePartHeader(file: FilePart) = {
-      val name = s""""${file.key}""""
-      val filenameAux = file.headerFileName.getOrElse(file.path)
-      val filenamePart = s""""${filenameAux}""""
-
-      val contentTypeAux = file.contentType.orElse {
-        val extension = filenameAux.split('.').last
-        // Azure expects an explicit content type for files
-        fileExtensionContentTypeMap.get(extension)
-      }
-
-      val contentTypePart = contentTypeAux.map { ct =>
-        s"${HttpHeaderNames.CONTENT_TYPE}: $ct\r\n"
-      }.getOrElse("")
-
       encode(
-        s"--$boundary\r\n${HttpHeaderNames.CONTENT_DISPOSITION}: form-data; name=$name; filename=$filenamePart\r\n$contentTypePart\r\n"
+        s"--$boundary\r\n${HttpHeaderNames.CONTENT_DISPOSITION}: form-data; name=${file.name}; filename=${file.filenamePart}\r\n${filePartToContent(file)}\r\n"
       )
     }
 
