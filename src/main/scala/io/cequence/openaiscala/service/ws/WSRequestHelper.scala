@@ -11,6 +11,10 @@ import play.api.libs.ws.JsonBodyReadables._
 import MultipartWritable.writeableOf_MultipartFormData
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
+import io.cequence.openaiscala.domain.{
+  CequenceWSTimeoutException,
+  CequenceWSUnknownHostException
+}
 import play.shaded.ahc.io.netty.handler.codec.http.HttpHeaderNames
 
 import java.io.File
@@ -37,12 +41,15 @@ trait WSRequestHelper extends HasWSClient {
 
   protected val serviceName: String = getClass.getSimpleName
 
-  private val defaultAcceptableStatusCodes = Seq(200, 201)
+  private val defaultAcceptableStatusCodes = Seq(200)
 
   protected type RichResponse[T] = Either[T, (Int, String)]
   protected type RichJsResponse = RichResponse[JsValue]
   protected type RichStringResponse = RichResponse[String]
   protected type RichSourceResponse = RichResponse[Source[ByteString, _]]
+
+  private def serviceAndEndpoint(endPointForLogging: Option[PEP]) =
+    s"$serviceName.${endPointForLogging.map(_.toString).getOrElse("")}"
 
   /////////
   // GET //
@@ -166,8 +173,9 @@ trait WSRequestHelper extends HasWSClient {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
     val formData = createMultipartFormData(fileParams, bodyParams)
 
-    implicit val writeable: BodyWritable[MultipartFormData] =
-      writeableOf_MultipartFormData("utf-8")
+    implicit val writeable: BodyWritable[MultipartFormData] = writeableOf_MultipartFormData(
+      "utf-8"
+    )
 
     execPOSTJsonAux(request, formData, Some(endPoint), acceptableStatusCodes)
   }
@@ -189,15 +197,16 @@ trait WSRequestHelper extends HasWSClient {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
     val formData = createMultipartFormData(fileParams, bodyParams)
 
-    implicit val writeable: BodyWritable[MultipartFormData] =
-      writeableOf_MultipartFormData("utf-8")
+    implicit val writeable: BodyWritable[MultipartFormData] = writeableOf_MultipartFormData(
+      "utf-8"
+    )
 
     execPOSTStringAux(request, formData, Some(endPoint), acceptableStatusCodes)
   }
 
   // create a multipart form data holder contain classic data (key-value) parts as well as file parts
   private def createMultipartFormData(
-    fileParams: Seq[(PT, File, Option[String])],
+    fileParams: Seq[(PT, File, Option[String])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil
   ) = MultipartFormData(
     dataParts = bodyParams.collect { case (key, Some(value)) =>
@@ -351,6 +360,64 @@ trait WSRequestHelper extends HasWSClient {
       endPointForLogging
     )
 
+  ////////////
+  // PATCH //
+  ////////////
+
+  protected def execPATCH(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil
+  ): Future[JsValue] =
+    execPATCHWithStatus(
+      endPoint,
+      endPointParam,
+      params,
+      bodyParams
+    ).map(handleErrorResponse)
+
+  protected def execPATCHWithStatus(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichJsResponse] = {
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
+    val bodyParamsX = bodyParams.collect { case (fieldName, Some(jsValue)) =>
+      (fieldName.toString, jsValue)
+    }
+
+    execPATCHJsonAux(request, JsObject(bodyParamsX), Some(endPoint), acceptableStatusCodes)
+  }
+
+  protected def execPATCHJsonAux[T: BodyWritable](
+    request: StandaloneWSRequest,
+    body: T,
+    endPointForLogging: Option[PEP], // only for logging
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ) =
+    execRequestJsonAux(
+      request,
+      _.patch(body),
+      acceptableStatusCodes,
+      endPointForLogging
+    )
+
+  protected def execPATCHStringAux[T: BodyWritable](
+    request: StandaloneWSRequest,
+    body: T,
+    endPointForLogging: Option[PEP], // only for logging
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ) =
+    execRequestStringAux(
+      request,
+      _.patch(body),
+      acceptableStatusCodes,
+      endPointForLogging
+    )
+
   ////////////////
   // WS Request //
   ////////////////
@@ -377,6 +444,34 @@ trait WSRequestHelper extends HasWSClient {
     client.url(url)
   }
 
+  def execRequestJsonAux(
+    request: StandaloneWSRequest,
+    exec: StandaloneWSRequest => Future[StandaloneWSRequest#Response],
+    acceptableStatusCodes: Seq[Int] = Nil,
+    endPointForLogging: Option[PEP] = None // only for logging
+  ): Future[RichJsResponse] =
+    execRequestRaw(
+      request,
+      exec,
+      acceptableStatusCodes,
+      endPointForLogging
+    ).map(_ match {
+      case Left(response) =>
+        try {
+          Left(response.body[JsValue])
+        } catch {
+          case _: JsonParseException =>
+            throw new CequenceWSException(
+              s"${serviceAndEndpoint(endPointForLogging)}: '${response.body}' is not a JSON."
+            )
+          case _: JsonMappingException =>
+            throw new CequenceWSException(
+              s"${serviceAndEndpoint(endPointForLogging)}: '${response.body}' is an unmappable JSON."
+            )
+        }
+      case Right(response) => Right(response)
+    })
+
   private def execRequestAux[T](
     responseConverter: ResponseConverters.ResponseConverter[T]
   )(
@@ -395,6 +490,22 @@ trait WSRequestHelper extends HasWSClient {
         Left(responseConverter.apply(response, endPointForLogging))
       case Right(response) =>
         Right(response)
+    })
+
+  private def execRequestStringAux(
+    request: StandaloneWSRequest,
+    exec: StandaloneWSRequest => Future[StandaloneWSRequest#Response],
+    acceptableStatusCodes: Seq[Int] = Nil,
+    endPointForLogging: Option[PEP] = None // only for logging
+  ): Future[RichStringResponse] =
+    execRequestRaw(
+      request,
+      exec,
+      acceptableStatusCodes,
+      endPointForLogging
+    ).map(_ match {
+      case Left(response)  => Left(response.body)
+      case Right(response) => Right(response)
     })
 
   private object ResponseConverters {
@@ -428,11 +539,11 @@ trait WSRequestHelper extends HasWSClient {
         } catch {
           case _: JsonParseException =>
             throw new CequenceWSException(
-              s"$serviceName.${endPointForLogging.map(_.toString).getOrElse("")}: '${response.body}' is not a JSON."
+              s"${serviceAndEndpoint(endPointForLogging)}: '${response.body}' is not a JSON."
             )
           case _: JsonMappingException =>
             throw new CequenceWSException(
-              s"$serviceName.${endPointForLogging.map(_.toString).getOrElse("")}: '${response.body}' is an unmappable JSON."
+              s"${serviceAndEndpoint(endPointForLogging)}: '${response.body}' is an unmappable JSON."
             )
         }
     }
@@ -452,12 +563,12 @@ trait WSRequestHelper extends HasWSClient {
     }
   }.recover {
     case e: TimeoutException =>
-      throw new CequenceWSException(
-        s"$serviceName.${endPointForLogging.map(_.toString).getOrElse("")} timed out: ${e.getMessage}."
+      throw new CequenceWSTimeoutException(
+        s"${serviceAndEndpoint(endPointForLogging)} timed out: ${e.getMessage}."
       )
     case e: UnknownHostException =>
-      throw new CequenceWSException(
-        s"$serviceName.${endPointForLogging.map(_.toString).getOrElse("")} cannot resolve a host name: ${e.getMessage}."
+      throw new CequenceWSUnknownHostException(
+        s"${serviceAndEndpoint(endPointForLogging)} cannot resolve a host name: ${e.getMessage}."
       )
   }
 
@@ -494,15 +605,13 @@ trait WSRequestHelper extends HasWSClient {
     throw new CequenceWSException(s"Code ${httpCode} : ${message}")
 
   protected def paramsAsString(params: Seq[(String, Any)]): String = {
-    val string =
-      params.map { case (tag, value) => s"$tag=$value" }.mkString("&")
+    val string = params.map { case (tag, value) => s"$tag=$value" }.mkString("&")
 
     if (string.nonEmpty) s"?$string" else ""
   }
 
   protected def paramsOptionalAsString(params: Seq[(String, Option[Any])]): String = {
-    val string =
-      params.collect { case (tag, Some(value)) => s"$tag=$value" }.mkString("&")
+    val string = params.collect { case (tag, Some(value)) => s"$tag=$value" }.mkString("&")
 
     if (string.nonEmpty) s"?$string" else ""
   }
@@ -527,4 +636,23 @@ trait WSRequestHelper extends HasWSClient {
     params: Seq[(PT, Option[Any])]
   ): Seq[(String, Option[Any])] =
     params.map { case (a, b) => (a.toString, b) }
+
+  // close
+
+  // Create Akka system for thread and streaming management
+  //  system.registerOnTermination {
+  //    System.exit(0)
+  //  }
+  //
+  //  implicit val materializer = SystemMaterializer(system).materializer
+  //
+  //  // Create the standalone WS client
+  //  // no argument defaults to a AhcWSClientConfig created from
+  //  // "AhcWSClientConfigFactory.forConfig(ConfigFactory.load, this.getClass.getClassLoader)"
+  //  val wsClient = StandaloneAhcWSClient()
+  //
+  //  call(wsClient)
+  //    .andThen { case _ => wsClient.close() }
+  //    .andThen { case _ => system.terminate() }
+
 }
