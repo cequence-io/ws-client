@@ -11,10 +11,7 @@ import play.api.libs.ws.JsonBodyReadables._
 import MultipartWritable.writeableOf_MultipartFormData
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
-import io.cequence.wsclient.domain.{
-  CequenceWSTimeoutException,
-  CequenceWSUnknownHostException
-}
+import io.cequence.wsclient.domain.{CequenceWSTimeoutException, CequenceWSUnknownHostException}
 import play.shaded.ahc.io.netty.handler.codec.http.HttpHeaderNames
 
 import java.io.File
@@ -430,7 +427,7 @@ trait WSRequestHelper extends HasWSClient {
     val paramsString = paramsAsString(params)
     val url = createUrl(endPoint, endPointParam) + paramsString
 
-    client.url(url)
+    addHeaders(client.url(url))
   }
 
   protected def getWSRequestOptional(
@@ -441,7 +438,7 @@ trait WSRequestHelper extends HasWSClient {
     val paramsString = paramsOptionalAsString(params)
     val url = createUrl(endPoint, endPointParam) + paramsString
 
-    client.url(url)
+    addHeaders(client.url(url))
   }
 
   def execRequestJsonAux(
@@ -636,6 +633,9 @@ trait WSRequestHelper extends HasWSClient {
     params: Seq[(PT, Option[Any])]
   ): Seq[(String, Option[Any])] =
     params.map { case (a, b) => (a.toString, b) }
+
+  protected def addHeaders(request: StandaloneWSRequest): StandaloneWSRequest =
+    request
 
   // close
 
