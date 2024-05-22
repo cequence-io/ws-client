@@ -7,12 +7,12 @@ ThisBuild / description := "Generic Play WebServices library"
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala212
-ThisBuild / version := "0.1"
+ThisBuild / version := "0.1.0"
 ThisBuild / isSnapshot := false
 
 // POM settings for Sonatype
 ThisBuild / homepage := Some(
-  url("https://github.com/cequence-io/openai-scala-client")
+  url("https://github.com/cequence-io//ws-client")
 )
 
 ThisBuild / sonatypeProfileName := "io.cequence"
@@ -30,6 +30,12 @@ ThisBuild / developers := List(
     "Boris Burdiliak",
     "boris.burdiliak@gmail.com",
     url("https://cequence.io")
+  ),
+  Developer(
+    "bnd",
+    "Peter Banda",
+    "peter.banda@protonmail.com",
+    url("https://peterbanda.net")
   )
 )
 
