@@ -7,8 +7,8 @@ ThisBuild / description := "Generic Play WebServices library"
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala212
-ThisBuild / version := "0.1-SNAPSHOT"
-ThisBuild / isSnapshot := true
+ThisBuild / version := "0.1"
+ThisBuild / isSnapshot := false
 
 // POM settings for Sonatype
 ThisBuild / homepage := Some(
@@ -26,10 +26,10 @@ ThisBuild / scmInfo := Some(
 
 ThisBuild / developers := List(
   Developer(
-    "bnd",
-    "Peter Banda",
-    "peter.banda@protonmail.com",
-    url("https://peterbanda.net")
+    "bbu",
+    "Boris Burdiliak",
+    "boris.burdiliak@gmail.com",
+    url("https://cequence.io")
   )
 )
 
