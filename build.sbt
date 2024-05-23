@@ -12,7 +12,7 @@ ThisBuild / isSnapshot := false
 
 // POM settings for Sonatype
 ThisBuild / homepage := Some(
-  url("https://github.com/cequence-io//ws-client")
+  url("https://github.com/cequence-io/ws-client")
 )
 
 ThisBuild / sonatypeProfileName := "io.cequence"
