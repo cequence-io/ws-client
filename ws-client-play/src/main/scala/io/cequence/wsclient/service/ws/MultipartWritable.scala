@@ -1,6 +1,5 @@
 package io.cequence.wsclient.service.ws
 
-import akka.stream.Materializer
 import akka.stream.scaladsl.{FileIO, Source}
 import akka.util.ByteString
 import play.api.libs.ws.{BodyWritable, SourceBody}

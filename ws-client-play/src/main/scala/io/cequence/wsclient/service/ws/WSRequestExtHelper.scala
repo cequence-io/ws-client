@@ -1,6 +1,5 @@
 package io.cequence.wsclient.service.ws
 
-import io.cequence.wsclient._
 import play.api.libs.ws.StandaloneWSRequest
 
 /**
