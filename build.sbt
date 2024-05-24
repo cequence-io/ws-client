@@ -7,7 +7,7 @@ ThisBuild / description := "Generic Play WebServices library"
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala212
-ThisBuild / version := "0.1.0"
+ThisBuild / version := "0.2.0"
 ThisBuild / isSnapshot := false
 
 // POM settings for Sonatype
@@ -26,9 +26,9 @@ ThisBuild / scmInfo := Some(
 
 ThisBuild / developers := List(
   Developer(
-    "bbu",
+    "bburdiliak",
     "Boris Burdiliak",
-    "boris.burdiliak@gmail.com",
+    "boris.burdiliak@cequence.io",
     url("https://cequence.io")
   ),
   Developer(
@@ -56,15 +56,17 @@ inThisBuild(
 
 lazy val playWsVersion = settingKey[String]("Play WS version to use")
 
-playWsVersion := {
-  scalaVersion.value match {
-    case "2.12.18" => "2.1.10"
-    case "2.13.11" => "2.2.0-M3"
-    case "3.2.2" =>
-      "2.2.0-M2" // Version "2.2.0-M3" was produced by an unstable release: Scala 3.3.0-RC3
-    case _ => "2.1.10"
+inThisBuild(
+  playWsVersion := {
+    scalaVersion.value match {
+      case "2.12.18" => "2.1.10"
+      case "2.13.11" => "2.2.0-M3"
+      case "3.2.2" =>
+        "2.2.0-M2" // Version "2.2.0-M3" was produced by an unstable release: Scala 3.3.0-RC3
+      case _ => "2.1.10"
+    }
   }
-}
+)
 
 def akkaStreamLibs(scalaVersion: String): Seq[ModuleID] = {
   CrossVersion.partialVersion(scalaVersion) match {
@@ -95,22 +97,20 @@ lazy val playDependencies = Def.setting {
 }
 
 lazy val `ws-client-core` =
-  (project in file("ws-client-core"))
-    .settings(libraryDependencies ++= akkaStreamLibs(scalaVersion.value))
+  (project in file("ws-client-core")).settings(
+    name := "ws-client-core",
+    libraryDependencies ++= akkaStreamLibs(scalaVersion.value),
+    libraryDependencies += "com.typesafe.play" %% "play-ws-standalone-json" % playWsVersion.value,
+    publish / skip := false
+  )
 
 lazy val `ws-client-play` =
   (project in file("ws-client-play"))
     .settings(
-      playWsVersion := {
-        scalaVersion.value match {
-          case "2.12.18" => "2.1.10"
-          case "2.13.11" => "2.2.0-M3"
-          case "3.2.2" =>
-            "2.2.0-M2" // Version "2.2.0-M3" was produced by an unstable release: Scala 3.3.0-RC3
-          case _ => "2.1.10"
-        }
-      },
+      name := "ws-client-play",
       libraryDependencies ++= akkaStreamLibs(scalaVersion.value),
-      libraryDependencies ++= playDependencies.value
+      libraryDependencies ++= playDependencies.value,
+      publish / skip := false
     )
     .dependsOn(`ws-client-core`)
+    .aggregate(`ws-client-core`) // TODO: study the need for this

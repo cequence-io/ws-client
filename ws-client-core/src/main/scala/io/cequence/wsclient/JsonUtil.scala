@@ -1,5 +1,6 @@
 package io.cequence.wsclient
 
+import io.cequence.wsclient.domain.{CequenceWSException, EnumValue}
 import play.api.libs.json.{
   Format,
   JsArray,
@@ -13,10 +14,10 @@ import play.api.libs.json.{
   JsSuccess,
   JsValue,
   Json,
-  Reads
+  Reads,
+  Writes
 }
 
-import io.cequence.wsclient.domain.EnumValue
 import java.util.Date
 import java.{util => ju}
 
@@ -151,8 +152,6 @@ object JsonUtil {
       JsObject(fields)
     }
   }
-
-  import play.api.libs.json._
 
   private class EitherFormat[L, R](
     leftFormat: Format[L],

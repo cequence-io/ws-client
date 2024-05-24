@@ -10,12 +10,20 @@ import play.api.libs.ws.StandaloneWSRequest
  */
 trait WSRequestExtHelper extends WSRequestHelper {
 
-  protected val defaultRequestTimeout = 120 * 1000 // two minutes
-  protected val defaultReadoutTimeout = 120 * 1000 // two minutes
+  protected val defaultRequestTimeout: Int = 120 * 1000 // two minutes
+  protected val defaultReadoutTimeout: Int = 120 * 1000 // two minutes
 
-  protected val explTimeouts: Option[Timeouts]
-  protected val authHeaders: Seq[(String, String)]
-  protected val extraParams: Seq[(String, String)]
+  protected val explTimeouts: Option[Timeouts] = None
+
+  /**
+   * Auth headers (HTTP headers) to be added to each request.
+   */
+  protected val authHeaders: Seq[(String, String)] = Nil
+
+  /**
+   * Extra parameters to be added to each request.
+   */
+  protected val extraParams: Seq[(String, String)] = Nil
 
   override protected def timeouts: Timeouts =
     explTimeouts.getOrElse(
@@ -32,7 +40,9 @@ trait WSRequestExtHelper extends WSRequestHelper {
     endPointParam: Option[String],
     params: Seq[(String, Option[Any])] = Nil
   ): StandaloneWSRequest#Self = {
-    val extraStringParams = extraParams.map { case (tag, value) => (tag, Some(value)) }
+    val extraStringParams = extraParams.map { case (tag, value) =>
+      (tag, Some(value))
+    }
 
     super
       .getWSRequestOptional(

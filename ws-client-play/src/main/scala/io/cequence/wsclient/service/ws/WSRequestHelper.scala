@@ -1,24 +1,26 @@
 package io.cequence.wsclient.service.ws
 
+import akka.stream.scaladsl.Source
+import akka.util.ByteString
 import com.fasterxml.jackson.core.JsonParseException
 import com.fasterxml.jackson.databind.JsonMappingException
 import io.cequence.wsclient.JsonUtil.toJson
-import io.cequence.wsclient._
+import io.cequence.wsclient.domain.{
+  CequenceWSException,
+  CequenceWSTimeoutException,
+  CequenceWSUnknownHostException
+}
+import io.cequence.wsclient.service.ws.MultipartWritable.writeableOf_MultipartFormData
 import play.api.libs.json.{JsObject, JsValue}
-import play.api.libs.ws.{BodyWritable, StandaloneWSRequest}
-import play.api.libs.ws.JsonBodyWritables._
 import play.api.libs.ws.JsonBodyReadables._
-import MultipartWritable.writeableOf_MultipartFormData
-import akka.stream.scaladsl.Source
-import akka.util.ByteString
-import io.cequence.wsclient.domain.{CequenceWSTimeoutException, CequenceWSUnknownHostException}
+import play.api.libs.ws.JsonBodyWritables._
+import play.api.libs.ws.{BodyWritable, StandaloneWSRequest}
 import play.shaded.ahc.io.netty.handler.codec.http.HttpHeaderNames
 
 import java.io.File
 import java.net.UnknownHostException
 import java.util.concurrent.TimeoutException
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.Either
 
 /**
  * Base class for web services with handy GET, POST, and DELETE request builders, and response
@@ -27,7 +29,7 @@ import scala.util.Either
  * @since Jan
  *   2023
  */
-trait WSRequestHelper extends HasWSClient {
+protected trait WSRequestHelper extends HasWSClient {
 
   protected val coreUrl: String
 
