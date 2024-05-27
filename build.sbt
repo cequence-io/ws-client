@@ -68,6 +68,8 @@ inThisBuild(
   }
 )
 
+val akkaHttpVersion = "10.5.0-M1" // TODO: migrate to 10.5.1
+
 def akkaStreamLibs(scalaVersion: String): Seq[ModuleID] = {
   CrossVersion.partialVersion(scalaVersion) match {
     case Some((2, 12)) =>
@@ -113,4 +115,16 @@ lazy val `ws-client-play` =
       publish / skip := false
     )
     .dependsOn(`ws-client-core`)
-    .aggregate(`ws-client-core`) // TODO: study the need for this
+    .aggregate(`ws-client-core`)
+
+lazy val `ws-client-stream` =
+  (project in file("ws-client-stream"))
+    .settings(
+      name := "ws-client-stream",
+      libraryDependencies ++= akkaStreamLibs(scalaVersion.value),
+      libraryDependencies ++= playDependencies.value,
+      libraryDependencies += "com.typesafe.akka" %% "akka-http" % akkaHttpVersion, // JSON WS Streaming
+      publish / skip := false
+    )
+    .dependsOn(`ws-client-core`, `ws-client-play`)
+    .aggregate(`ws-client-core`, `ws-client-play`)
