@@ -1,4 +1,4 @@
-package io.cequence.wsclient.service.stream.ws
+package io.cequence.wsclient.service.ws.stream
 
 import akka.NotUsed
 import akka.http.scaladsl.unmarshalling.{Unmarshal, Unmarshaller}
@@ -7,7 +7,11 @@ import akka.stream.scaladsl.Framing.FramingException
 import akka.stream.scaladsl.{Flow, Framing, Source}
 import akka.util.ByteString
 import com.fasterxml.jackson.core.JsonParseException
-import io.cequence.wsclient.domain.{CequenceWSException, CequenceWSTimeoutException, CequenceWSUnknownHostException}
+import io.cequence.wsclient.domain.{
+  CequenceWSException,
+  CequenceWSTimeoutException,
+  CequenceWSUnknownHostException
+}
 import io.cequence.wsclient.service.ws.WSRequestHelper
 import play.api.libs.json.{JsObject, JsString, JsValue, Json}
 import play.api.libs.ws.JsonBodyWritables._
@@ -21,7 +25,7 @@ import java.util.concurrent.TimeoutException
  * @since Feb
  *   2023
  */
-trait OpenAIWSStreamRequestHelper extends WSRequestHelper {
+trait WSStreamRequestHelper extends WSRequestHelper {
 
   private val itemPrefix = "data: "
   private val endOfStreamToken = "[DONE]"
