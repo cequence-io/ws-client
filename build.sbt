@@ -7,7 +7,7 @@ ThisBuild / description := "Generic Play WebServices library"
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala212
-ThisBuild / version := "0.2.0"
+ThisBuild / version := "0.3.0"
 ThisBuild / isSnapshot := false
 
 // POM settings for Sonatype

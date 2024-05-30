@@ -1,5 +1,6 @@
 package io.cequence.wsclient.service.ws
 
+import io.cequence.wsclient.domain.WsRequestContext
 import play.api.libs.ws.StandaloneWSRequest
 
 /**
@@ -13,20 +14,14 @@ trait WSRequestHelper extends WSRequestHelperBase {
   protected val defaultRequestTimeout: Int = 120 * 1000 // two minutes
   protected val defaultReadoutTimeout: Int = 120 * 1000 // two minutes
 
-  protected val explTimeouts: Option[Timeouts] = None
-
-  /**
-   * Auth headers (HTTP headers) to be added to each request.
-   */
-  protected val authHeaders: Seq[(String, String)] = Nil
-
-  /**
-   * Extra parameters to be added to each request.
-   */
-  protected val extraParams: Seq[(String, String)] = Nil
+  protected val requestContext: WsRequestContext = WsRequestContext(
+    None,
+    Nil,
+    Nil
+  )
 
   override protected def timeouts: Timeouts =
-    explTimeouts.getOrElse(
+    requestContext.explTimeouts.getOrElse(
       Timeouts(
         requestTimeout = Some(defaultRequestTimeout),
         readTimeout = Some(defaultReadoutTimeout)
@@ -40,7 +35,7 @@ trait WSRequestHelper extends WSRequestHelperBase {
     endPointParam: Option[String],
     params: Seq[(String, Option[Any])] = Nil
   ): StandaloneWSRequest#Self = {
-    val extraStringParams = extraParams.map { case (tag, value) =>
+    val extraStringParams = requestContext.extraParams.map { case (tag, value) =>
       (tag, Some(value))
     }
 
@@ -50,7 +45,7 @@ trait WSRequestHelper extends WSRequestHelperBase {
         endPointParam,
         params ++ extraStringParams
       )
-      .addHttpHeaders(authHeaders: _*)
+      .addHttpHeaders(requestContext.authHeaders: _*)
   }
 
   override protected def getWSRequest(
@@ -62,7 +57,7 @@ trait WSRequestHelper extends WSRequestHelperBase {
       .getWSRequest(
         endPoint,
         endPointParam,
-        params ++ extraParams
+        params ++ requestContext.extraParams
       )
-      .addHttpHeaders(authHeaders: _*)
+      .addHttpHeaders(requestContext.authHeaders: _*)
 }

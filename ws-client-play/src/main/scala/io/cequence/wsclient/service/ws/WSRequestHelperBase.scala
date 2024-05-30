@@ -485,10 +485,10 @@ protected trait WSRequestHelperBase extends HasWSClient {
       acceptableStatusCodes,
       endPointForLogging
     ).map(_ match {
-      case Left(response) =>
-        Left(responseConverter.apply(response, endPointForLogging))
-      case Right(response) =>
-        Right(response)
+        case Left(response) =>
+          Left(responseConverter.apply(response, endPointForLogging))
+        case Right(response) =>
+          Right(response)
     })
 
   private def execRequestStringAux(
