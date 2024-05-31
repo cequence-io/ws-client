@@ -10,6 +10,7 @@ import io.cequence.wsclient.domain.{
   CequenceWSTimeoutException,
   CequenceWSUnknownHostException
 }
+import io.cequence.wsclient.service.RetryableService
 import io.cequence.wsclient.service.ws.MultipartWritable.writeableOf_MultipartFormData
 import play.api.libs.json.{JsObject, JsValue}
 import play.api.libs.ws.JsonBodyReadables._
@@ -29,7 +30,7 @@ import scala.concurrent.{ExecutionContext, Future}
  * @since Jan
  *   2023
  */
-protected trait WSRequestHelperBase extends HasWSClient {
+protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
 
   protected val coreUrl: String
 
@@ -485,10 +486,10 @@ protected trait WSRequestHelperBase extends HasWSClient {
       acceptableStatusCodes,
       endPointForLogging
     ).map(_ match {
-        case Left(response) =>
-          Left(responseConverter.apply(response, endPointForLogging))
-        case Right(response) =>
-          Right(response)
+      case Left(response) =>
+        Left(responseConverter.apply(response, endPointForLogging))
+      case Right(response) =>
+        Right(response)
     })
 
   private def execRequestStringAux(
@@ -575,6 +576,14 @@ protected trait WSRequestHelperBase extends HasWSClient {
   }
 
   // aux
+
+  override def isRetryable(t: Throwable): Boolean = t match {
+    // we retry on these
+    case _: CequenceWSTimeoutException => true
+
+    // otherwise don't retry
+    case _ => false
+  }
 
   protected def jsonBodyParams[T](
     params: (T, Option[Any])*
