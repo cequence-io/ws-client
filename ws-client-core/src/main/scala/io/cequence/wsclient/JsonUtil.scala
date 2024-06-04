@@ -1,6 +1,7 @@
 package io.cequence.wsclient
 
 import io.cequence.wsclient.domain.{CequenceWSException, EnumValue}
+import play.api.libs.json.JsonNaming.SnakeCase
 import play.api.libs.json.{
   Format,
   JsArray,
@@ -185,8 +186,8 @@ object JsonUtil {
     new EitherFormat[L, R](leftFormat, rightFormat)
   }
 
-  def enumFormat[T <: EnumValue](values: T*): Format[T] = {
-    val valueMap = values.map(v => v.toString -> v).toMap
+  def enumFormatAux[T <: EnumValue](values: T*)(mapper: T => String): Format[T] = {
+    val valueMap = values.map(v => mapper(v) -> v).toMap
 
     val reads: Reads[T] = Reads {
       case JsString(value) =>
@@ -197,10 +198,14 @@ object JsonUtil {
       case _ => JsError("String value expected")
     }
 
-    val writes: Writes[T] = Writes { (v: T) =>
-      JsString(v.toString)
-    }
+    val writes: Writes[T] = Writes((v: T) => JsString(mapper(v)))
 
     Format(reads, writes)
   }
+
+  def enumFormat[T <: EnumValue](values: T*): Format[T] =
+    enumFormatAux(values: _*)(_.toString)
+
+  def snakeEnumFormat[T <: EnumValue](values: T*): Format[T] =
+    enumFormatAux(values: _*)(v => SnakeCase(v.toString))
 }
