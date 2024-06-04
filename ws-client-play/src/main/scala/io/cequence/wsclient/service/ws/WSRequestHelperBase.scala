@@ -430,7 +430,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     val paramsString = paramsAsString(params)
     val url = createUrl(endPoint, endPointParam) + paramsString
 
-    addHeaders(client.url(url))
+    client.url(url)
   }
 
   protected def getWSRequestOptional(
@@ -441,7 +441,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     val paramsString = paramsOptionalAsString(params)
     val url = createUrl(endPoint, endPointParam) + paramsString
 
-    addHeaders(client.url(url))
+    client.url(url)
   }
 
   def execRequestJsonAux(
@@ -455,7 +455,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
       exec,
       acceptableStatusCodes,
       endPointForLogging
-    ).map(_ match {
+    ).map {
       case Left(response) =>
         try {
           Left(response.body[JsValue])
@@ -470,7 +470,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
             )
         }
       case Right(response) => Right(response)
-    })
+    }
 
   private def execRequestAux[T](
     responseConverter: ResponseConverters.ResponseConverter[T]
@@ -485,12 +485,12 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
       exec,
       acceptableStatusCodes,
       endPointForLogging
-    ).map(_ match {
+    ).map {
       case Left(response) =>
         Left(responseConverter.apply(response, endPointForLogging))
       case Right(response) =>
         Right(response)
-    })
+    }
 
   private def execRequestStringAux(
     request: StandaloneWSRequest,
@@ -503,10 +503,10 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
       exec,
       acceptableStatusCodes,
       endPointForLogging
-    ).map(_ match {
-      case Left(response)  => Left(response.body)
+    ).map {
+      case Left(response) => Left(response.body)
       case Right(response) => Right(response)
-    })
+    }
 
   private object ResponseConverters {
 
@@ -577,6 +577,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
 
   // aux
 
+  // TODO: no use
   override def isRetryable(t: Throwable): Boolean = t match {
     // we retry on these
     case _: CequenceWSTimeoutException => true
@@ -647,26 +648,4 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     params: Seq[(PT, Option[Any])]
   ): Seq[(String, Option[Any])] =
     params.map { case (a, b) => (a.toString, b) }
-
-  protected def addHeaders(request: StandaloneWSRequest): StandaloneWSRequest =
-    request
-
-  // close
-
-  // Create Akka system for thread and streaming management
-  //  system.registerOnTermination {
-  //    System.exit(0)
-  //  }
-  //
-  //  implicit val materializer = SystemMaterializer(system).materializer
-  //
-  //  // Create the standalone WS client
-  //  // no argument defaults to a AhcWSClientConfig created from
-  //  // "AhcWSClientConfigFactory.forConfig(ConfigFactory.load, this.getClass.getClassLoader)"
-  //  val wsClient = StandaloneAhcWSClient()
-  //
-  //  call(wsClient)
-  //    .andThen { case _ => wsClient.close() }
-  //    .andThen { case _ => system.terminate() }
-
 }
