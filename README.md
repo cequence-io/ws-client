@@ -10,7 +10,7 @@ The currently supported Scala versions are **2.12, 2.13**, and **3**.
 To install the library, add the following dependency to your *build.sbt*
 
 ```
-"io.cequence" %% "ws-client" % "0.3.0"
+"io.cequence" %% "ws-client" % "0.3.1"
 ```
 
 or to *pom.xml* (if you use maven)
@@ -19,7 +19,7 @@ or to *pom.xml* (if you use maven)
 <dependency>
     <groupId>io.cequence</groupId>
     <artifactId>ws-client_2.12</artifactId>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
 </dependency>
 ```
 
