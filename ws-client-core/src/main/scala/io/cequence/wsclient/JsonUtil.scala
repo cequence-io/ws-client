@@ -186,7 +186,7 @@ object JsonUtil {
     new EitherFormat[L, R](leftFormat, rightFormat)
   }
 
-  def enumFormatAux[T <: EnumValue](values: T*)(mapper: T => String): Format[T] = {
+  private def enumFormatAux[T](values: T*)(mapper: T => String): Format[T] = {
     val valueMap = values.map(v => mapper(v) -> v).toMap
 
     val reads: Reads[T] = Reads {
@@ -203,9 +203,9 @@ object JsonUtil {
     Format(reads, writes)
   }
 
-  def enumFormat[T <: EnumValue](values: T*): Format[T] =
+  def enumFormat[T](values: T*): Format[T] =
     enumFormatAux(values: _*)(_.toString)
 
-  def snakeEnumFormat[T <: EnumValue](values: T*): Format[T] =
+  def snakeEnumFormat[T](values: T*): Format[T] =
     enumFormatAux(values: _*)(v => SnakeCase(v.toString))
 }
