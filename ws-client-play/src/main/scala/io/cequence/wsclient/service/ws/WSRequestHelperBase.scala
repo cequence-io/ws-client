@@ -11,12 +11,14 @@ import io.cequence.wsclient.domain.{
   CequenceWSUnknownHostException
 }
 import io.cequence.wsclient.service.RetryableService
-import io.cequence.wsclient.service.ws.MultipartWritable.writeableOf_MultipartFormData
+import io.cequence.wsclient.service.ws.MultipartWritable.{
+  HttpHeaderNames,
+  writeableOf_MultipartFormData
+}
 import play.api.libs.json.{JsObject, JsValue}
 import play.api.libs.ws.JsonBodyReadables._
 import play.api.libs.ws.JsonBodyWritables._
 import play.api.libs.ws.{BodyWritable, StandaloneWSRequest}
-import play.shaded.ahc.io.netty.handler.codec.http.HttpHeaderNames
 
 import java.io.File
 import java.net.UnknownHostException
@@ -71,39 +73,103 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
-  ): Future[RichJsResponse] = {
+  ): Future[RichJsResponse] =
+    execGETWithStatusAux(
+      ResponseConverters.json,
+      endPoint,
+      endPointParam,
+      params,
+      acceptableStatusCodes
+    )
+
+  def execGETWithStatusAux[T](
+    responseConverter: ResponseConverter[T],
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse[T]] = {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
 
-    execGETJsonAux(request, Some(endPoint), acceptableStatusCodes)
+    execRequestAux(responseConverter)(
+      request,
+      _.get(),
+      acceptableStatusCodes,
+      Some(endPoint)
+    )
   }
-
-  def execGETJsonAux(
-    request: StandaloneWSRequest,
-    endPointForLogging: Option[PEP], // only for logging
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
-  ): Future[RichJsResponse] =
-    execRequestAux(ResponseConverters.json)(
-      request,
-      _.get(),
-      acceptableStatusCodes,
-      endPointForLogging
-    )
-
-  def execGETStringAux(
-    request: StandaloneWSRequest,
-    endPointForLogging: Option[PEP], // only for logging
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
-  ): Future[RichStringResponse] =
-    execRequestAux(ResponseConverters.string)(
-      request,
-      _.get(),
-      acceptableStatusCodes,
-      endPointForLogging
-    )
 
   //////////
   // POST //
   //////////
+
+  def execPOST(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil
+  ): Future[JsValue] =
+    execPOSTWithStatus(
+      endPoint,
+      endPointParam,
+      params,
+      bodyParams
+    ).map(handleErrorResponse)
+
+  def execPOSTWithStatus(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichJsResponse] = {
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
+    val bodyParamsX = bodyParams.collect { case (fieldName, Some(jsValue)) =>
+      (fieldName.toString, jsValue)
+    }
+
+    execPOSTWithStatusAux(
+      ResponseConverters.json,
+      request,
+      JsObject(bodyParamsX),
+      Some(endPoint),
+      acceptableStatusCodes
+    )
+  }
+
+  def execPOSTSource(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil
+  ): Future[Source[ByteString, _]] =
+    execPOSTSourceWithStatus(
+      endPoint,
+      endPointParam,
+      params,
+      bodyParams
+    ).map(handleErrorResponse)
+
+  def execPOSTSourceWithStatus(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichSourceResponse] = {
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
+    val bodyParamsX = bodyParams.collect { case (fieldName, Some(jsValue)) =>
+      (fieldName.toString, jsValue)
+    }
+
+    execPOSTWithStatusAux(
+      ResponseConverters.source,
+      request,
+      JsObject(bodyParamsX),
+      Some(endPoint),
+      acceptableStatusCodes
+    )
+  }
 
   /**
    * @param fileParams
@@ -177,7 +243,13 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
       "utf-8"
     )
 
-    execPOSTJsonAux(request, formData, Some(endPoint), acceptableStatusCodes)
+    execPOSTWithStatusAux(
+      ResponseConverters.json,
+      request,
+      formData,
+      Some(endPoint),
+      acceptableStatusCodes
+    )
   }
 
   /**
@@ -201,7 +273,13 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
       "utf-8"
     )
 
-    execPOSTStringAux(request, formData, Some(endPoint), acceptableStatusCodes)
+    execPOSTWithStatusAux(
+      ResponseConverters.string,
+      request,
+      formData,
+      Some(endPoint),
+      acceptableStatusCodes
+    )
   }
 
   // create a multipart form data holder contain classic data (key-value) parts as well as file parts
@@ -217,105 +295,14 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     }
   )
 
-  def execPOST(
-    endPoint: PEP,
-    endPointParam: Option[String] = None,
-    params: Seq[(PT, Option[Any])] = Nil,
-    bodyParams: Seq[(PT, Option[JsValue])] = Nil
-  ): Future[JsValue] =
-    execPOSTWithStatus(
-      endPoint,
-      endPointParam,
-      params,
-      bodyParams
-    ).map(handleErrorResponse)
-
-  def execPOSTWithStatus(
-    endPoint: PEP,
-    endPointParam: Option[String] = None,
-    params: Seq[(PT, Option[Any])] = Nil,
-    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
-  ): Future[RichJsResponse] = {
-    val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
-    val bodyParamsX = bodyParams.collect { case (fieldName, Some(jsValue)) =>
-      (fieldName.toString, jsValue)
-    }
-
-    execPOSTJsonAux(
-      request,
-      JsObject(bodyParamsX),
-      Some(endPoint),
-      acceptableStatusCodes
-    )
-  }
-
-  def execPOSTSource(
-    endPoint: PEP,
-    endPointParam: Option[String] = None,
-    params: Seq[(PT, Option[Any])] = Nil,
-    bodyParams: Seq[(PT, Option[JsValue])] = Nil
-  ): Future[Source[ByteString, _]] =
-    execPOSTSourceWithStatus(
-      endPoint,
-      endPointParam,
-      params,
-      bodyParams
-    ).map(handleErrorResponse)
-
-  def execPOSTSourceWithStatus(
-    endPoint: PEP,
-    endPointParam: Option[String] = None,
-    params: Seq[(PT, Option[Any])] = Nil,
-    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
-  ): Future[RichSourceResponse] = {
-    val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
-    val bodyParamsX = bodyParams.collect { case (fieldName, Some(jsValue)) =>
-      (fieldName.toString, jsValue)
-    }
-
-    execPOSTSourceAux(
-      request,
-      JsObject(bodyParamsX),
-      Some(endPoint),
-      acceptableStatusCodes
-    )
-  }
-
-  def execPOSTJsonAux[T: BodyWritable](
+  protected def execPOSTWithStatusAux[B: BodyWritable, T](
+    responseConverter: ResponseConverter[T],
     request: StandaloneWSRequest,
-    body: T,
+    body: B,
     endPointForLogging: Option[PEP], // only for logging
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
-  ): Future[RichJsResponse] =
-    execRequestAux(ResponseConverters.json)(
-      request,
-      _.post(body),
-      acceptableStatusCodes,
-      endPointForLogging
-    )
-
-  def execPOSTStringAux[T: BodyWritable](
-    request: StandaloneWSRequest,
-    body: T,
-    endPointForLogging: Option[PEP], // only for logging
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
-  ): Future[RichStringResponse] =
-    execRequestAux(ResponseConverters.string)(
-      request,
-      _.post(body),
-      acceptableStatusCodes,
-      endPointForLogging
-    )
-
-  def execPOSTSourceAux[T: BodyWritable](
-    request: StandaloneWSRequest,
-    body: T,
-    endPointForLogging: Option[PEP], // only for logging
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
-  ): Future[RichSourceResponse] =
-    execRequestAux(ResponseConverters.source)(
+  ): Future[RichResponse[T]] =
+    execRequestAux(responseConverter)(
       request,
       _.post(body),
       acceptableStatusCodes,
@@ -398,7 +385,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     endPointForLogging: Option[PEP], // only for logging
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ) =
-    execRequestJsonAux(
+    execRequestAux(ResponseConverters.json)(
       request,
       _.patch(body),
       acceptableStatusCodes,
@@ -411,7 +398,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     endPointForLogging: Option[PEP], // only for logging
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ) =
-    execRequestStringAux(
+    execRequestAux(ResponseConverters.string)(
       request,
       _.patch(body),
       acceptableStatusCodes,
@@ -444,36 +431,8 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     client.url(url)
   }
 
-  def execRequestJsonAux(
-    request: StandaloneWSRequest,
-    exec: StandaloneWSRequest => Future[StandaloneWSRequest#Response],
-    acceptableStatusCodes: Seq[Int] = Nil,
-    endPointForLogging: Option[PEP] = None // only for logging
-  ): Future[RichJsResponse] =
-    execRequestRaw(
-      request,
-      exec,
-      acceptableStatusCodes,
-      endPointForLogging
-    ).map {
-      case Left(response) =>
-        try {
-          Left(response.body[JsValue])
-        } catch {
-          case _: JsonParseException =>
-            throw new CequenceWSException(
-              s"${serviceAndEndpoint(endPointForLogging)}: '${response.body}' is not a JSON."
-            )
-          case _: JsonMappingException =>
-            throw new CequenceWSException(
-              s"${serviceAndEndpoint(endPointForLogging)}: '${response.body}' is an unmappable JSON."
-            )
-        }
-      case Right(response) => Right(response)
-    }
-
   private def execRequestAux[T](
-    responseConverter: ResponseConverters.ResponseConverter[T]
+    responseConverter: ResponseConverter[T]
   )(
     request: StandaloneWSRequest,
     exec: StandaloneWSRequest => Future[StandaloneWSRequest#Response],
@@ -492,28 +451,12 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
         Right(response)
     }
 
-  private def execRequestStringAux(
-    request: StandaloneWSRequest,
-    exec: StandaloneWSRequest => Future[StandaloneWSRequest#Response],
-    acceptableStatusCodes: Seq[Int] = Nil,
-    endPointForLogging: Option[PEP] = None // only for logging
-  ): Future[RichStringResponse] =
-    execRequestRaw(
-      request,
-      exec,
-      acceptableStatusCodes,
-      endPointForLogging
-    ).map {
-      case Left(response) => Left(response.body)
-      case Right(response) => Right(response)
-    }
+  type ResponseConverter[T] = (
+    StandaloneWSRequest#Response,
+    Option[PEP] // for logging
+  ) => T
 
-  private object ResponseConverters {
-
-    type ResponseConverter[T] = (
-      StandaloneWSRequest#Response,
-      Option[PEP] // for logging
-    ) => T
+  object ResponseConverters {
 
     val string: ResponseConverter[String] = {
       (
