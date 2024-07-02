@@ -7,7 +7,7 @@ ThisBuild / description := "Generic Play WebServices library"
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala212
-ThisBuild / version := "0.3.4"
+ThisBuild / version := "0.4.0"
 ThisBuild / isSnapshot := false
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala3)
 
@@ -57,14 +57,27 @@ inThisBuild(
 
 lazy val playWsVersion = settingKey[String]("Play WS version to use")
 
+lazy val playJsonVersion = settingKey[String]("Play JSON version to use")
+
 inThisBuild(
   playWsVersion := {
     scalaVersion.value match {
-      case "2.12.18" => "2.1.10"
-      case "2.13.11" => "2.2.0-M3"
+      case "2.12.18" => "2.1.10" // play json - 2.8.2
+      case "2.13.11" => "2.2.0-M3" // play json - 2.10.0-RC7
       case "3.2.2" =>
-        "2.2.0-M2" // Version "2.2.0-M3" was produced by an unstable release: Scala 3.3.0-RC3
+        "2.2.0-M2" // Version "2.2.0-M3" was produced by an unstable release: Scala 3.3.0-RC3 - // play json - 2.10.0-RC6
       case _ => "2.1.10"
+    }
+  }
+)
+
+inThisBuild(
+  playJsonVersion := {
+    scalaVersion.value match {
+      case "2.12.18" => "2.8.2"
+      case "2.13.11" => "2.10.0-RC7"
+      case "3.2.2" => "2.10.0-RC6"
+      case _ => "2.8.2"
     }
   }
 )
@@ -103,7 +116,7 @@ lazy val `ws-client-core` =
   (project in file("ws-client-core")).settings(
     name := "ws-client-core",
     libraryDependencies ++= akkaStreamLibs(scalaVersion.value),
-    libraryDependencies += "com.typesafe.play" %% "play-ws-standalone-json" % playWsVersion.value,
+    libraryDependencies += "com.typesafe.play" %% "play-json" % playJsonVersion.value,
     publish / skip := false
   )
 

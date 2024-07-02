@@ -347,7 +347,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
       PlayWsRichResponse(
         playWsResponse,
         status = StatusData(rawResponse.status, rawResponse.body),
-        headers = rawResponse.headers
+        headers = rawResponse.headers.map { case (k, v) => k -> v.toSeq }
       )
     }
   }.recover(recoverErrors(endPointForLogging))
