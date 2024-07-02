@@ -30,7 +30,7 @@ trait WSRequestHelper extends WSRequestHelperBase {
 
   // auth
 
-  override protected def getWSRequestOptional(
+  override protected[ws] def getWSRequestOptional(
     endPoint: Option[PEP],
     endPointParam: Option[String],
     params: Seq[(String, Option[Any])] = Nil
@@ -48,7 +48,7 @@ trait WSRequestHelper extends WSRequestHelperBase {
       .addHttpHeaders(requestContext.authHeaders: _*)
   }
 
-  override protected def getWSRequest(
+  override protected[ws] def getWSRequest(
     endPoint: Option[PEP],
     endPointParam: Option[String],
     params: Seq[(String, Any)] = Nil
