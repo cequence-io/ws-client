@@ -1,24 +1,15 @@
 package io.cequence.wsclient.service.ws
 
 import io.cequence.wsclient.JsonUtil.toJson
-import io.cequence.wsclient.domain.{
-  CequenceWSException,
-  CequenceWSTimeoutException,
-  CequenceWSUnknownHostException,
-  PlayWsResponse,
-  PlayWsRichResponse,
-  Response,
-  RichResponse,
-  StatusData
-}
+import io.cequence.wsclient.domain._
 import io.cequence.wsclient.service.RetryableService
-import io.cequence.wsclient.service.ws.MultipartWritable.{
+import io.cequence.wsclient.service.ws.PlayWSMultipartWritable.{
   HttpHeaderNames,
   writeableOf_MultipartFormData
 }
 import play.api.libs.json.{JsObject, JsValue}
 import play.api.libs.ws.JsonBodyWritables._
-import play.api.libs.ws.{BodyWritable, StandaloneWSRequest}
+import play.api.libs.ws.{BodyWritable, DefaultBodyWritables, StandaloneWSRequest}
 
 import java.io.File
 import java.net.UnknownHostException
@@ -32,7 +23,7 @@ import scala.concurrent.{ExecutionContext, Future}
  * @since Jan
  *   2023
  */
-protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
+protected trait WSRequestHelperBase extends HasPlayWSClient with RetryableService {
 
   protected val coreUrl: String
 
@@ -87,24 +78,24 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
-    bodyParams: Seq[(PT, Option[JsValue])] = Nil
+    jsonBodyParams: Seq[(PT, Option[JsValue])] = Nil
   ): Future[Response] =
     execPOSTRich(
       endPoint,
       endPointParam,
       params,
-      bodyParams
+      jsonBodyParams
     ).map(getResponseOrError)
 
   def execPOSTRich(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
-    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    jsonBodyParams: Seq[(PT, Option[JsValue])] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
-    val bodyParamsX = bodyParams.collect { case (fieldName, Some(jsValue)) =>
+    val bodyParamsX = jsonBodyParams.collect { case (fieldName, Some(jsValue)) =>
       (fieldName.toString, jsValue)
     }
 
@@ -164,8 +155,76 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     )
   }
 
-  // TODO: private
-  protected def execPOSTWithStatusAux[B: BodyWritable](
+  def execPOSTURLEncoded(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[Any])] = Nil
+  ): Future[Response] =
+    execPOSTURLEncodedRich(
+      endPoint,
+      endPointParam,
+      params,
+      bodyParams
+    ).map(getResponseOrError)
+
+  def execPOSTURLEncodedRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[Any])] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse] = {
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
+    val bodyData = bodyParams.collect { case (key, Some(value)) =>
+      (key.toString, value.toString)
+    }.toMap
+
+    implicit val writeable: BodyWritable[Map[String, String]] =
+      DefaultBodyWritables.writeableOf_urlEncodedSimpleForm
+
+    execPOSTWithStatusAux(
+      request,
+      bodyData,
+      Some(endPoint),
+      acceptableStatusCodes
+    )
+  }
+
+  def execPOSTFile(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(PT, Option[Any])] = Nil,
+    file: java.io.File
+  ): Future[Response] =
+    execPOSTFileRich(
+      endPoint,
+      endPointParam,
+      urlParams,
+      file
+    ).map(getResponseOrError)
+
+  def execPOSTFileRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(PT, Option[Any])] = Nil,
+    file: java.io.File,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse] = {
+    val request =
+      getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(urlParams))
+
+    implicit val writable = DefaultBodyWritables.writableOf_File
+
+    execPOSTWithStatusAux(
+      request,
+      file,
+      Some(endPoint),
+      acceptableStatusCodes
+    )
+  }
+
+  private def execPOSTWithStatusAux[B: BodyWritable](
     request: StandaloneWSRequest,
     body: B,
     endPointForLogging: Option[PEP], // only for logging
@@ -258,7 +317,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
   // PATCH //
   ////////////
 
-  protected def execPATCH(
+  def execPATCH(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -271,7 +330,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
       bodyParams
     ).map(getResponseOrError)
 
-  protected def execPATCRich(
+  def execPATCRich(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -286,8 +345,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     execPATCHAux(request, JsObject(bodyParamsX), Some(endPoint), acceptableStatusCodes)
   }
 
-  // TODO: private
-  protected def execPATCHAux[T: BodyWritable](
+  private def execPATCHAux[T: BodyWritable](
     request: StandaloneWSRequest,
     body: T,
     endPointForLogging: Option[PEP], // only for logging
@@ -310,7 +368,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     params: Seq[(String, Any)]
   ): StandaloneWSRequest = {
     val paramsString = paramsAsString(params)
-    val url = createUrl(endPoint, endPointParam) + paramsString
+    val url = createURL(endPoint, endPointParam) + paramsString
 
     client.url(url)
   }
@@ -321,7 +379,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     params: Seq[(String, Option[Any])]
   ): StandaloneWSRequest = {
     val paramsString = paramsOptionalAsString(params)
-    val url = createUrl(endPoint, endPointParam) + paramsString
+    val url = createURL(endPoint, endPointParam) + paramsString
 
     client.url(url)
   }
@@ -410,7 +468,7 @@ protected trait WSRequestHelperBase extends HasWSClient with RetryableService {
     case _ => false
   }
 
-  protected def createUrl(
+  protected def createURL(
     endpoint: Option[PEP],
     value: Option[String] = None
   ): String = {

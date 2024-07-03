@@ -11,7 +11,7 @@ import java.nio.file.Paths
  * fact that, rather then fully materializing, form data and files are concatenated as
  * sources/streams before sending out.
  */
-object MultipartWritable {
+object PlayWSMultipartWritable {
 
   object HttpHeaderNames {
     val CONTENT_DISPOSITION = "content-disposition"

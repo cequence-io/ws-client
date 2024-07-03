@@ -5,7 +5,7 @@ import io.cequence.wsclient.service.CloseableService
 import play.api.libs.ws.StandaloneWSClient
 import play.api.libs.ws.ahc.StandaloneAhcWSClient
 
-trait HasWSClient extends CloseableService {
+trait HasPlayWSClient extends CloseableService {
 
   protected implicit val materializer: Materializer
 
