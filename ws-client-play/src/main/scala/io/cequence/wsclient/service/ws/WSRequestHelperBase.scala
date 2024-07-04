@@ -7,7 +7,7 @@ import io.cequence.wsclient.service.ws.PlayWSMultipartWritable.{
   HttpHeaderNames,
   writeableOf_MultipartFormData
 }
-import play.api.libs.json.{JsObject, JsValue}
+import play.api.libs.json.{Format, JsNull, JsObject, JsValue, Json}
 import play.api.libs.ws.JsonBodyWritables._
 import play.api.libs.ws.{BodyWritable, DefaultBodyWritables, StandaloneWSRequest}
 
@@ -446,6 +446,19 @@ protected trait WSRequestHelperBase extends HasPlayWSClient with RetryableServic
     params: (T, Option[Any])*
   ): Seq[(T, Option[JsValue])] =
     params.map { case (paramName, value) => (paramName, value.map(toJson)) }
+
+  protected def jsonBodyParams[T: Format](
+    spec: T
+  ): Seq[(String, Option[JsValue])] = {
+    val json = Json.toJson(spec)
+    json.as[JsObject].value.toSeq.map { case (key, value) =>
+      val optionValue = value match {
+        case JsNull => None
+        case _      => Some(value)
+      }
+      (key, optionValue)
+    }
+  }
 
   protected def paramsAsString(params: Seq[(String, Any)]): String = {
     val string = params.map { case (tag, value) => s"$tag=$value" }.mkString("&")
