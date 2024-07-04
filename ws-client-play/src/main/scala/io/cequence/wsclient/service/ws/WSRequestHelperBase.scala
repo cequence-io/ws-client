@@ -78,24 +78,24 @@ protected trait WSRequestHelperBase extends HasPlayWSClient with RetryableServic
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
-    jsonBodyParams: Seq[(PT, Option[JsValue])] = Nil
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil
   ): Future[Response] =
     execPOSTRich(
       endPoint,
       endPointParam,
       params,
-      jsonBodyParams
+      bodyParams
     ).map(getResponseOrError)
 
   def execPOSTRich(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
-    jsonBodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, toStringParams(params))
-    val bodyParamsX = jsonBodyParams.collect { case (fieldName, Some(jsValue)) =>
+    val bodyParamsX = bodyParams.collect { case (fieldName, Some(jsValue)) =>
       (fieldName.toString, jsValue)
     }
 

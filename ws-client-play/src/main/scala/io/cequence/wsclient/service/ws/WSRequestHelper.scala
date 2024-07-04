@@ -14,11 +14,7 @@ trait WSRequestHelper extends WSRequestHelperBase {
   protected val defaultRequestTimeout: Int = 120 * 1000 // two minutes
   protected val defaultReadoutTimeout: Int = 120 * 1000 // two minutes
 
-  protected val requestContext: WsRequestContext = WsRequestContext(
-    None,
-    Nil,
-    Nil
-  )
+  protected val requestContext: WsRequestContext = WsRequestContext()
 
   override protected def timeouts: Timeouts =
     requestContext.explTimeouts.getOrElse(
