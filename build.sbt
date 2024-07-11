@@ -7,7 +7,7 @@ ThisBuild / description := "Generic Play WebServices library"
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala212
-ThisBuild / version := "0.4.2"
+ThisBuild / version := "0.5.0"
 ThisBuild / isSnapshot := false
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala3)
 
@@ -131,10 +131,10 @@ lazy val `ws-client-play` =
     .dependsOn(`ws-client-core`)
     .aggregate(`ws-client-core`)
 
-lazy val `ws-client-stream` =
-  (project in file("ws-client-stream"))
+lazy val `ws-client-play-stream` =
+  (project in file("ws-client-play-stream"))
     .settings(
-      name := "ws-client-stream",
+      name := "ws-client-play-stream",
       libraryDependencies ++= akkaStreamLibs(scalaVersion.value),
       libraryDependencies ++= playDependencies.value,
       libraryDependencies += "com.typesafe.akka" %% "akka-http" % akkaHttpVersion, // JSON WS Streaming

@@ -1,6 +1,5 @@
 package io.cequence.wsclient.service.ws
 
-// TODO: used in both, v1 and v2
 case class MultipartFormData(
   dataParts: Map[String, Seq[String]] = Map(),
   files: Seq[FilePart] = Nil

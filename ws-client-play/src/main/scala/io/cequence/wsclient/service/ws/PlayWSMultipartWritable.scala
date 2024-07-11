@@ -13,11 +13,6 @@ import java.nio.file.Paths
  */
 object PlayWSMultipartWritable {
 
-  object HttpHeaderNames {
-    val CONTENT_DISPOSITION = "content-disposition"
-    val CONTENT_TYPE = "content-type"
-  }
-
   /**
    * `Writeable` for `MultipartFormData`.
    */

@@ -2,9 +2,9 @@ package io.cequence.wsclient
 
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
+import io.cequence.wsclient.JsonUtil.JsonOps
 import io.cequence.wsclient.domain.{CequenceWSException, Response, RichResponse}
 import play.api.libs.json.Reads
-import io.cequence.wsclient.JsonUtil.JsonOps
 
 object ResponseImplicits {
 

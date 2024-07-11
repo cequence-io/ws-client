@@ -5,8 +5,8 @@ import akka.util.ByteString
 import com.fasterxml.jackson.core.JsonParseException
 import com.fasterxml.jackson.databind.JsonMappingException
 import play.api.libs.json.JsValue
-import play.api.libs.ws.StandaloneWSRequest
 import play.api.libs.ws.JsonBodyReadables._
+import play.api.libs.ws.StandaloneWSRequest
 
 case class PlayWsRichResponse(
   playWsResponse: Option[PlayWsResponse],

@@ -1,23 +1,8 @@
 package io.cequence.wsclient
 
-import io.cequence.wsclient.domain.{CequenceWSException, EnumValue}
+import io.cequence.wsclient.domain.CequenceWSException
 import play.api.libs.json.JsonNaming.SnakeCase
-import play.api.libs.json.{
-  Format,
-  JsArray,
-  JsBoolean,
-  JsError,
-  JsNull,
-  JsNumber,
-  JsObject,
-  JsResult,
-  JsString,
-  JsSuccess,
-  JsValue,
-  Json,
-  Reads,
-  Writes
-}
+import play.api.libs.json.{Format, JsArray, JsBoolean, JsError, JsNull, JsNumber, JsObject, JsResult, JsString, JsSuccess, JsValue, Json, Reads, Writes}
 
 import java.util.Date
 import java.{util => ju}
