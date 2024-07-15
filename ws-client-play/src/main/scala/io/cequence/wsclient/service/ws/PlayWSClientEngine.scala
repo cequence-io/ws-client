@@ -377,7 +377,7 @@ object PlayWSClientEngine {
   ) extends PlayWSClientEngine
 
   private def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
-    serviceEndPointName: String =>
+    (serviceEndPointName: String) =>
     {
       case e: TimeoutException =>
         throw new CequenceWSTimeoutException(
