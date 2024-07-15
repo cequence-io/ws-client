@@ -1,5 +1,7 @@
 package io.cequence.wsclient.service
 
+import akka.stream.scaladsl.Source
+import akka.util.ByteString
 import io.cequence.wsclient.JsonUtil.toJson
 import io.cequence.wsclient.domain._
 import io.cequence.wsclient.service.ws.FilePart
@@ -139,6 +141,27 @@ trait WSClient extends WSClientBase {
     endPointParam: Option[String] = None,
     urlParams: Seq[(PT, Option[Any])] = Nil,
     file: java.io.File,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse]
+
+  def execPOSTSource(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(PT, Option[Any])] = Nil,
+    source: Source[ByteString, _]
+  ): Future[Response] =
+    execPOSTSourceRich(
+      endPoint,
+      endPointParam,
+      urlParams,
+      source
+    ).map(getResponseOrError)
+
+  def execPOSTSourceRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(PT, Option[Any])] = Nil,
+    source: Source[ByteString, _],
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
 

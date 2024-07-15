@@ -11,6 +11,7 @@ import io.cequence.wsclient.domain.{
   CequenceWSException,
   CequenceWSTimeoutException,
   CequenceWSUnknownHostException,
+  RichResponse,
   WsRequestContext
 }
 import io.cequence.wsclient.service.{WSClientEngine, WSClientEngineStreamExtra}
@@ -150,20 +151,37 @@ private trait PlayWSStreamClientEngine
 }
 
 object PlayWSStreamClientEngine {
+
   def apply(
     coreUrl: String,
-    requestContext: WsRequestContext = WsRequestContext()
+    requestContext: WsRequestContext = WsRequestContext(),
+    recoverErrors: String => PartialFunction[Throwable, RichResponse] = defaultRecoverErrors
   )(
     implicit materializer: Materializer,
     ec: ExecutionContext
   ): WSClientEngine with WSClientEngineStreamExtra =
-    new PlayWSStreamClientEngineImpl(coreUrl, requestContext)
+    new PlayWSStreamClientEngineImpl(coreUrl, requestContext, recoverErrors)
 
   private final class PlayWSStreamClientEngineImpl(
     override protected val coreUrl: String,
-    override protected val requestContext: WsRequestContext
+    override protected val requestContext: WsRequestContext,
+    override protected val recoverErrors: String => PartialFunction[Throwable, RichResponse]
   )(
     override protected implicit val materializer: Materializer,
     override protected implicit val ec: ExecutionContext
   ) extends PlayWSStreamClientEngine
+
+  private def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
+    serviceEndPointName: String =>
+      {
+        case e: TimeoutException =>
+          throw new CequenceWSTimeoutException(
+            s"${serviceEndPointName} timed out: ${e.getMessage}."
+          )
+        case e: UnknownHostException =>
+          throw new CequenceWSUnknownHostException(
+            s"${serviceEndPointName} cannot resolve a host name: ${e.getMessage}."
+          )
+      }
+  }
 }

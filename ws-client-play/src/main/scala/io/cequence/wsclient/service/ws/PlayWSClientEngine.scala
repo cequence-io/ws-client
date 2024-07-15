@@ -1,6 +1,8 @@
 package io.cequence.wsclient.service.ws
 
 import akka.stream.Materializer
+import akka.stream.scaladsl.Source
+import akka.util.ByteString
 import io.cequence.wsclient.domain._
 import io.cequence.wsclient.service.WSClientEngine
 import io.cequence.wsclient.service.ws.PlayWSMultipartWritable.writeableOf_MultipartFormData
@@ -20,7 +22,7 @@ import scala.concurrent.{ExecutionContext, Future}
  * @since Jan
  *   2023
  */
-private trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
+protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
 
   protected val defaultRequestTimeout: Int = 120 * 1000 // two minutes
   protected val defaultReadoutTimeout: Int = 120 * 1000 // two minutes
@@ -143,6 +145,26 @@ private trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     execPOSTWithStatusAux(
       request,
       file,
+      Some(endPoint),
+      acceptableStatusCodes
+    )
+  }
+
+  override def execPOSTSourceRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(PT, Option[Any])] = Nil,
+    source: Source[ByteString, _],
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse] = {
+    val request =
+      getWSRequestOptional(Some(endPoint), endPointParam, urlParams)
+
+    implicit val writable = DefaultBodyWritables.writableOf_Source
+
+    execPOSTWithStatusAux(
+      request,
+      source,
       Some(endPoint),
       acceptableStatusCodes
     )
@@ -283,22 +305,10 @@ private trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
         headers = rawResponse.headers.map { case (k, v) => k -> v.toSeq }
       )
     }
-  }.recover(recoverErrors(endPointForLogging))
+  }.recover(recoverErrors(serviceAndEndpoint(endPointForLogging)))
 
   // error handling
-
-  // TOOD
-  protected def recoverErrors(endPointForLogging: Option[String] = None)
-    : PartialFunction[Throwable, RichResponse] = {
-    case e: TimeoutException =>
-      throw new CequenceWSTimeoutException(
-        s"${serviceAndEndpoint(endPointForLogging)} timed out: ${e.getMessage}."
-      )
-    case e: UnknownHostException =>
-      throw new CequenceWSUnknownHostException(
-        s"${serviceAndEndpoint(endPointForLogging)} cannot resolve a host name: ${e.getMessage}."
-      )
-  }
+  protected def recoverErrors: String => PartialFunction[Throwable, RichResponse]
 
   // aux
 
@@ -318,9 +328,9 @@ private trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     endpoint: Option[String],
     value: Option[String] = None
   ): String = {
-    val slash = if (coreUrl.endsWith("/")) "" else "/"
     val endpointString = endpoint.getOrElse("")
     val valueString = value.map("/" + _).getOrElse("")
+    val slash = if (coreUrl.endsWith("/") || (endpointString.isEmpty && valueString.isEmpty)) "" else "/"
 
     coreUrl + slash + endpointString + valueString
   }
@@ -350,17 +360,33 @@ private trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
 object PlayWSClientEngine {
   def apply(
     coreUrl: String,
-    requestContext: WsRequestContext = WsRequestContext()
+    requestContext: WsRequestContext = WsRequestContext(),
+    recoverErrors: String => PartialFunction[Throwable, RichResponse] = defaultRecoverErrors
   )(
     implicit materializer: Materializer,
     ec: ExecutionContext
-  ): WSClientEngine = new PlayWSClientEngineImpl(coreUrl, requestContext)
+  ): WSClientEngine = new PlayWSClientEngineImpl(coreUrl, requestContext, recoverErrors)
 
   private final class PlayWSClientEngineImpl(
     override protected val coreUrl: String,
-    override protected val requestContext: WsRequestContext
+    override protected val requestContext: WsRequestContext,
+    override protected val recoverErrors: String => PartialFunction[Throwable, RichResponse]
   )(
     override protected implicit val materializer: Materializer,
     override protected implicit val ec: ExecutionContext
   ) extends PlayWSClientEngine
+
+  private def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
+    serviceEndPointName: String =>
+    {
+      case e: TimeoutException =>
+        throw new CequenceWSTimeoutException(
+          s"${serviceEndPointName} timed out: ${e.getMessage}."
+        )
+      case e: UnknownHostException =>
+        throw new CequenceWSUnknownHostException(
+          s"${serviceEndPointName} cannot resolve a host name: ${e.getMessage}."
+        )
+    }
+  }
 }

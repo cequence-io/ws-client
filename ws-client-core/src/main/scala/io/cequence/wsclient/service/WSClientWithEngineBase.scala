@@ -1,5 +1,7 @@
 package io.cequence.wsclient.service
 
+import akka.stream.scaladsl.Source
+import akka.util.ByteString
 import io.cequence.wsclient.domain._
 import io.cequence.wsclient.service.ws.FilePart
 import play.api.libs.json._
@@ -101,6 +103,21 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       endPointParam,
       paramTuplesToStrings(urlParams),
       file,
+      acceptableStatusCodes
+    )
+
+  override def execPOSTSourceRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(PT, Option[Any])] = Nil,
+    source: Source[ByteString, _],
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse] =
+    engine.execPOSTSourceRich(
+      endPoint.toString,
+      endPointParam,
+      paramTuplesToStrings(urlParams),
+      source,
       acceptableStatusCodes
     )
 
