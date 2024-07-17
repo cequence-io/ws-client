@@ -1,15 +1,17 @@
+import sbt.Keys.scalaVersion
+
 // Supported versions
 val scala212 = "2.12.18"
 val scala213 = "2.13.11"
-val scala3 = "3.2.2"
+val scala32 = "3.2.2"
 
-ThisBuild / description := "Generic Play WebServices library"
+ThisBuild / description := "Generic WebServices library currently only with Play WS impl./backend"
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala212
-ThisBuild / version := "0.5.1"
+ThisBuild / version := "0.5.2"
 ThisBuild / isSnapshot := false
-ThisBuild / crossScalaVersions := List(scala212, scala213, scala3)
+ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 
 // POM settings for Sonatype
 ThisBuild / homepage := Some(
@@ -55,37 +57,23 @@ inThisBuild(
   )
 )
 
-lazy val playWsVersion = settingKey[String]("Play WS version to use")
-
+// JSON
 lazy val playJsonVersion = settingKey[String]("Play JSON version to use")
-
-inThisBuild(
-  playWsVersion := {
-    scalaVersion.value match {
-      case "2.12.18" => "2.1.10" // play json - 2.8.2
-      case "2.13.11" => "2.2.0-M3" // play json - 2.10.0-RC7
-      case "3.2.2" =>
-        "2.2.0-M2" // Version "2.2.0-M3" was produced by an unstable release: Scala 3.3.0-RC3 - // play json - 2.10.0-RC6
-      case _ => "2.1.10"
-    }
-  }
-)
 
 inThisBuild(
   playJsonVersion := {
     scalaVersion.value match {
       case "2.12.18" => "2.8.2"
       case "2.13.11" => "2.10.0-RC7"
-      case "3.2.2" => "2.10.0-RC6"
-      case _ => "2.8.2"
+      case "3.2.2"   => "2.10.0-RC6"
+      case _         => "2.8.2"
     }
   }
 )
 
-val akkaHttpVersion = "10.5.0-M1" // TODO: migrate to 10.5.1
-
-def akkaStreamLibs(scalaVersion: String): Seq[ModuleID] = {
-  CrossVersion.partialVersion(scalaVersion) match {
+// Akka
+lazy val akkaStreamLibs = Def.setting {
+  CrossVersion.partialVersion(scalaVersion.value) match {
     case Some((2, 12)) =>
       Seq(
         "com.typesafe.akka" %% "akka-stream" % "2.6.1"
@@ -105,17 +93,48 @@ def akkaStreamLibs(scalaVersion: String): Seq[ModuleID] = {
   }
 }
 
-lazy val playDependencies = Def.setting {
-  Seq(
-    "com.typesafe.play" %% "play-ahc-ws-standalone" % playWsVersion.value,
-    "com.typesafe.play" %% "play-ws-standalone-json" % playWsVersion.value
-  )
+val akkaHttpVersion = "10.5.0-M1" // TODO: migrate to 10.5.1
+
+// Play WS
+
+def typesafePlayWS(version: String) = Seq(
+  "com.typesafe.play" %% "play-ahc-ws-standalone" % version,
+  "com.typesafe.play" %% "play-ws-standalone-json" % version
+)
+
+def orgPlayWS(version: String) = Seq(
+  "org.playframework" %% "play-ahc-ws-standalone" % version,
+  "org.playframework" %% "play-ws-standalone-json" % version
+)
+
+lazy val playWsDependencies = Def.setting {
+  CrossVersion.partialVersion(scalaVersion.value) match {
+    case Some((2, 12)) =>
+      // play json - 2.8.2
+      typesafePlayWS("2.1.10")
+
+    case Some((2, 13)) =>
+      // play json - 2.10.0-RC7
+      typesafePlayWS("2.2.0-M3")
+
+    case Some((3, 2)) =>
+      // Version "2.2.0-M3" was produced by an unstable release: Scala 3.3.0-RC3 - // play json - 2.10.0-RC6
+      typesafePlayWS("2.2.0-M2")
+
+    case Some((3, 3)) =>
+      // needs some work because of the akka -> pekko migration (https://pekko.apache.org/docs/pekko/current/project/migration-guides.html)
+      orgPlayWS("3.0.0")
+
+    // failover to the latest version
+    case _ =>
+      orgPlayWS("3.0.0")
+  }
 }
 
 lazy val `ws-client-core` =
   (project in file("ws-client-core")).settings(
     name := "ws-client-core",
-    libraryDependencies ++= akkaStreamLibs(scalaVersion.value),
+    libraryDependencies ++= akkaStreamLibs.value,
     libraryDependencies += "com.typesafe.play" %% "play-json" % playJsonVersion.value,
     publish / skip := false
   )
@@ -124,8 +143,8 @@ lazy val `ws-client-play` =
   (project in file("ws-client-play"))
     .settings(
       name := "ws-client-play",
-      libraryDependencies ++= akkaStreamLibs(scalaVersion.value),
-      libraryDependencies ++= playDependencies.value,
+      libraryDependencies ++= akkaStreamLibs.value,
+      libraryDependencies ++= playWsDependencies.value,
       publish / skip := false
     )
     .dependsOn(`ws-client-core`)
@@ -135,8 +154,8 @@ lazy val `ws-client-play-stream` =
   (project in file("ws-client-play-stream"))
     .settings(
       name := "ws-client-play-stream",
-      libraryDependencies ++= akkaStreamLibs(scalaVersion.value),
-      libraryDependencies ++= playDependencies.value,
+      libraryDependencies ++= akkaStreamLibs.value,
+      libraryDependencies ++= playWsDependencies.value,
       libraryDependencies += "com.typesafe.akka" %% "akka-http" % akkaHttpVersion, // JSON WS Streaming
       publish / skip := false
     )
