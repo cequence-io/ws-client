@@ -16,7 +16,7 @@ import io.cequence.wsclient.domain.{
 }
 import io.cequence.wsclient.service.{WSClientEngine, WSClientEngineStreamExtra}
 import io.cequence.wsclient.service.ws.PlayWSClientEngine
-import org.slf4j.{Logger, LoggerFactory}
+import org.slf4j.LoggerFactory
 import play.api.libs.json.{JsObject, JsString, JsValue, Json}
 import play.api.libs.ws.JsonBodyWritables._
 
@@ -38,7 +38,7 @@ private trait PlayWSStreamClientEngine
 
   private val itemPrefix = "data: "
   private val endOfStreamToken = "[DONE]"
-  protected val maxFrameLength = 1000
+  protected val maxFrameLength = 5000
 
   private implicit val jsonMarshaller: Unmarshaller[ByteString, JsValue] =
     Unmarshaller.strict[ByteString, JsValue] { byteString =>
@@ -83,13 +83,25 @@ private trait PlayWSStreamClientEngine
       Framing.delimiter(ByteString("\n\n"), maxFrameLength, allowTruncation = true),
       {
         case e: JsonParseException =>
-          throw new CequenceWSException(
-            s"${serviceAndEndpoint(Some(endPoint))}: 'Response is not a JSON. ${e.getMessage}."
-          )
+          val message = s"${serviceAndEndpoint(Some(endPoint))}: Response is not a JSON. ${e.getMessage}."
+          logger.error(message)
+          throw new CequenceWSException(message)
         case e: FramingException =>
-          throw new CequenceWSException(
-            s"${serviceAndEndpoint(Some(endPoint))}: 'Response is not a JSON. ${e.getMessage}."
-          )
+          val message = s"${serviceAndEndpoint(Some(endPoint))}: Stream framing problem occurred. ${e.getMessage}."
+          logger.error(message)
+          throw new CequenceWSException(message)
+        case e: TimeoutException =>
+          val message = s"${serviceAndEndpoint(Some(endPoint))}: Time out. ${e.getMessage}."
+          logger.error(message)
+          throw new CequenceWSTimeoutException(message)
+        case e: UnknownHostException =>
+          val message = s"${serviceAndEndpoint(Some(endPoint))}: Host name cannot be resolved. ${e.getMessage}."
+          logger.error(message)
+          throw new CequenceWSUnknownHostException(message)
+        case e: Throwable =>
+          val message = s"${serviceAndEndpoint(Some(endPoint))}: Fatal problem! ${e.getMessage}."
+          logger.error(message)
+          throw new CequenceWSException(message)
       }
     )
 
@@ -112,9 +124,7 @@ private trait PlayWSStreamClientEngine
     val request = getWSRequestOptional(Some(endPoint), endPointParam, params)
 
     val requestWithBody = if (bodyParams.nonEmpty) {
-      val bodyParamsX = bodyParams.collect { case (fieldName, Some(jsValue)) =>
-        (fieldName.toString, jsValue)
-      }
+      val bodyParamsX = bodyParams.collect { case (fieldName, Some(jsValue)) => (fieldName, jsValue) }
       request.withBody(JsObject(bodyParamsX))
     } else
       request
@@ -124,21 +134,11 @@ private trait PlayWSStreamClientEngine
         response.bodyAsSource
           .via(framing)
           .mapAsync(1)(bytes => Unmarshal(bytes).to[T]) // unmarshal one by one
-          .recover {
-            case e: TimeoutException =>
-              throw new CequenceWSTimeoutException(
-                s"${serviceAndEndpoint(Some(endPoint))} timed out: ${e.getMessage}."
-              )
-            case e: UnknownHostException =>
-              throw new CequenceWSUnknownHostException(
-                s"${serviceAndEndpoint(Some(endPoint))} cannot resolve a host name: ${e.getMessage}."
-              )
-          }
-          .recover(recoverBlock) // extra recover
+          .recover(recoverBlock)
       }
 
     Source
-      .fromFutureSource(source)
+      .futureSource(source)
       .log(s"${serviceAndEndpoint(Some(endPoint))}: execStreamRequestAux failed")
       .recover { case e: Throwable =>
         logger.error(
