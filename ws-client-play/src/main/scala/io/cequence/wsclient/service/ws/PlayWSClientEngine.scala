@@ -251,6 +251,41 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
       endPointForLogging
     )
 
+  /////////
+  // PUT //
+  /////////
+
+  override def execPUTRich(
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    bodyParams: Seq[(String, Option[JsValue])] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse] = {
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, params)
+    val jsonFields = toJsonFields(bodyParams)
+
+    execPUTAux(
+      request,
+      JsObject(jsonFields),
+      Some(endPoint),
+      acceptableStatusCodes
+    )
+  }
+
+  private def execPUTAux[T: BodyWritable](
+    request: StandaloneWSRequest,
+    body: T,
+    endPointForLogging: Option[String], // only for logging
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ) =
+    execRequestAux(
+      request,
+      _.put(body),
+      acceptableStatusCodes,
+      endPointForLogging
+    )
+
   ////////////////
   // WS Request //
   ////////////////
@@ -330,7 +365,8 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
   ): String = {
     val endpointString = endpoint.getOrElse("")
     val valueString = value.map("/" + _).getOrElse("")
-    val slash = if (coreUrl.endsWith("/") || (endpointString.isEmpty && valueString.isEmpty)) "" else "/"
+    val slash =
+      if (coreUrl.endsWith("/") || (endpointString.isEmpty && valueString.isEmpty)) "" else "/"
 
     coreUrl + slash + endpointString + valueString
   }
@@ -378,15 +414,15 @@ object PlayWSClientEngine {
 
   private def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
     (serviceEndPointName: String) =>
-    {
-      case e: TimeoutException =>
-        throw new CequenceWSTimeoutException(
-          s"${serviceEndPointName} timed out: ${e.getMessage}."
-        )
-      case e: UnknownHostException =>
-        throw new CequenceWSUnknownHostException(
-          s"${serviceEndPointName} cannot resolve a host name: ${e.getMessage}."
-        )
-    }
+      {
+        case e: TimeoutException =>
+          throw new CequenceWSTimeoutException(
+            s"${serviceEndPointName} timed out: ${e.getMessage}."
+          )
+        case e: UnknownHostException =>
+          throw new CequenceWSUnknownHostException(
+            s"${serviceEndPointName} cannot resolve a host name: ${e.getMessage}."
+          )
+      }
   }
 }

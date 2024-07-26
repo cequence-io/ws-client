@@ -125,7 +125,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
   // DELETE //
   ////////////
 
-  def execDELETERich(
+  override def execDELETERich(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -142,7 +142,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
   // PATCH //
   ////////////
 
-  def execPATCRich(
+  override def execPATCRich(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -150,6 +150,25 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPATCRich(
+      endPoint.toString,
+      endPointParam,
+      paramTuplesToStrings(params),
+      paramTuplesToStrings(bodyParams),
+      acceptableStatusCodes
+    )
+
+  /////////
+  // PUT //
+  /////////
+
+  override def execPUTRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse] =
+    engine.execPUTRich(
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),

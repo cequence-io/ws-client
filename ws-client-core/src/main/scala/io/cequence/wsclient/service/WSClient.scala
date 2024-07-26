@@ -212,6 +212,31 @@ trait WSClient extends WSClientBase {
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
 
+  ////////////
+  // PUT //
+  ////////////
+
+  def execPUT(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil
+  ): Future[Response] =
+    execPUTRich(
+      endPoint,
+      endPointParam,
+      params,
+      bodyParams
+    ).map(getResponseOrError)
+
+  def execPUTRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse]
+
   // AUX
 
   protected def jsonBodyParams[T](

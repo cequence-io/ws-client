@@ -9,7 +9,7 @@ ThisBuild / description := "Generic WebServices library currently only with Play
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala212
-ThisBuild / version := "0.5.4"
+ThisBuild / version := "0.5.5"
 ThisBuild / isSnapshot := false
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 
