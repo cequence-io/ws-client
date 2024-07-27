@@ -137,8 +137,9 @@ private trait PlayWSStreamClientEngine
           .recover(recoverBlock)
       }
 
+    // keep it like this because of older version of akka-stream (futureSource vs fromFutureSource)
     Source
-      .futureSource(source)
+      .fromFutureSource(source)
       .log(s"${serviceAndEndpoint(Some(endPoint))}: execStreamRequestAux failed")
       .recover { case e: Throwable =>
         logger.error(
