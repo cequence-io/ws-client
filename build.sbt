@@ -9,7 +9,7 @@ ThisBuild / description := "Generic WebServices library currently only with Play
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala212
-ThisBuild / version := "0.5.6"
+ThisBuild / version := "0.5.7"
 ThisBuild / isSnapshot := false
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 
@@ -93,6 +93,13 @@ lazy val akkaStreamLibs = Def.setting {
   }
 }
 
+val loggingLibs = Def.setting {
+  Seq(
+    "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
+    "ch.qos.logback" % "logback-classic" % "1.4.14" // requires JDK11, in order to use JDK8 switch to 1.3.5
+  )
+}
+
 val akkaHttpVersion = "10.5.0-M1" // TODO: migrate to 10.5.1
 
 // Play WS
@@ -143,7 +150,6 @@ lazy val `ws-client-play` =
   (project in file("ws-client-play"))
     .settings(
       name := "ws-client-play",
-      libraryDependencies ++= akkaStreamLibs.value,
       libraryDependencies ++= playWsDependencies.value,
       publish / skip := false
     )
@@ -154,9 +160,8 @@ lazy val `ws-client-play-stream` =
   (project in file("ws-client-play-stream"))
     .settings(
       name := "ws-client-play-stream",
-      libraryDependencies ++= akkaStreamLibs.value,
-      libraryDependencies ++= playWsDependencies.value,
       libraryDependencies += "com.typesafe.akka" %% "akka-http" % akkaHttpVersion, // JSON WS Streaming
+      libraryDependencies ++= loggingLibs.value,
       publish / skip := false
     )
     .dependsOn(`ws-client-core`, `ws-client-play`)

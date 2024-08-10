@@ -34,7 +34,7 @@ private trait PlayWSStreamClientEngine
     extends PlayWSClientEngine
     with WSClientEngineStreamExtra {
 
-  private val logger = LoggerFactory.getLogger(this.getClass)
+  private val logger = LoggerFactory.getLogger("PlayWSStreamClientEngine")
 
   private val itemPrefix = "data: "
   private val endOfStreamToken = "[DONE]"
@@ -43,6 +43,8 @@ private trait PlayWSStreamClientEngine
   private implicit val jsonMarshaller: Unmarshaller[ByteString, JsValue] =
     Unmarshaller.strict[ByteString, JsValue] { byteString =>
       val string = byteString.utf8String
+
+      logger.debug(s"Unmarshalling JSON: $string")
 
       try {
         val itemStartIndex = string.indexOf(itemPrefix)
