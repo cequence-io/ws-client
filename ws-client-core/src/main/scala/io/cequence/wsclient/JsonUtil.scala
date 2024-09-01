@@ -2,7 +2,7 @@ package io.cequence.wsclient
 
 import io.cequence.wsclient.domain.CequenceWSException
 import play.api.libs.json.JsonNaming.SnakeCase
-import play.api.libs.json.{Format, JsArray, JsBoolean, JsError, JsNull, JsNumber, JsObject, JsResult, JsString, JsSuccess, JsValue, Json, Reads, Writes}
+import play.api.libs.json._
 
 import java.util.Date
 import java.{util => ju}
@@ -126,7 +126,11 @@ object JsonUtil {
     override def reads(json: JsValue): JsResult[Map[String, Any]] = {
       val resultJsons =
         json.asSafe[JsObject].fields.map { case (fieldName, jsValue) =>
-          (fieldName, jsValue.toString)
+          val stringValue = jsValue match {
+            case JsString(s) => s
+            case _           => jsValue.toString()
+          }
+          (fieldName, stringValue)
         }
       JsSuccess(resultJsons.toMap)
     }
