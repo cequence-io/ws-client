@@ -88,6 +88,25 @@ object JsonUtil {
           )
       }
 
+  def toValue(jsValue: JsValue): Option[Any] =
+    jsValue match {
+      case JsNull           => None
+      case JsString(value)  => Some(value)
+      case JsNumber(value)  => Some(value)
+      case JsBoolean(value) => Some(value)
+      case JsArray(value) =>
+        val seq = value.seq.map(toValue)
+        Some(seq)
+
+      case jsObject: JsObject =>
+        Some(toValueMap(jsObject))
+    }
+
+  def toValueMap(jsObject: JsObject): Map[String, Option[Any]] =
+    jsObject.value.map { case (fieldName, jsValue) =>
+      (fieldName, toValue(jsValue))
+    }.toMap
+
   object StringDoubleMapFormat extends Format[Map[String, Double]] {
     override def reads(json: JsValue): JsResult[Map[String, Double]] = {
       val resultJsons =
