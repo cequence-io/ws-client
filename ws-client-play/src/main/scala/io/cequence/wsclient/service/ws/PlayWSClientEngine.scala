@@ -66,9 +66,10 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     endPointParam: Option[String] = None,
     params: Seq[(String, Option[Any])] = Nil,
     bodyParams: Seq[(String, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
-    val request = getWSRequestOptional(Some(endPoint), endPointParam, params)
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
 
     execPOSTWithStatusAux(
       request,
@@ -293,7 +294,8 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
   protected[ws] def getWSRequestOptional(
     endPoint: Option[String],
     endPointParam: Option[String],
-    params: Seq[(String, Option[Any])] = Nil
+    params: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil
   ): StandaloneWSRequest#Self = {
     val extraStringParams = requestContext.extraParams.map { case (tag, value) =>
       (tag, Some(value))
@@ -301,19 +303,9 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     val paramsString = paramsOptionalAsString(params ++ extraStringParams)
     val url = createURL(endPoint, endPointParam) + paramsString
 
-    client.url(url).addHttpHeaders(requestContext.authHeaders: _*)
-  }
-
-  // TODO: remove
-  protected[ws] def getWSRequest(
-    endPoint: Option[String],
-    endPointParam: Option[String],
-    params: Seq[(String, Any)] = Nil
-  ): StandaloneWSRequest#Self = {
-    val paramsString = paramsAsString(params ++ requestContext.extraParams)
-    val url = createURL(endPoint, endPointParam) + paramsString
-
-    client.url(url).addHttpHeaders(requestContext.authHeaders: _*)
+    client.url(url).addHttpHeaders(
+      (requestContext.authHeaders ++ extraHeaders): _*
+    )
   }
 
   private def execRequestAux(

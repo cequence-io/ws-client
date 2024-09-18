@@ -51,13 +51,15 @@ trait WSClient extends WSClientBase {
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
-    bodyParams: Seq[(PT, Option[JsValue])] = Nil
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
   ): Future[Response] =
     execPOSTRich(
       endPoint,
       endPointParam,
       params,
-      bodyParams
+      bodyParams,
+      extraHeaders
     ).map(getResponseOrError)
 
   def execPOSTRich(
@@ -65,6 +67,7 @@ trait WSClient extends WSClientBase {
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
 

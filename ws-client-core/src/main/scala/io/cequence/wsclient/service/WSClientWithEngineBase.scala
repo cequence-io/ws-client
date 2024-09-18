@@ -43,6 +43,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPOSTRich(
@@ -50,6 +51,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       endPointParam,
       paramTuplesToStrings(params),
       paramTuplesToStrings(bodyParams),
+      extraHeaders,
       acceptableStatusCodes
     )
 
