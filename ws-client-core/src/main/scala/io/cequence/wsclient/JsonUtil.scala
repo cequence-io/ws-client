@@ -3,6 +3,7 @@ package io.cequence.wsclient
 import io.cequence.wsclient.domain.CequenceWSException
 import play.api.libs.json.JsonNaming.SnakeCase
 import play.api.libs.json._
+import scala.collection.mutable.{Seq => MutableSeq}
 
 import java.util.Date
 import java.{util => ju}
@@ -65,18 +66,19 @@ object JsonUtil {
       JsNull
     else
       value match {
-        case x: JsValue    => x // nothing to do
-        case x: String     => JsString(x)
-        case x: BigDecimal => JsNumber(x)
-        case x: Integer    => JsNumber(BigDecimal.valueOf(x.toLong))
-        case x: Long       => JsNumber(BigDecimal.valueOf(x))
-        case x: Double     => JsNumber(BigDecimal.valueOf(x))
-        case x: Float      => JsNumber(BigDecimal.valueOf(x.toDouble))
-        case x: Boolean    => JsBoolean(x)
-        case x: ju.Date    => Json.toJson(x)
-        case x: Option[_]  => x.map(toJson).getOrElse(JsNull)
-        case x: Array[_]   => JsArray(x.map(toJson))
-        case x: Seq[_]     => JsArray(x.map(toJson))
+        case x: JsValue       => x // nothing to do
+        case x: String        => JsString(x)
+        case x: BigDecimal    => JsNumber(x)
+        case x: Integer       => JsNumber(BigDecimal.valueOf(x.toLong))
+        case x: Long          => JsNumber(BigDecimal.valueOf(x))
+        case x: Double        => JsNumber(BigDecimal.valueOf(x))
+        case x: Float         => JsNumber(BigDecimal.valueOf(x.toDouble))
+        case x: Boolean       => JsBoolean(x)
+        case x: ju.Date       => Json.toJson(x)
+        case x: Option[_]     => x.map(toJson).getOrElse(JsNull)
+        case x: Array[_]      => JsArray(x.map(toJson))
+        case x: Seq[_]        => JsArray(x.map(toJson))
+        case x: MutableSeq[_] => JsArray(x.map(toJson))
         case x: Map[String, _] =>
           val jsonValues = x.map { case (fieldName, value) =>
             (fieldName, toJson(value))
@@ -95,7 +97,7 @@ object JsonUtil {
       case JsNumber(value)  => Some(value)
       case JsBoolean(value) => Some(value)
       case JsArray(value) =>
-        val seq = value.seq.map(toValue)
+        val seq = value.toSeq.map(toValue)
         Some(seq)
 
       case jsObject: JsObject =>
