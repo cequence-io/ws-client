@@ -218,4 +218,22 @@ object JsonUtil {
 
   def snakeEnumFormat[T](values: T*): Format[T] =
     enumFormatAux(values: _*)(v => SnakeCase(v.toString))
+
+  def jsonBodyParams[T](
+    params: (T, Option[Any])*
+  ): Seq[(T, Option[JsValue])] =
+    params.map { case (paramName, value) => (paramName, value.map(toJson)) }
+
+  def jsonBodyParams[T: Format](
+    spec: T
+  ): Seq[(String, Option[JsValue])] = {
+    val json = Json.toJson(spec)
+    json.as[JsObject].value.toSeq.map { case (key, value) =>
+      val optionValue = value match {
+        case JsNull => None
+        case _      => Some(value)
+      }
+      (key, optionValue)
+    }
+  }
 }

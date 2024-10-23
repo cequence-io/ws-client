@@ -2,7 +2,7 @@ package io.cequence.wsclient.service
 
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
-import io.cequence.wsclient.JsonUtil.toJson
+import io.cequence.wsclient.JsonUtil
 import io.cequence.wsclient.domain._
 import io.cequence.wsclient.service.ws.FilePart
 import play.api.libs.json._
@@ -52,7 +52,7 @@ trait WSClient extends WSClientBase {
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     bodyParams: Seq[(PT, Option[JsValue])] = Nil,
-    extraHeaders: Seq[(String, String)] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil
   ): Future[Response] =
     execPOSTRich(
       endPoint,
@@ -245,18 +245,10 @@ trait WSClient extends WSClientBase {
   protected def jsonBodyParams[T](
     params: (T, Option[Any])*
   ): Seq[(T, Option[JsValue])] =
-    params.map { case (paramName, value) => (paramName, value.map(toJson)) }
+    JsonUtil.jsonBodyParams(params: _*)
 
   protected def jsonBodyParams[T: Format](
     spec: T
-  ): Seq[(String, Option[JsValue])] = {
-    val json = Json.toJson(spec)
-    json.as[JsObject].value.toSeq.map { case (key, value) =>
-      val optionValue = value match {
-        case JsNull => None
-        case _      => Some(value)
-      }
-      (key, optionValue)
-    }
-  }
+  ): Seq[(String, Option[JsValue])] =
+    JsonUtil.jsonBodyParams(spec)
 }
