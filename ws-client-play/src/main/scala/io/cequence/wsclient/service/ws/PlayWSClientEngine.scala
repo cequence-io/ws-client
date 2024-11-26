@@ -393,16 +393,27 @@ object PlayWSClientEngine {
   )(
     implicit materializer: Materializer,
     ec: ExecutionContext
+  ): WSClientEngine = withContextFun(coreUrl, () => requestContext, recoverErrors)
+
+  def withContextFun(
+    coreUrl: String,
+    requestContext: () => WsRequestContext,
+    recoverErrors: String => PartialFunction[Throwable, RichResponse] = defaultRecoverErrors
+  )(
+    implicit materializer: Materializer,
+    ec: ExecutionContext
   ): WSClientEngine = new PlayWSClientEngineImpl(coreUrl, requestContext, recoverErrors)
 
   private final class PlayWSClientEngineImpl(
     override protected val coreUrl: String,
-    override protected val requestContext: WsRequestContext,
+    requestContextFun: () => WsRequestContext,
     override protected val recoverErrors: String => PartialFunction[Throwable, RichResponse]
   )(
     override protected implicit val materializer: Materializer,
     override protected implicit val ec: ExecutionContext
-  ) extends PlayWSClientEngine
+  ) extends PlayWSClientEngine {
+    override protected def requestContext: WsRequestContext = requestContextFun()
+  }
 
   private def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
     (serviceEndPointName: String) =>
