@@ -195,4 +195,18 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     params: Seq[(PT, V1, V2)]
   ) =
     params.map { case (k, v1, v2) => (k.toString, v1, v2) }
+
+  // engine delegates
+  protected def createURL(
+    endpoint: Option[String],
+    value: Option[String] = None
+  ): String = engine.createURL(endpoint, value)
+
+  protected def toJsBodyObject(
+    bodyParams: Seq[(String, Option[JsValue])]
+  ): JsObject =
+    engine.toJsBodyObject(bodyParams)
+
+  protected def requestContext: WsRequestContext =
+    engine.requestContext
 }

@@ -73,7 +73,7 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
 
     execPOSTWithStatusAux(
       request,
-      JsObject(toJsonFields(bodyParams)),
+      toJsBodyObject(bodyParams),
       Some(endPoint),
       acceptableStatusCodes
     )
@@ -229,11 +229,11 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, params)
-    val jsonFields = toJsonFields(bodyParams)
+    val jsonBody = toJsBodyObject(bodyParams)
 
     execPATCHAux(
       request,
-      JsObject(jsonFields),
+      jsonBody,
       Some(endPoint),
       acceptableStatusCodes
     )
@@ -264,11 +264,10 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, params)
-    val jsonFields = toJsonFields(bodyParams)
 
     execPUTAux(
       request,
-      JsObject(jsonFields),
+      toJsBodyObject(bodyParams),
       Some(endPoint),
       acceptableStatusCodes
     )
@@ -351,36 +350,6 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     if (string.nonEmpty) s"?$string" else ""
   }
 
-  protected def createURL(
-    endpoint: Option[String],
-    value: Option[String] = None
-  ): String = {
-    val endpointString = endpoint.getOrElse("")
-    val valueString = value.map("/" + _).getOrElse("")
-    val slash =
-      if (coreUrl.endsWith("/") || (endpointString.isEmpty && valueString.isEmpty)) "" else "/"
-
-    coreUrl + slash + endpointString + valueString
-  }
-
-  protected def toOptionalParams(
-    params: Seq[(String, Any)]
-  ): Seq[(String, Some[Any])] =
-    params.map { case (a, b) => (a, Some(b)) }
-
-  protected def toJsonFields(
-    bodyParams: Seq[(String, Option[JsValue])]
-  ) =
-    bodyParams.collect { case (fieldName, Some(jsValue)) =>
-      if (fieldName.trim.nonEmpty)
-        Seq((fieldName, jsValue))
-      else
-        jsValue match {
-          case JsObject(fields) => fields.toSeq
-          case _                => throw new CequenceWSException("Empty param name.")
-        }
-    }.flatten
-
   protected def serviceAndEndpoint(endPointForLogging: Option[String]) =
     s"$serviceName${endPointForLogging.map("." + _).getOrElse("")}"
 }
@@ -412,7 +381,7 @@ object PlayWSClientEngine {
     override protected implicit val materializer: Materializer,
     override protected implicit val ec: ExecutionContext
   ) extends PlayWSClientEngine {
-    override protected def requestContext: WsRequestContext = requestContextFun()
+    override protected[service] def requestContext: WsRequestContext = requestContextFun()
   }
 
   private def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
