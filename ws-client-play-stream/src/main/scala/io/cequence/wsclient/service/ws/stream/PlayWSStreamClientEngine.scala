@@ -72,61 +72,89 @@ private trait PlayWSStreamClientEngine
   override def execJsonStream(
     endPoint: String,
     method: String,
-    endPointParam: Option[String] = None,
-    params: Seq[(String, Option[Any])] = Nil,
-    bodyParams: Seq[(String, Option[JsValue])] = Nil
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])],
+    bodyParams: Seq[(String, Option[JsValue])],
+    extraHeaders: Seq[(String, String)],
+    framingDelimiter: String
   ): Source[JsValue, NotUsed] = {
-    val source = execStreamRequestAux[JsValue](
+    val source = execFramedStream[JsValue](
       endPoint,
       method,
       endPointParam,
       params,
       bodyParams,
-      Framing.delimiter(ByteString("\n\n"), maxFrameLength, allowTruncation = true),
-      {
-        case e: JsonParseException =>
-          val message = s"${serviceAndEndpoint(Some(endPoint))}: Response is not a JSON. ${e.getMessage}."
-          logger.error(message)
-          throw new CequenceWSException(message)
-        case e: FramingException =>
-          val message = s"${serviceAndEndpoint(Some(endPoint))}: Stream framing problem occurred. ${e.getMessage}."
-          logger.error(message)
-          throw new CequenceWSException(message)
-        case e: TimeoutException =>
-          val message = s"${serviceAndEndpoint(Some(endPoint))}: Time out. ${e.getMessage}."
-          logger.error(message)
-          throw new CequenceWSTimeoutException(message)
-        case e: UnknownHostException =>
-          val message = s"${serviceAndEndpoint(Some(endPoint))}: Host name cannot be resolved. ${e.getMessage}."
-          logger.error(message)
-          throw new CequenceWSUnknownHostException(message)
-        case e: Throwable =>
-          val message = s"${serviceAndEndpoint(Some(endPoint))}: Fatal problem! ${e.getMessage}."
-          logger.error(message)
-          throw new CequenceWSException(message)
-      }
-    )
+      extraHeaders,
+      Framing.delimiter(ByteString(framingDelimiter), maxFrameLength, allowTruncation = true),
+    ).recover(handleException(endPoint))
 
     // take until you encounter the end of stream marked with DONE
     source.takeWhile(_ != JsString(endOfStreamToken))
   }
 
-  protected def execStreamRequestAux[T](
+  protected def handleException[T](endPoint: String): PartialFunction[Throwable, T] = {
+    case e: JsonParseException =>
+      val message =
+        s"${serviceAndEndpoint(Some(endPoint))}: Response is not a JSON. ${e.getMessage}."
+      logger.error(message)
+      throw new CequenceWSException(message)
+    case e: FramingException =>
+      val message =
+        s"${serviceAndEndpoint(Some(endPoint))}: Stream framing problem occurred. ${e.getMessage}."
+      logger.error(message)
+      throw new CequenceWSException(message)
+    case e: TimeoutException =>
+      val message = s"${serviceAndEndpoint(Some(endPoint))}: Time out. ${e.getMessage}."
+      logger.error(message)
+      throw new CequenceWSTimeoutException(message)
+    case e: UnknownHostException =>
+      val message =
+        s"${serviceAndEndpoint(Some(endPoint))}: Host name cannot be resolved. ${e.getMessage}."
+      logger.error(message)
+      throw new CequenceWSUnknownHostException(message)
+    case e: Throwable =>
+      val message =
+        s"${serviceAndEndpoint(Some(endPoint))}: Fatal problem! ${e.getMessage}."
+      logger.error(message)
+      throw new CequenceWSException(message)
+  }
+
+  protected def execFramedStream[T](
     endPoint: String,
     method: String,
     endPointParam: Option[String],
     params: Seq[(String, Option[Any])],
     bodyParams: Seq[(String, Option[JsValue])],
-    framing: Flow[ByteString, ByteString, NotUsed],
-    recoverBlock: PartialFunction[Throwable, T]
+    extraHeaders: Seq[(String, String)],
+    framing: Flow[ByteString, ByteString, NotUsed]
   )(
     implicit um: Unmarshaller[ByteString, T],
     materializer: Materializer
-  ): Source[T, NotUsed] = {
-    val request = getWSRequestOptional(Some(endPoint), endPointParam, params)
+  ): Source[T, NotUsed] =
+    execRawStream(
+      endPoint,
+      method,
+      endPointParam,
+      params,
+      bodyParams,
+      extraHeaders
+    ).via(framing)
+      .mapAsync(1)(bytes => Unmarshal(bytes).to[T]) // unmarshal one by one
+
+  override def execRawStream(
+    endPoint: String,
+    method: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])],
+    bodyParams: Seq[(String, Option[JsValue])],
+    extraHeaders: Seq[(String, String)]
+  ): Source[ByteString, NotUsed] = {
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
 
     val requestWithBody = if (bodyParams.nonEmpty) {
-      val bodyParamsX = bodyParams.collect { case (fieldName, Some(jsValue)) => (fieldName, jsValue) }
+      val bodyParamsX = bodyParams.collect { case (fieldName, Some(jsValue)) =>
+        (fieldName, jsValue)
+      }
       request.withBody(JsObject(bodyParamsX))
     } else
       request
@@ -134,9 +162,6 @@ private trait PlayWSStreamClientEngine
     val source =
       requestWithBody.withMethod(method).stream().map { response =>
         response.bodyAsSource
-          .via(framing)
-          .mapAsync(1)(bytes => Unmarshal(bytes).to[T]) // unmarshal one by one
-          .recover(recoverBlock)
       }
 
     // keep it like this because of older version of akka-stream (futureSource vs fromFutureSource)
@@ -167,7 +192,7 @@ object PlayWSStreamClientEngine {
 
   private final class PlayWSStreamClientEngineImpl(
     override protected val coreUrl: String,
-    override protected val requestContext: WsRequestContext,
+    override protected[service] val requestContext: WsRequestContext,
     override protected val recoverErrors: String => PartialFunction[Throwable, RichResponse]
   )(
     override protected implicit val materializer: Materializer,
