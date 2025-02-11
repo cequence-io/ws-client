@@ -30,6 +30,7 @@ trait HasPlayWSClient extends CloseableService {
           .getOrElse(DefaultTimeouts.pooledConnectionIdleTimeout)
       )
       .setRequestTimeout(timeouts.requestTimeout.getOrElse(DefaultTimeouts.requestTimeout))
+//      .setEnabledProtocols(Array("TLSv1.2", "TLSv1.1", "TLSv1")
       .build
     val asyncHttpClient = new DefaultAsyncHttpClient(asyncHttpClientConfig)
     val client = new StandaloneAhcWSClient(asyncHttpClient)

@@ -17,7 +17,7 @@ import io.cequence.wsclient.domain.{
 import io.cequence.wsclient.service.{WSClientEngine, WSClientEngineStreamExtra}
 import io.cequence.wsclient.service.ws.PlayWSClientEngine
 import org.slf4j.LoggerFactory
-import play.api.libs.json.{JsObject, JsString, JsValue, Json}
+import play.api.libs.json.{JsString, JsValue, Json}
 import play.api.libs.ws.JsonBodyWritables._
 
 import java.net.UnknownHostException
@@ -36,25 +36,37 @@ private trait PlayWSStreamClientEngine
 
   private val logger = LoggerFactory.getLogger("PlayWSStreamClientEngine")
 
-  private val itemPrefix = "data: "
+  private val defaultItemPrefix = "data: "
   private val endOfStreamToken = "[DONE]"
-  protected val maxFrameLength = 5000
+  protected val defaultMaxFrameLength = 5000
 
-  private implicit val jsonMarshaller: Unmarshaller[ByteString, JsValue] =
+  private def jsonMarshaller(
+    itemAnyPrefix: String = defaultItemPrefix,
+    stripPrefix: Option[String],
+    stripSuffix: Option[String]
+  ): Unmarshaller[ByteString, JsValue] =
     Unmarshaller.strict[ByteString, JsValue] { byteString =>
       val string = byteString.utf8String
 
       logger.debug(s"Unmarshalling JSON: $string")
 
       try {
-        val itemStartIndex = string.indexOf(itemPrefix)
+        val itemStartIndex = string.indexOf(itemAnyPrefix)
+
         val data =
           if (itemStartIndex > -1)
-            string.substring(itemStartIndex + itemPrefix.length)
+            string.substring(itemStartIndex + itemAnyPrefix.length)
           else
             string
 
-        if (data.equals(endOfStreamToken)) JsString(endOfStreamToken) else Json.parse(data)
+        if (data.equals(endOfStreamToken))
+          JsString(endOfStreamToken)
+        else {
+          val strippedData =
+            data.stripPrefix(stripPrefix.getOrElse("")).stripSuffix(stripSuffix.getOrElse(""))
+          Json.parse(strippedData)
+        }
+
       } catch {
         case e: JsonParseException =>
           val message =
@@ -76,8 +88,14 @@ private trait PlayWSStreamClientEngine
     params: Seq[(String, Option[Any])],
     bodyParams: Seq[(String, Option[JsValue])],
     extraHeaders: Seq[(String, String)],
-    framingDelimiter: String
+    framingDelimiter: String,
+    maxFrameLength: Option[Int],
+    stripPrefix: Option[String],
+    stripSuffix: Option[String]
   ): Source[JsValue, NotUsed] = {
+    implicit val unmarshaller =
+      jsonMarshaller(stripPrefix = stripPrefix, stripSuffix = stripSuffix)
+
     val source = execFramedStream[JsValue](
       endPoint,
       method,
@@ -85,7 +103,11 @@ private trait PlayWSStreamClientEngine
       params,
       bodyParams,
       extraHeaders,
-      Framing.delimiter(ByteString(framingDelimiter), maxFrameLength, allowTruncation = true),
+      Framing.delimiter(
+        ByteString(framingDelimiter),
+        maxFrameLength.getOrElse(defaultMaxFrameLength),
+        allowTruncation = true
+      )
     ).recover(handleException(endPoint))
 
     // take until you encounter the end of stream marked with DONE
@@ -138,8 +160,7 @@ private trait PlayWSStreamClientEngine
       params,
       bodyParams,
       extraHeaders
-    ).via(framing)
-      .mapAsync(1)(bytes => Unmarshal(bytes).to[T]) // unmarshal one by one
+    ).via(framing).mapAsync(1)(bytes => Unmarshal(bytes).to[T]) // unmarshal one by one
 
   override def execRawStream(
     endPoint: String,
@@ -152,10 +173,7 @@ private trait PlayWSStreamClientEngine
     val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
 
     val requestWithBody = if (bodyParams.nonEmpty) {
-      val bodyParamsX = bodyParams.collect { case (fieldName, Some(jsValue)) =>
-        (fieldName, jsValue)
-      }
-      request.withBody(JsObject(bodyParamsX))
+      request.withBody(toJsBodyObject(bodyParams))
     } else
       request
 
