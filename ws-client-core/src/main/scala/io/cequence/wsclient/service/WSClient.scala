@@ -71,6 +71,30 @@ trait WSClient extends WSClientBase {
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
 
+  def execPOSTBody(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil
+  ): Future[Response] =
+    execPOSTBodyRich(
+      endPoint,
+      endPointParam,
+      params,
+      body,
+      extraHeaders
+    ).map(getResponseOrError)
+
+  def execPOSTBodyRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse]
+
   /**
    * @param fileParams
    *   the third param in a tuple is a display (header) file name

@@ -55,6 +55,23 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       acceptableStatusCodes
     )
 
+  override def execPOSTBodyRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse] =
+    engine.execPOSTBodyRich(
+      endPoint.toString,
+      endPointParam,
+      paramTuplesToStrings(params),
+      body,
+      extraHeaders,
+      acceptableStatusCodes
+    )
+
   /**
    * @param fileParams
    *   the third param in a tuple is a display (header) file name

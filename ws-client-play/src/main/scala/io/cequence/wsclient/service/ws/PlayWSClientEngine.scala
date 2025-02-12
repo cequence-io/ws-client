@@ -68,12 +68,29 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     bodyParams: Seq[(String, Option[JsValue])] = Nil,
     extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse] =
+    execPOSTBodyRich(
+      endPoint,
+      endPointParam,
+      params,
+      toJsBodyObject(bodyParams),
+      extraHeaders,
+      acceptableStatusCodes
+    )
+
+  def execPOSTBodyRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
 
     execPOSTWithStatusAux(
       request,
-      toJsBodyObject(bodyParams),
+      body,
       Some(endPoint),
       acceptableStatusCodes
     )
@@ -302,9 +319,11 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     val paramsString = paramsOptionalAsString(params ++ extraStringParams)
     val url = createURL(endPoint, endPointParam) + paramsString
 
-    client.url(url).addHttpHeaders(
-      (requestContext.authHeaders ++ extraHeaders): _*
-    )
+    client
+      .url(url)
+      .addHttpHeaders(
+        (requestContext.authHeaders ++ extraHeaders): _*
+      )
   }
 
   private def execRequestAux(
