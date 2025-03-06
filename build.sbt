@@ -150,6 +150,16 @@ lazy val `ws-client-core` =
     publish / skip := false
   )
 
+lazy val `json-repair` =
+  (project in file("json-repair")).settings(
+    name := "json-repair",
+    libraryDependencies += "com.typesafe.play" %% "play-json" % playJsonVersion.value,
+    libraryDependencies += "org.scalactic" %% "scalactic" % "3.2.16",
+    libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+    libraryDependencies ++= loggingLibs.value,
+    publish / skip := false
+  )
+
 lazy val `ws-client-play` =
   (project in file("ws-client-play"))
     .settings(
@@ -158,7 +168,7 @@ lazy val `ws-client-play` =
       publish / skip := false
     )
     .dependsOn(`ws-client-core`)
-    .aggregate(`ws-client-core`)
+    .aggregate(`ws-client-core`, `json-repair`)
 
 lazy val `ws-client-play-stream` =
   (project in file("ws-client-play-stream"))

@@ -3,6 +3,8 @@
 
 This repository contains a simple and efficient Web Service client implemented in Scala. The client is designed to interact with RESTful web services, making it easy to send requests, handle responses, and manage errors.
 
+**🔥 New**: as a part of this suite we provide [json-repair](./json-repair/README.md) library that can be used to fix common JSON syntax errors, repair malformed JSON objects and arrays.
+
 ## Installation 🚀
 
 The currently supported Scala versions are **2.12, 2.13**, and **3**.
