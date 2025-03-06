@@ -7,6 +7,8 @@ Acknowledgement to the original author [mangiucugna](https://github.com/mangiucu
 Note that we aimed to provide convert the original code to Scala "one-to-one" hence the code is in essence procedural
 and might not be idiomatic Scala.
 
+Note that all but one tests (around 140) from the original Python library have been ported to Scala and are passing! See [here](/src/test/scala/io/cequence/jsonrepair/JsonRepairSpec.scala)
+
 ## Features
 
 ### Fixing Common JSON Syntax Errors
