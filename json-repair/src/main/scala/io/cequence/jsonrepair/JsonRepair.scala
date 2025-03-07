@@ -255,7 +255,7 @@ object JsonRepair {
       case i: Int     => JsNumber(i)
       case l: Long    => JsNumber(l)
       case d: Double  => JsNumber(d)
-      case f: Float   => JsNumber(f)
+      case f: Float   => JsNumber(f.toDouble)
       case s: String  =>
         // First check for boolean or null literals that might be strings
         s.toLowerCase.trim match {

@@ -8,8 +8,8 @@ val scala32 = "3.2.2"
 ThisBuild / description := "Generic WebServices library currently only with Play WS impl./backend"
 
 ThisBuild / organization := "io.cequence"
-ThisBuild / scalaVersion := scala212
-ThisBuild / version := "0.6.5"
+ThisBuild / scalaVersion := scala32
+ThisBuild / version := "0.7.0"
 ThisBuild / isSnapshot := false
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 
@@ -107,7 +107,7 @@ val akkaHttpVersion = "10.5.1" //"10.5.0-M1"
 
 def typesafePlayWS(version: String) = Seq(
   "com.typesafe.play" %% "play-ahc-ws-standalone" % version,
-  "com.typesafe.play" %% "play-ws-standalone-json" % version,
+  "com.typesafe.play" %% "play-ws-standalone-json" % version
 //  "com.typesafe.play" % "shaded-asynchttpclient" % version,
 //  "io.netty" % "netty-tcnative-boringssl-static" % "2.0.69.Final"
 )
