@@ -4,7 +4,7 @@ A Scala library to repair invalid JSON, commonly used to parse the output of LLM
 
 This is a (faithful) Scala port of the Python [json_repair](https://github.com/mangiucugna/json_repair) library.
 Acknowledgement to the original author [mangiucugna](https://github.com/mangiucugna) 🙏.
-Note that we aimed to provide convert the original code to Scala "one-to-one" hence the code is in essence procedural
+Note that we aimed to provide convert the original code to Scala "one-to-one" (as of March 6th 2025) hence the code is in essence procedural
 and might not be idiomatic Scala.
 
 Note that all but one tests (around 140) from the original Python library have been ported to Scala and are passing! See [here](/src/test/scala/io/cequence/jsonrepair/JsonRepairSpec.scala)
