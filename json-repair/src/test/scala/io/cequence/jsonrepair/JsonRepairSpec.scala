@@ -513,4 +513,16 @@ class JsonRepairSpec extends AnyFlatSpec with Matchers {
       ensureAscii = false
     ) shouldBe """{"invoiceNumber":"FA/222/2024","invoiceDate":"2022-11-11","lineItems":[{"itemNumber":1,"description":"Wniosek o zmianę pozwolenia na ... „Something Polska\" ... - zamówienie nr x /zlec. 1111/\"","pricePerUnit":500}]}"""
   }
+
+  it should "handle nested json" in {
+    JsonRepair.repair(
+      """{
+        |  "key": {
+        |    "value": "Name",
+        |    "reference": "value value value value"
+        |  }
+        |}""".stripMargin,
+    ) shouldBe
+      """{"key":{"value":"Name","reference":"value value value value"}}""".stripMargin
+  }
 }

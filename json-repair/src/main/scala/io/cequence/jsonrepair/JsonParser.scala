@@ -542,7 +542,8 @@ class JsonParser(
           }
         }
 
-      case _ => // no second quote scenario
+      case _ =>
+        // no second quote scenario
     }
 
     // PART III
@@ -833,7 +834,7 @@ class JsonParser(
             // If we stopped for a comma in object_value context, let's check if find a "} at the end of the string
             if (nextC.contains(',') && context.current.contains(ContextValues.ObjectValue)) {
               i += 1
-              val delimiterIndex = skipToCharacter(rstring_delimiter, index + i)
+              val delimiterIndex = skipToCharacter(rstring_delimiter, i)
               nextC = getCharAt(delimiterIndex)
 
               // If we found another delimiter, check what follows
@@ -949,46 +950,6 @@ class JsonParser(
     }
 
     return sb.toString()
-  }
-
-  /**
-   * Iterates through the input to find `character`, starting from `index + offset`. If the
-   * character is found but is escaped (preceded by a backslash), continue searching.
-   *
-   * @param character
-   *   the character to find
-   * @param offset
-   *   how far from the current `index` to start
-   * @return
-   *   the offset (relative to `index`) at which `character` is found, or the offset where
-   *   input ends if not found
-   */
-  def skipToCharacterxx(
-    character: Char,
-    offset: Int = 0
-  ): Int = {
-    val pos = index + offset
-    // If we're beyond the end of the string, return offset.
-    if (pos >= length) {
-      return offset
-    }
-
-    val c = getCharAt(offset)
-
-    if (c.isDefined && c.get != character) {
-      // Keep searching
-      skipToCharacter(character, offset + 1)
-    } else {
-      // We found the character, but check if it's escaped.
-      // In Python, the code checks the char at (pos - 1) if pos > 0.
-      if (offset > 0 && getCharAt(offset - 1).get == '\\') {
-        // It's escaped, so keep going from the next offset.
-        skipToCharacter(character, offset + 1)
-      } else {
-        // Found an unescaped match
-        return offset
-      }
-    }
   }
 
   def skipToCharacter(
