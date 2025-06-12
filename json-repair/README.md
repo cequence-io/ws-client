@@ -33,7 +33,7 @@ Note that all but one tests (around 140) from the original Python library have b
 Add the following dependency to your build.sbt:
 
 ```scala
-libraryDependencies += "io.cequence" %% "json-repair" % "0.7.0"
+libraryDependencies += "io.cequence" %% "json-repair" % "0.7.1"
 ```
 
 ## Usage

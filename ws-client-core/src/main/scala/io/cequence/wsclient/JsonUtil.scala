@@ -4,6 +4,8 @@ import io.cequence.wsclient.domain.CequenceWSException
 import play.api.libs.json.JsonNaming.SnakeCase
 import play.api.libs.json._
 import scala.collection.mutable.{Seq => MutableSeq}
+import scala.collection.immutable.{Seq => ImmutableSeq}
+import scala.collection.immutable.{Map => ImmutableMap}
 
 import java.util.Date
 import java.{util => ju}
@@ -66,27 +68,43 @@ object JsonUtil {
       JsNull
     else
       value match {
-        case x: JsValue       => x // nothing to do
-        case x: String        => JsString(x)
-        case x: BigDecimal    => JsNumber(x)
-        case x: Integer       => JsNumber(BigDecimal.valueOf(x.toLong))
-        case x: Long          => JsNumber(BigDecimal.valueOf(x))
-        case x: Double        => JsNumber(BigDecimal.valueOf(x))
-        case x: Float         => JsNumber(BigDecimal.valueOf(x.toDouble))
-        case x: Boolean       => JsBoolean(x)
-        case x: ju.Date       => Json.toJson(x)
-        case x: Option[_]     => x.map(toJson).getOrElse(JsNull)
-        case x: Array[_]      => JsArray(x.map(toJson))
-        case x: Seq[_]        => JsArray(x.map(toJson))
-        case x: MutableSeq[_] => JsArray(x.map(toJson))
-        case x: Map[String, _] =>
+        case x: JsValue => x // nothing to do
+
+        case Some(s) => toJson(s)
+        case None    => JsNull
+
+        case x: String => JsString(x)
+
+        case x: BigDecimal => JsNumber(x)
+        case x: Int        => JsNumber(BigDecimal.valueOf(x.toLong))
+        case x: Integer    => JsNumber(BigDecimal.valueOf(x.toLong))
+        case x: Long       => JsNumber(BigDecimal.valueOf(x))
+        case x: Double     => JsNumber(BigDecimal.valueOf(x))
+        case x: Float      => JsNumber(BigDecimal.valueOf(x.toDouble))
+        case n: Number     => JsNumber(n.doubleValue())
+
+        case x: Boolean => JsBoolean(x)
+
+        case x: ju.Date => Json.toJson(x)
+
+        case x: Array[_]          => JsArray(x.map(toJson))
+        case x: collection.Seq[_] => JsArray(x.map(toJson))
+        case x: ImmutableSeq[_]   => JsArray(x.map(toJson))
+        case x: MutableSeq[_]     => JsArray(x.map(toJson))
+
+        case x: collection.Map[String, _] =>
           val jsonValues = x.map { case (fieldName, value) =>
             (fieldName, toJson(value))
           }
           JsObject(jsonValues)
+
+        case map: ImmutableMap[String, _] =>
+          val fields = map.map { case (fieldName, value) => (fieldName, toJson(value)) }
+          JsObject(fields)
+
         case _ =>
           throw new IllegalArgumentException(
-            s"No JSON formatter found for the class ${value.getClass.getName}."
+            s"No JSON format found for the class ${value.getClass.getName}."
           )
       }
 
@@ -108,6 +126,24 @@ object JsonUtil {
     jsObject.value.map { case (fieldName, jsValue) =>
       (fieldName, toValue(jsValue))
     }.toMap
+
+  def toValueWithNull(
+    nullValue: Any
+  )(
+    jsValue: JsValue
+  ): Any =
+    jsValue match {
+      case JsNull             => nullValue
+      case JsString(value)    => value
+      case JsNumber(value)    => value
+      case JsBoolean(value)   => value
+      case JsArray(value)     => value.toSeq.map(toValueWithNull(nullValue))
+      case jsObject: JsObject => jsObjectToMapWithNull(nullValue)(jsObject)
+      case _ => throw new IllegalArgumentException("Unknown JSON type")
+    }
+
+  def jsObjectToMapWithNull(nullValue: Any)(jsObject: JsObject): Map[String, Any] =
+    jsObject.value.mapValues(toValueWithNull(nullValue)).toMap
 
   object StringDoubleMapFormat extends Format[Map[String, Double]] {
     override def reads(json: JsValue): JsResult[Map[String, Double]] = {
@@ -145,15 +181,7 @@ object JsonUtil {
 
   object StringAnyMapFormat extends Format[Map[String, Any]] {
     override def reads(json: JsValue): JsResult[Map[String, Any]] = {
-      val resultJsons =
-        json.asSafe[JsObject].fields.map { case (fieldName, jsValue) =>
-          val stringValue = jsValue match {
-            case JsString(s) => s
-            case _           => jsValue.toString()
-          }
-          (fieldName, stringValue)
-        }
-      JsSuccess(resultJsons.toMap)
+      json.validate[JsObject].map(jsObjectToMapWithNull(nullValue = ""))
     }
 
     override def writes(o: Map[String, Any]): JsValue = {
@@ -201,9 +229,9 @@ object JsonUtil {
 
     val reads: Reads[T] = Reads {
       case JsString(value) =>
-        valueMap.get(value) match {
+        valueMap.get(value.trim) match {
           case Some(v) => JsSuccess(v)
-          case None    => JsError(s"$value is not a valid enum value.")
+          case None    => JsError(s"'$value' is not a valid enum value.")
         }
       case _ => JsError("String value expected")
     }
