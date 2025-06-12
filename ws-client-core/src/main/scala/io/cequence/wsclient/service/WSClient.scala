@@ -28,18 +28,21 @@ trait WSClient extends WSClientBase {
   def execGET(
     endPoint: PEP,
     endPointParam: Option[String] = None,
-    params: Seq[(PT, Option[Any])] = Nil
+    params: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
   ): Future[Response] =
     execGETRich(
       endPoint,
       endPointParam,
-      params
+      params,
+      extraHeaders
     ).map(getResponseOrError)
 
   def execGETRich(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
 

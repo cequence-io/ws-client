@@ -25,12 +25,14 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execGETRich(
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),
+      extraHeaders,
       acceptableStatusCodes
     )
 

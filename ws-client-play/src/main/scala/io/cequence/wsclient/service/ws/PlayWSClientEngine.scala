@@ -45,9 +45,10 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     endPoint: String,
     endPointParam: Option[String] = None,
     params: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
-    val request = getWSRequestOptional(Some(endPoint), endPointParam, params)
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
 
     execRequestAux(
       request,
