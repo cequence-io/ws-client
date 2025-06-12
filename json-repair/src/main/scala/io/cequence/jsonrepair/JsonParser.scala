@@ -1051,23 +1051,32 @@ class JsonParser(
       ("null", Some(null))
     )
 
-    for ((word, scalaValue) <- literals) {
-      // Attempt to match the entire literal character-by-character
-      var i = 0
-      while (i < word.length && char == word.charAt(i)) {
-        i += 1
-        index += 1
-        char = getCharAt().getOrElse(CHAR_NONE).toLower
-      }
-      if (i == word.length) {
-        // Matched the entire literal => return the Scala value (including null)
-        return scalaValue
+    var result: Option[Any] = None
+
+    scala.util.control.Breaks.breakable {
+      for ((word, scalaValue) <- literals) {
+        var i = 0
+        // Attempt to match the entire literal character-by-character
+        while (i < word.length && char == word.charAt(i)) {
+          i += 1
+          index += 1
+          char = getCharAt().getOrElse(CHAR_NONE).toLower
+        }
+
+        if (i == word.length) {
+          // Successfully matched the literal, store the value and break out of the loop
+          result = scalaValue
+          break
+        }
       }
     }
 
-    // If nothing works, reset the index before returning
-    index = startingIndex
-    None
+    if (result.isEmpty) {
+      // Reset index and char before trying the next literal
+      index = startingIndex
+    }
+
+    result
   }
 
   /**
