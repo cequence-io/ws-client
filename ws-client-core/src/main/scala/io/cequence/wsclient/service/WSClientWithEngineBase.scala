@@ -102,6 +102,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPOSTURLEncodedRich(
@@ -109,6 +110,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       endPointParam,
       paramTuplesToStrings(params),
       paramTuplesToStrings(bodyParams),
+      extraHeaders,
       acceptableStatusCodes
     )
 
@@ -163,14 +165,14 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
   // PATCH //
   ////////////
 
-  override def execPATCRich(
+  override def execPATCHRich(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     bodyParams: Seq[(PT, Option[JsValue])] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
-    engine.execPATCRich(
+    engine.execPATCHRich(
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),

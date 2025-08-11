@@ -136,13 +136,15 @@ trait WSClient extends WSClientBase {
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
-    bodyParams: Seq[(PT, Option[Any])] = Nil
+    bodyParams: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil
   ): Future[Response] =
     execPOSTURLEncodedRich(
       endPoint,
       endPointParam,
       params,
-      bodyParams
+      bodyParams,
+      extraHeaders
     ).map(getResponseOrError)
 
   def execPOSTURLEncodedRich(
@@ -150,6 +152,7 @@ trait WSClient extends WSClientBase {
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
 
@@ -227,14 +230,14 @@ trait WSClient extends WSClientBase {
     params: Seq[(PT, Option[Any])] = Nil,
     bodyParams: Seq[(PT, Option[JsValue])] = Nil
   ): Future[Response] =
-    execPATCRich(
+    execPATCHRich(
       endPoint,
       endPointParam,
       params,
       bodyParams
     ).map(getResponseOrError)
 
-  def execPATCRich(
+  def execPATCHRich(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,

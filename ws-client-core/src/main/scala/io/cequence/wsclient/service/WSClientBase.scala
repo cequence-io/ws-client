@@ -43,7 +43,7 @@ trait WSClientBase extends CloseableService {
     }.getOrElse("")
   }
 
-  protected def getResponseOrError(response: RichResponse): Response =
+  def getResponseOrError(response: RichResponse): Response =
     response.response.getOrElse(
       handleErrorCodes(response.status.code, response.status.message)
     )
