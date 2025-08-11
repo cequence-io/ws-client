@@ -9,7 +9,7 @@ ThisBuild / description := "Generic WebServices library currently only with Play
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala212
-ThisBuild / version := "0.7.1"
+ThisBuild / version := "0.7.2"
 ThisBuild / isSnapshot := false
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 
@@ -64,7 +64,7 @@ inThisBuild(
   playJsonVersion := {
     scalaVersion.value match {
       case "2.12.18" => "2.8.2"
-      case "2.13.11" => "2.10.0"
+      case "2.13.11" => "2.8.2" // 2.10.0
       case "3.2.2"   => "2.10.0-RC6" // -RC6
       case _         => "2.8.2"
     }
@@ -76,17 +76,17 @@ lazy val akkaStreamLibs = Def.setting {
   CrossVersion.partialVersion(scalaVersion.value) match {
     case Some((2, 12)) =>
       Seq(
-        "com.typesafe.akka" %% "akka-stream" % "2.6.1"
+        "com.typesafe.akka" %% "akka-stream" % "2.6.1" exclude("com.typesafe.play", "play-json")
       )
     case Some((2, 13)) =>
       Seq(
-        "com.typesafe.akka" %% "akka-stream" % "2.6.20"
+        "com.typesafe.akka" %% "akka-stream" % "2.6.20" exclude("com.typesafe.play", "play-json")
       )
     case Some((3, 2)) =>
       // because of the conflicting cross-version suffixes 2.13 vs 3
       Seq(
 //        "com.typesafe.akka" %% "akka-stream" % "2.6.20"
-        "com.typesafe.akka" % "akka-stream_2.13" % "2.6.20" exclude ("com.typesafe", "ssl-config-core_2.13"),
+        "com.typesafe.akka" % "akka-stream_2.13" % "2.6.20" exclude ("com.typesafe", "ssl-config-core_2.13") exclude("com.typesafe.play", "play-json"),
         "com.typesafe" %% "ssl-config-core" % "0.6.1"
       )
     case _ =>
@@ -106,8 +106,8 @@ val akkaHttpVersion = "10.5.1" //"10.5.0-M1"
 // Play WS
 
 def typesafePlayWS(version: String) = Seq(
-  "com.typesafe.play" %% "play-ahc-ws-standalone" % version,
-  "com.typesafe.play" %% "play-ws-standalone-json" % version
+  "com.typesafe.play" %% "play-ahc-ws-standalone" % version exclude("com.typesafe.play", "play-json"),
+  "com.typesafe.play" %% "play-ws-standalone-json" % version exclude("com.typesafe.play", "play-json")
 //  "com.typesafe.play" % "shaded-asynchttpclient" % version,
 //  "io.netty" % "netty-tcnative-boringssl-static" % "2.0.69.Final"
 )
@@ -125,7 +125,7 @@ lazy val playWsDependencies = Def.setting {
 
     case Some((2, 13)) =>
       // play json - 2.10.0
-      typesafePlayWS("2.2.0")
+      typesafePlayWS("2.1.11")
 
     case Some((3, 2)) =>
       // Version "2.2.0-M3" was produced by an unstable release: Scala 3.3.0-RC3 - // play json - 2.10.0-RC6
@@ -144,8 +144,8 @@ lazy val playWsDependencies = Def.setting {
 lazy val `ws-client-core` =
   (project in file("ws-client-core")).settings(
     name := "ws-client-core",
-    libraryDependencies ++= akkaStreamLibs.value,
     libraryDependencies += "com.typesafe.play" %% "play-json" % playJsonVersion.value,
+    libraryDependencies ++= akkaStreamLibs.value,
     libraryDependencies ++= loggingLibs.value,
     publish / skip := false
   )

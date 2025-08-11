@@ -18,8 +18,8 @@ Note that all but one tests (around 140) from the original Python library have b
 
 ### Repairing Malformed JSON Arrays and Objects
 
-* Incomplete or broken arrays/objects by adding necessary elements (e.g., commas, brackets) or default values (
-  null, "").
+* Incomplete or broken arrays/objects by adding the necessary elements (e.g., commas, brackets) or default values (
+  `null`, `""`).
 * The library can process JSON that includes extra non-JSON characters like comments or improperly placed characters,
   cleaning them up while maintaining valid structure.
 
@@ -33,7 +33,7 @@ Note that all but one tests (around 140) from the original Python library have b
 Add the following dependency to your build.sbt:
 
 ```scala
-libraryDependencies += "io.cequence" %% "json-repair" % "0.7.1"
+libraryDependencies += "io.cequence" %% "json-repair" % "0.7.2"
 ```
 
 ## Usage
@@ -106,6 +106,6 @@ string:
 * Quote strings or add missing single quotes
 * Adjust whitespaces and remove line breaks
 
-## License
+## License ⚖️
 
-MIT License 
+This library is available and published as open source under the terms of the [MIT License](https://opensource.org/licenses/MIT).

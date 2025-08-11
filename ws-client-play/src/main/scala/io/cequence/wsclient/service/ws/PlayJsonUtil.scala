@@ -10,7 +10,7 @@ import java.nio.charset.StandardCharsets
  * Universal JSON utilities that match WS client serialization behavior exactly.
  *
  * The WS client has specific behavior:
- *   - Emoticons (📞📧🌐): Escapes to \uXXXX format
+ *   - Emoticons (📞📧🌐): Escapes to \\u... format
  *   - Other Unicode (Chinese, Arabic): Preserves as UTF-8
  *   - ASCII: Preserves as-is
  */
