@@ -131,9 +131,10 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     endPointParam: Option[String] = None,
     params: Seq[(String, Option[Any])] = Nil,
     bodyParams: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
-    val request = getWSRequestOptional(Some(endPoint), endPointParam, params)
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
     val bodyData = bodyParams.collect { case (key, Some(value)) =>
       (key, value.toString)
     }.toMap
@@ -239,7 +240,7 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
   // PATCH //
   ////////////
 
-  override def execPATCRich(
+  override def execPATCHRich(
     endPoint: String,
     endPointParam: Option[String] = None,
     params: Seq[(String, Option[Any])] = Nil,
