@@ -44,6 +44,15 @@ trait ServiceBaseAdapters[S <: CloseableService] {
   ): S =
     wrapAndDelegate(new PreServiceAdapter(underlying, action))
 
+  def repackExceptions(
+    repackExceptions: PartialFunction[Throwable, Throwable]
+  )(
+    service: S
+  )(
+    implicit ec: ExecutionContext
+  ): S =
+    wrapAndDelegate(new RepackExceptionsAdapter(service, repackExceptions))
+
   protected def wrapAndDelegate(
     delegate: CloseableServiceWrapper[S]
   ): S
