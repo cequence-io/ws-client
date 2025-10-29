@@ -1,5 +1,8 @@
 package io.cequence.wsclient.service
 
+import akka.actor.Scheduler
+import akka.pattern.after
+
 import scala.concurrent.{ExecutionContext, Future}
 
 trait PollingHelper {
@@ -11,14 +14,16 @@ trait PollingHelper {
   )(
     call: => Future[T]
   )(
-    implicit ec: ExecutionContext
+    implicit ec: ExecutionContext, scheduler: Scheduler
   ): Future[T] =
-    call.flatMap(result =>
+    call.flatMap { result =>
       if (isDone(result)) {
-        Future(result)
+        Future.successful(result)
       } else {
-        java.lang.Thread.sleep(pollingMs) // TODO: use scheduler
-        pollUntilDone(isDone)(call)
+        // Use `akka.pattern.after` to schedule a future that will retry after pollingMs
+        after(pollingMs.millis, scheduler)(
+          pollUntilDone(isDone)(call)
+        )
       }
-    )
+    }
 }
