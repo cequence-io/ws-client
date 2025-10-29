@@ -3,11 +3,11 @@ package io.cequence.wsclient
 import io.cequence.wsclient.domain.CequenceWSException
 import play.api.libs.json.JsonNaming.SnakeCase
 import play.api.libs.json._
+
 import scala.collection.mutable.{Seq => MutableSeq}
 import scala.collection.immutable.{Seq => ImmutableSeq}
 import scala.collection.immutable.{Map => ImmutableMap}
-
-import java.util.Date
+import java.util.{Date, UUID}
 import java.{util => ju}
 
 object JsonUtil {
@@ -74,18 +74,21 @@ object JsonUtil {
         case None    => JsNull
 
         case x: String => JsString(x)
+        case x: ju.UUID => JsString(x.toString)
 
         case x: BigDecimal => JsNumber(x)
         case x: Int        => JsNumber(BigDecimal.valueOf(x.toLong))
+        case x: Byte       => JsNumber(BigDecimal.valueOf(x.toLong))
+        case x: Short      => JsNumber(BigDecimal.valueOf(x.toLong))
         case x: Integer    => JsNumber(BigDecimal.valueOf(x.toLong))
         case x: Long       => JsNumber(BigDecimal.valueOf(x))
         case x: Double     => JsNumber(BigDecimal.valueOf(x))
         case x: Float      => JsNumber(BigDecimal.valueOf(x.toDouble))
         case n: Number     => JsNumber(n.doubleValue())
 
-        case x: Boolean => JsBoolean(x)
+        case x: Boolean    => JsBoolean(x)
 
-        case x: ju.Date => Json.toJson(x)
+        case x: ju.Date    => Json.toJson(x)
 
         case x: Array[_]          => JsArray(x.map(toJson))
         case x: collection.Seq[_] => JsArray(x.map(toJson))
@@ -231,7 +234,7 @@ object JsonUtil {
       case JsString(value) =>
         valueMap.get(value.trim) match {
           case Some(v) => JsSuccess(v)
-          case None    => JsError(s"'$value' is not a valid enum value.")
+          case None    => JsError(s"'$value' is not a valid enum value. Valid values: ${valueMap.keys.mkString(", ")}")
         }
       case _ => JsError("String value expected")
     }
