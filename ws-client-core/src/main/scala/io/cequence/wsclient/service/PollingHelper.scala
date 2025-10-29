@@ -3,6 +3,7 @@ package io.cequence.wsclient.service
 import akka.actor.Scheduler
 import akka.pattern.after
 
+import scala.concurrent.duration.DurationInt
 import scala.concurrent.{ExecutionContext, Future}
 
 trait PollingHelper {
