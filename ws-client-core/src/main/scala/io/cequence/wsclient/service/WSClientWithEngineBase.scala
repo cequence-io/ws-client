@@ -84,6 +84,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     params: Seq[(PT, Option[Any])] = Nil,
     fileParams: Seq[(PT, File, Option[String])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   )(
     implicit filePartToContent: FilePart => String = contentTypeByExtension
@@ -94,6 +95,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       paramTuplesToStrings(params),
       param3TuplesToStrings(fileParams),
       paramTuplesToStrings(bodyParams),
+      extraHeaders,
       acceptableStatusCodes
     )
 
@@ -119,6 +121,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     endPointParam: Option[String] = None,
     urlParams: Seq[(PT, Option[Any])] = Nil,
     file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPOSTFileRich(
@@ -126,6 +129,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       endPointParam,
       paramTuplesToStrings(urlParams),
       file,
+      extraHeaders,
       acceptableStatusCodes
     )
 
@@ -134,6 +138,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     endPointParam: Option[String] = None,
     urlParams: Seq[(PT, Option[Any])] = Nil,
     source: Source[ByteString, _],
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPOSTSourceRich(
@@ -141,6 +146,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       endPointParam,
       paramTuplesToStrings(urlParams),
       source,
+      extraHeaders,
       acceptableStatusCodes
     )
 
@@ -152,12 +158,14 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execDELETERich(
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),
+      extraHeaders,
       acceptableStatusCodes
     )
 
@@ -170,6 +178,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPATCHRich(
@@ -177,6 +186,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       endPointParam,
       paramTuplesToStrings(params),
       paramTuplesToStrings(bodyParams),
+      extraHeaders,
       acceptableStatusCodes
     )
 
@@ -189,6 +199,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPUTRich(
@@ -196,6 +207,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       endPointParam,
       paramTuplesToStrings(params),
       paramTuplesToStrings(bodyParams),
+      extraHeaders,
       acceptableStatusCodes
     )
 

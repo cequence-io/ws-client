@@ -107,11 +107,12 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     params: Seq[(String, Option[Any])] = Nil,
     fileParams: Seq[(String, File, Option[String])] = Nil,
     bodyParams: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   )(
     implicit filePartToContent: FilePart => String = contentTypeByExtension
   ): Future[RichResponse] = {
-    val request = getWSRequestOptional(Some(endPoint), endPointParam, params)
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
     val formData = createMultipartFormData(fileParams, bodyParams)
 
     implicit val writeable: BodyWritable[MultipartFormData] = writeableOf_MultipartFormData(
@@ -155,10 +156,11 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     endPointParam: Option[String] = None,
     urlParams: Seq[(String, Option[Any])] = Nil,
     file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
     val request =
-      getWSRequestOptional(Some(endPoint), endPointParam, urlParams)
+      getWSRequestOptional(Some(endPoint), endPointParam, urlParams, extraHeaders)
 
     implicit val writable = DefaultBodyWritables.writableOf_File
 
@@ -175,10 +177,11 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     endPointParam: Option[String] = None,
     urlParams: Seq[(PT, Option[Any])] = Nil,
     source: Source[ByteString, _],
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
     val request =
-      getWSRequestOptional(Some(endPoint), endPointParam, urlParams)
+      getWSRequestOptional(Some(endPoint), endPointParam, urlParams, extraHeaders)
 
     implicit val writable = DefaultBodyWritables.writableOf_Source
 
@@ -224,9 +227,10 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     endPoint: String,
     endPointParam: Option[String] = None,
     params: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
-    val request = getWSRequestOptional(Some(endPoint), endPointParam, params)
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
 
     execRequestAux(
       request,
@@ -245,9 +249,10 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     endPointParam: Option[String] = None,
     params: Seq[(String, Option[Any])] = Nil,
     bodyParams: Seq[(String, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
-    val request = getWSRequestOptional(Some(endPoint), endPointParam, params)
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
     val jsonBody = toJsBodyObject(bodyParams)
 
     execPATCHAux(
@@ -280,9 +285,10 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     endPointParam: Option[String] = None,
     params: Seq[(String, Option[Any])] = Nil,
     bodyParams: Seq[(String, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
-    val request = getWSRequestOptional(Some(endPoint), endPointParam, params)
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
 
     execPUTAux(
       request,

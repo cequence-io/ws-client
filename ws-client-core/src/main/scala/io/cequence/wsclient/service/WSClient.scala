@@ -29,7 +29,7 @@ trait WSClient extends WSClientBase {
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
-    extraHeaders: Seq[(String, String)] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil
   ): Future[Response] =
     execGETRich(
       endPoint,
@@ -107,14 +107,16 @@ trait WSClient extends WSClientBase {
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     fileParams: Seq[(PT, File, Option[String])] = Nil,
-    bodyParams: Seq[(PT, Option[Any])] = Nil
+    bodyParams: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil
   ): Future[Response] =
     execPOSTMultipartRich(
       endPoint,
       endPointParam,
       params,
       fileParams,
-      bodyParams
+      bodyParams,
+      extraHeaders
     ).map(getResponseOrError)
 
   /**
@@ -127,6 +129,7 @@ trait WSClient extends WSClientBase {
     params: Seq[(PT, Option[Any])] = Nil,
     fileParams: Seq[(PT, File, Option[String])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   )(
     implicit filePartToContent: FilePart => String = contentTypeByExtension
@@ -160,13 +163,15 @@ trait WSClient extends WSClientBase {
     endPoint: PEP,
     endPointParam: Option[String] = None,
     urlParams: Seq[(PT, Option[Any])] = Nil,
-    file: java.io.File
+    file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil
   ): Future[Response] =
     execPOSTFileRich(
       endPoint,
       endPointParam,
       urlParams,
-      file
+      file,
+      extraHeaders
     ).map(getResponseOrError)
 
   def execPOSTFileRich(
@@ -174,6 +179,7 @@ trait WSClient extends WSClientBase {
     endPointParam: Option[String] = None,
     urlParams: Seq[(PT, Option[Any])] = Nil,
     file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
 
@@ -181,13 +187,15 @@ trait WSClient extends WSClientBase {
     endPoint: PEP,
     endPointParam: Option[String] = None,
     urlParams: Seq[(PT, Option[Any])] = Nil,
-    source: Source[ByteString, _]
+    source: Source[ByteString, _],
+    extraHeaders: Seq[(String, String)] = Nil
   ): Future[Response] =
     execPOSTSourceRich(
       endPoint,
       endPointParam,
       urlParams,
-      source
+      source,
+      extraHeaders
     ).map(getResponseOrError)
 
   def execPOSTSourceRich(
@@ -195,6 +203,7 @@ trait WSClient extends WSClientBase {
     endPointParam: Option[String] = None,
     urlParams: Seq[(PT, Option[Any])] = Nil,
     source: Source[ByteString, _],
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
 
@@ -205,18 +214,21 @@ trait WSClient extends WSClientBase {
   def execDELETE(
     endPoint: PEP,
     endPointParam: Option[String] = None,
-    params: Seq[(PT, Option[Any])] = Nil
+    params: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil
   ): Future[Response] =
     execDELETERich(
       endPoint,
       endPointParam,
-      params
+      params,
+      extraHeaders
     ).map(getResponseOrError)
 
   def execDELETERich(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
 
@@ -228,13 +240,15 @@ trait WSClient extends WSClientBase {
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
-    bodyParams: Seq[(PT, Option[JsValue])] = Nil
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil
   ): Future[Response] =
     execPATCHRich(
       endPoint,
       endPointParam,
       params,
-      bodyParams
+      bodyParams,
+      extraHeaders
     ).map(getResponseOrError)
 
   def execPATCHRich(
@@ -242,6 +256,7 @@ trait WSClient extends WSClientBase {
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
 
@@ -253,13 +268,15 @@ trait WSClient extends WSClientBase {
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
-    bodyParams: Seq[(PT, Option[JsValue])] = Nil
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil
   ): Future[Response] =
     execPUTRich(
       endPoint,
       endPointParam,
       params,
-      bodyParams
+      bodyParams,
+      extraHeaders
     ).map(getResponseOrError)
 
   def execPUTRich(
@@ -267,6 +284,7 @@ trait WSClient extends WSClientBase {
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
 
