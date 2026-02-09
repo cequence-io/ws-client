@@ -1,6 +1,5 @@
 package io.cequence.wsclient.service.adapter
 
-import akka.stream.Materializer
 import com.typesafe.scalalogging.Logger
 import io.cequence.wsclient.service.CloseableService
 import io.cequence.wsclient.service.adapter.ServiceWrapperTypes.CloseableServiceWrapper
@@ -21,13 +20,6 @@ trait ServiceBaseAdapters[S <: CloseableService] {
     underlyings: S*
   ): S =
     wrapAndDelegate(new RandomOrderAdapter(underlyings))
-
-  def parallelTakeFirst(
-    underlyings: S*
-  )(
-    implicit materializer: Materializer
-  ): S =
-    wrapAndDelegate(new ParallelTakeFirstAdapter(underlyings))
 
   def log(
     underlying: S,

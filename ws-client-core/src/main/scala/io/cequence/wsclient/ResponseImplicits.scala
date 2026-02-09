@@ -1,7 +1,5 @@
 package io.cequence.wsclient
 
-import akka.stream.scaladsl.Source
-import akka.util.ByteString
 import io.cequence.wsclient.JsonUtil.JsonOps
 import io.cequence.wsclient.domain.{CequenceWSException, Response, RichResponse}
 import play.api.libs.json.Reads
@@ -33,9 +31,6 @@ object ResponseImplicits {
 
     def asSafeString: String =
       getOrThrowNoResponse(response).string
-
-    def asSafeSource: Source[ByteString, _] =
-      getOrThrowNoResponse(response).source
 
     private def getOrThrowNoResponse[T](response: RichResponse): Response =
       response.response.getOrElse(

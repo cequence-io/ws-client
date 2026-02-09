@@ -15,7 +15,8 @@ trait PollingHelper {
   )(
     call: => Future[T]
   )(
-    implicit ec: ExecutionContext, scheduler: Scheduler
+    implicit ec: ExecutionContext,
+    scheduler: Scheduler
   ): Future[T] =
     call.flatMap { result =>
       if (isDone(result)) {

@@ -1,7 +1,5 @@
 package io.cequence.wsclient.domain
 
-import akka.stream.scaladsl.Source
-import akka.util.ByteString
 import play.api.libs.json.JsValue
 
 trait RichResponse {
@@ -17,8 +15,6 @@ trait Response {
   def json: JsValue
 
   def string: String
-
-  def source: Source[ByteString, _]
 }
 
 case class StatusData(

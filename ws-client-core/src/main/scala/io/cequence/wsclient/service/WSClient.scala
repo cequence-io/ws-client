@@ -1,7 +1,5 @@
 package io.cequence.wsclient.service
 
-import akka.stream.scaladsl.Source
-import akka.util.ByteString
 import io.cequence.wsclient.JsonUtil
 import io.cequence.wsclient.domain._
 import io.cequence.wsclient.service.ws.FilePart
@@ -183,30 +181,6 @@ trait WSClient extends WSClientBase {
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
 
-  def execPOSTSource(
-    endPoint: PEP,
-    endPointParam: Option[String] = None,
-    urlParams: Seq[(PT, Option[Any])] = Nil,
-    source: Source[ByteString, _],
-    extraHeaders: Seq[(String, String)] = Nil
-  ): Future[Response] =
-    execPOSTSourceRich(
-      endPoint,
-      endPointParam,
-      urlParams,
-      source,
-      extraHeaders
-    ).map(getResponseOrError)
-
-  def execPOSTSourceRich(
-    endPoint: PEP,
-    endPointParam: Option[String] = None,
-    urlParams: Seq[(PT, Option[Any])] = Nil,
-    source: Source[ByteString, _],
-    extraHeaders: Seq[(String, String)] = Nil,
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
-  ): Future[RichResponse]
-
   ////////////
   // DELETE //
   ////////////
@@ -284,6 +258,91 @@ trait WSClient extends WSClientBase {
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
     bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse]
+
+  def execPUTBody(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil
+  ): Future[Response] =
+    execPUTBodyRich(
+      endPoint,
+      endPointParam,
+      params,
+      body,
+      extraHeaders
+    ).map(getResponseOrError)
+
+  def execPUTBodyRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse]
+
+  /**
+   * @param fileParams
+   *   the third param in a tuple is a display (header) file name
+   */
+  def execPUTMultipart(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    fileParams: Seq[(PT, File, Option[String])] = Nil,
+    bodyParams: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil
+  ): Future[Response] =
+    execPUTMultipartRich(
+      endPoint,
+      endPointParam,
+      params,
+      fileParams,
+      bodyParams,
+      extraHeaders
+    ).map(getResponseOrError)
+
+  /**
+   * @param fileParams
+   *   the third param in a tuple is a display (header) file name
+   */
+  def execPUTMultipartRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    fileParams: Seq[(PT, File, Option[String])] = Nil,
+    bodyParams: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  )(
+    implicit filePartToContent: FilePart => String = contentTypeByExtension
+  ): Future[RichResponse]
+
+  def execPUTFile(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(PT, Option[Any])] = Nil,
+    file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil
+  ): Future[Response] =
+    execPUTFileRich(
+      endPoint,
+      endPointParam,
+      urlParams,
+      file,
+      extraHeaders
+    ).map(getResponseOrError)
+
+  def execPUTFileRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(PT, Option[Any])] = Nil,
+    file: java.io.File,
     extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]

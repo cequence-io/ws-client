@@ -14,7 +14,7 @@ import io.cequence.wsclient.domain.{
   RichResponse,
   WsRequestContext
 }
-import io.cequence.wsclient.service.{WSClientEngine, WSClientEngineStreamExtra}
+import io.cequence.wsclient.service.{WSClientEngine, WSClientOutputStreamExtra}
 import io.cequence.wsclient.service.ws.PlayWSClientEngine
 import org.slf4j.LoggerFactory
 import play.api.libs.json.{JsString, JsValue, Json}
@@ -32,7 +32,7 @@ import scala.concurrent.ExecutionContext
  */
 private trait PlayWSStreamClientEngine
     extends PlayWSClientEngine
-    with WSClientEngineStreamExtra {
+    with WSClientOutputStreamExtra {
 
   private val logger = LoggerFactory.getLogger("PlayWSStreamClientEngine")
 
@@ -205,7 +205,7 @@ object PlayWSStreamClientEngine {
   )(
     implicit materializer: Materializer,
     ec: ExecutionContext
-  ): WSClientEngine with WSClientEngineStreamExtra =
+  ): WSClientEngine with WSClientOutputStreamExtra =
     new PlayWSStreamClientEngineImpl(coreUrl, requestContext, recoverErrors)
 
   private final class PlayWSStreamClientEngineImpl(

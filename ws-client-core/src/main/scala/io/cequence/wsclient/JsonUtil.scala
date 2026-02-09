@@ -73,7 +73,7 @@ object JsonUtil {
         case Some(s) => toJson(s)
         case None    => JsNull
 
-        case x: String => JsString(x)
+        case x: String  => JsString(x)
         case x: ju.UUID => JsString(x.toString)
 
         case x: BigDecimal => JsNumber(x)
@@ -86,9 +86,9 @@ object JsonUtil {
         case x: Float      => JsNumber(BigDecimal.valueOf(x.toDouble))
         case n: Number     => JsNumber(n.doubleValue())
 
-        case x: Boolean    => JsBoolean(x)
+        case x: Boolean => JsBoolean(x)
 
-        case x: ju.Date    => Json.toJson(x)
+        case x: ju.Date => Json.toJson(x)
 
         case x: Array[_]          => JsArray(x.map(toJson))
         case x: collection.Seq[_] => JsArray(x.map(toJson))
@@ -142,7 +142,7 @@ object JsonUtil {
       case JsBoolean(value)   => value
       case JsArray(value)     => value.toSeq.map(toValueWithNull(nullValue))
       case jsObject: JsObject => jsObjectToMapWithNull(nullValue)(jsObject)
-      case _ => throw new IllegalArgumentException("Unknown JSON type")
+      case _                  => throw new IllegalArgumentException("Unknown JSON type")
     }
 
   def jsObjectToMapWithNull(nullValue: Any)(jsObject: JsObject): Map[String, Any] =
@@ -234,7 +234,10 @@ object JsonUtil {
       case JsString(value) =>
         valueMap.get(value.trim) match {
           case Some(v) => JsSuccess(v)
-          case None    => JsError(s"'$value' is not a valid enum value. Valid values: ${valueMap.keys.mkString(", ")}")
+          case None =>
+            JsError(
+              s"'$value' is not a valid enum value. Valid values: ${valueMap.keys.mkString(", ")}"
+            )
         }
       case _ => JsError("String value expected")
     }

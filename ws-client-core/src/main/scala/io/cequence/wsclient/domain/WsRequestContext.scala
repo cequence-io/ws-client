@@ -13,5 +13,10 @@ case class WsRequestContext(
   /**
    * Extra parameters to be added to each request.
    */
-  extraParams: Seq[(String, String)] = Nil
+  extraParams: Seq[(String, String)] = Nil,
+
+  /**
+   * Proxy URL to route requests through.
+   */
+  proxyURL: Option[String] = None
 )

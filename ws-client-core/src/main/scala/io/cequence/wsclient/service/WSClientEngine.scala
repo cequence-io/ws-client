@@ -39,7 +39,7 @@ trait WSClientEngine extends WSClient {
       else
         jsValue match {
           case JsObject(fields) => fields.toSeq
-          case _ => throw new CequenceWSException("Empty param name.")
+          case _                => throw new CequenceWSException("Empty param name.")
         }
     }.flatten
 

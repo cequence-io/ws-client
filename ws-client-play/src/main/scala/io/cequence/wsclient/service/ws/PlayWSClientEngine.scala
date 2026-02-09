@@ -4,7 +4,7 @@ import akka.stream.Materializer
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
 import io.cequence.wsclient.domain._
-import io.cequence.wsclient.service.WSClientEngine
+import io.cequence.wsclient.service.{WSClientEngine, WSClientInputStreamExtra}
 import io.cequence.wsclient.service.ws.PlayWSMultipartWritable.writeableOf_MultipartFormData
 import play.api.libs.json.{JsObject, JsValue}
 import play.api.libs.ws.JsonBodyWritables._
@@ -22,7 +22,10 @@ import scala.concurrent.{ExecutionContext, Future}
  * @since Jan
  *   2023
  */
-protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
+protected trait PlayWSClientEngine
+    extends WSClientEngine
+    with WSClientInputStreamExtra
+    with HasPlayWSClient {
 
   protected val defaultRequestTimeout: Int = 120 * 1000 // two minutes
   protected val defaultReadoutTimeout: Int = 120 * 1000 // two minutes
@@ -79,7 +82,7 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
       acceptableStatusCodes
     )
 
-  def execPOSTBodyRich(
+  override def execPOSTBodyRich(
     endPoint: PEP,
     endPointParam: Option[String] = None,
     params: Seq[(PT, Option[Any])] = Nil,
@@ -287,12 +290,80 @@ protected trait PlayWSClientEngine extends WSClientEngine with HasPlayWSClient {
     bodyParams: Seq[(String, Option[JsValue])] = Nil,
     extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse] =
+    execPUTBodyRich(
+      endPoint,
+      endPointParam,
+      params,
+      toJsBodyObject(bodyParams),
+      extraHeaders,
+      acceptableStatusCodes
+    )
+
+  override def execPUTBodyRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] = {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
 
     execPUTAux(
       request,
-      toJsBodyObject(bodyParams),
+      body,
+      Some(endPoint),
+      acceptableStatusCodes
+    )
+  }
+
+  /**
+   * @param fileParams
+   *   the third param in a tuple is a display (header) file name
+   */
+  override def execPUTMultipartRich(
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    fileParams: Seq[(String, File, Option[String])] = Nil,
+    bodyParams: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  )(
+    implicit filePartToContent: FilePart => String = contentTypeByExtension
+  ): Future[RichResponse] = {
+    val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
+    val formData = createMultipartFormData(fileParams, bodyParams)
+
+    implicit val writeable: BodyWritable[MultipartFormData] = writeableOf_MultipartFormData(
+      "utf-8"
+    )
+
+    execPUTAux(
+      request,
+      formData,
+      Some(endPoint),
+      acceptableStatusCodes
+    )
+  }
+
+  override def execPUTFileRich(
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(String, Option[Any])] = Nil,
+    file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse] = {
+    val request =
+      getWSRequestOptional(Some(endPoint), endPointParam, urlParams, extraHeaders)
+
+    implicit val writable = DefaultBodyWritables.writableOf_File
+
+    execPUTAux(
+      request,
+      file,
       Some(endPoint),
       acceptableStatusCodes
     )
@@ -389,7 +460,8 @@ object PlayWSClientEngine {
   )(
     implicit materializer: Materializer,
     ec: ExecutionContext
-  ): WSClientEngine = withContextFun(coreUrl, () => requestContext, recoverErrors)
+  ): WSClientEngine with WSClientInputStreamExtra =
+    withContextFun(coreUrl, () => requestContext, recoverErrors)
 
   def withContextFun(
     coreUrl: String,
@@ -398,7 +470,8 @@ object PlayWSClientEngine {
   )(
     implicit materializer: Materializer,
     ec: ExecutionContext
-  ): WSClientEngine = new PlayWSClientEngineImpl(coreUrl, requestContext, recoverErrors)
+  ): WSClientEngine with WSClientInputStreamExtra =
+    new PlayWSClientEngineImpl(coreUrl, requestContext, recoverErrors)
 
   private final class PlayWSClientEngineImpl(
     override protected val coreUrl: String,

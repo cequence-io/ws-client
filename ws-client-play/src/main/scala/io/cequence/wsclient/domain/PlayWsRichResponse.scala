@@ -20,7 +20,7 @@ final case class PlayWsResponse(
   rawResponse: StandaloneWSRequest#Response,
   serviceNameForLogging: String,
   endpointForLogging: Option[String]
-) extends Response {
+) extends StreamedResponse {
 
   override def json: JsValue =
     try {

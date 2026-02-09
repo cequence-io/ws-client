@@ -1,7 +1,5 @@
 package io.cequence.wsclient.service
 
-import akka.stream.scaladsl.Source
-import akka.util.ByteString
 import io.cequence.wsclient.domain._
 import io.cequence.wsclient.service.ws.FilePart
 import play.api.libs.json._
@@ -133,23 +131,6 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       acceptableStatusCodes
     )
 
-  override def execPOSTSourceRich(
-    endPoint: PEP,
-    endPointParam: Option[String] = None,
-    urlParams: Seq[(PT, Option[Any])] = Nil,
-    source: Source[ByteString, _],
-    extraHeaders: Seq[(String, String)] = Nil,
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
-  ): Future[RichResponse] =
-    engine.execPOSTSourceRich(
-      endPoint.toString,
-      endPointParam,
-      paramTuplesToStrings(urlParams),
-      source,
-      extraHeaders,
-      acceptableStatusCodes
-    )
-
   ////////////
   // DELETE //
   ////////////
@@ -207,6 +188,65 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       endPointParam,
       paramTuplesToStrings(params),
       paramTuplesToStrings(bodyParams),
+      extraHeaders,
+      acceptableStatusCodes
+    )
+
+  override def execPUTBodyRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse] =
+    engine.execPUTBodyRich(
+      endPoint.toString,
+      endPointParam,
+      paramTuplesToStrings(params),
+      body,
+      extraHeaders,
+      acceptableStatusCodes
+    )
+
+  /**
+   * @param fileParams
+   *   the third param in a tuple is a display (header) file name
+   */
+  override def execPUTMultipartRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    fileParams: Seq[(PT, File, Option[String])] = Nil,
+    bodyParams: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  )(
+    implicit filePartToContent: FilePart => String = contentTypeByExtension
+  ): Future[RichResponse] =
+    engine.execPUTMultipartRich(
+      endPoint.toString,
+      endPointParam,
+      paramTuplesToStrings(params),
+      param3TuplesToStrings(fileParams),
+      paramTuplesToStrings(bodyParams),
+      extraHeaders,
+      acceptableStatusCodes
+    )
+
+  override def execPUTFileRich(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(PT, Option[Any])] = Nil,
+    file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): Future[RichResponse] =
+    engine.execPUTFileRich(
+      endPoint.toString,
+      endPointParam,
+      paramTuplesToStrings(urlParams),
+      file,
       extraHeaders,
       acceptableStatusCodes
     )

@@ -9,7 +9,7 @@ ThisBuild / description := "Generic WebServices library currently only with Play
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala213
-ThisBuild / version := "0.7.3"
+ThisBuild / version := "0.8.0"
 ThisBuild / isSnapshot := false
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 
@@ -145,10 +145,19 @@ lazy val `ws-client-core` =
   (project in file("ws-client-core")).settings(
     name := "ws-client-core",
     libraryDependencies += "com.typesafe.play" %% "play-json" % playJsonVersion.value,
-    libraryDependencies ++= akkaStreamLibs.value,
+    libraryDependencies += "com.typesafe" % "config" % "1.4.3",
     libraryDependencies ++= loggingLibs.value,
     publish / skip := false
   )
+
+lazy val `ws-client-core-akka` =
+  (project in file("ws-client-core-akka"))
+    .settings(
+      name := "ws-client-core-akka",
+      libraryDependencies ++= akkaStreamLibs.value,
+      publish / skip := false
+    )
+    .dependsOn(`ws-client-core`)
 
 lazy val `json-repair` =
   (project in file("json-repair")).settings(
@@ -167,8 +176,8 @@ lazy val `ws-client-play` =
       libraryDependencies ++= playWsDependencies.value,
       publish / skip := false
     )
-    .dependsOn(`ws-client-core`)
-    .aggregate(`ws-client-core`, `json-repair`)
+    .dependsOn(`ws-client-core-akka`)
+    .aggregate(`ws-client-core`, `ws-client-core-akka`, `json-repair`)
 
 lazy val `ws-client-play-stream` =
   (project in file("ws-client-play-stream"))
@@ -177,5 +186,5 @@ lazy val `ws-client-play-stream` =
       libraryDependencies += "com.typesafe.akka" %% "akka-http" % akkaHttpVersion, // JSON WS Streaming
       publish / skip := false
     )
-    .dependsOn(`ws-client-core`, `ws-client-play`)
-    .aggregate(`ws-client-core`, `ws-client-play`)
+    .dependsOn(`ws-client-core-akka`, `ws-client-play`)
+    .aggregate(`ws-client-core`, `ws-client-core-akka`, `ws-client-play`)

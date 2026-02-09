@@ -12,7 +12,7 @@ import play.api.libs.json.JsValue
  * @since Feb
  *   2023
  */
-trait WSClientEngineStreamExtra {
+trait WSClientOutputStreamExtra {
 
   protected implicit val materializer: Materializer
 
