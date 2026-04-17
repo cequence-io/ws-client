@@ -83,7 +83,8 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     fileParams: Seq[(PT, File, Option[String])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil,
     extraHeaders: Seq[(String, String)] = Nil,
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes,
+    useInMemoryBody: Boolean = false
   )(
     implicit filePartToContent: FilePart => String = contentTypeByExtension
   ): Future[RichResponse] =
@@ -94,7 +95,8 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       param3TuplesToStrings(fileParams),
       paramTuplesToStrings(bodyParams),
       extraHeaders,
-      acceptableStatusCodes
+      acceptableStatusCodes,
+      useInMemoryBody
     )
 
   override def execPOSTURLEncodedRich(
@@ -220,7 +222,8 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     fileParams: Seq[(PT, File, Option[String])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil,
     extraHeaders: Seq[(String, String)] = Nil,
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes,
+    useInMemoryBody: Boolean = false
   )(
     implicit filePartToContent: FilePart => String = contentTypeByExtension
   ): Future[RichResponse] =
@@ -231,7 +234,8 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       param3TuplesToStrings(fileParams),
       paramTuplesToStrings(bodyParams),
       extraHeaders,
-      acceptableStatusCodes
+      acceptableStatusCodes,
+      useInMemoryBody
     )
 
   override def execPUTFileRich(

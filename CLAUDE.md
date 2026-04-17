@@ -13,7 +13,7 @@ The project includes:
 - Streaming support for large payloads
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 0.8.0
+Current version: 0.8.1
 
 ## Build Commands
 

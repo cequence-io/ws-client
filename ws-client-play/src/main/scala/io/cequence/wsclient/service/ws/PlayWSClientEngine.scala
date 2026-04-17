@@ -5,7 +5,7 @@ import akka.stream.scaladsl.Source
 import akka.util.ByteString
 import io.cequence.wsclient.domain._
 import io.cequence.wsclient.service.{WSClientEngine, WSClientInputStreamExtra}
-import io.cequence.wsclient.service.ws.PlayWSMultipartWritable.writeableOf_MultipartFormData
+import io.cequence.wsclient.service.ws.PlayWSMultipartWritable.{writeableOf_MultipartFormData, writeableOf_MultipartFormDataInMemory}
 import play.api.libs.json.{JsObject, JsValue}
 import play.api.libs.ws.JsonBodyWritables._
 import play.api.libs.ws.{BodyWritable, DefaultBodyWritables, StandaloneWSRequest}
@@ -111,16 +111,19 @@ protected trait PlayWSClientEngine
     fileParams: Seq[(String, File, Option[String])] = Nil,
     bodyParams: Seq[(String, Option[Any])] = Nil,
     extraHeaders: Seq[(String, String)] = Nil,
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes,
+    useInMemoryBody: Boolean = false
   )(
     implicit filePartToContent: FilePart => String = contentTypeByExtension
   ): Future[RichResponse] = {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
     val formData = createMultipartFormData(fileParams, bodyParams)
 
-    implicit val writeable: BodyWritable[MultipartFormData] = writeableOf_MultipartFormData(
-      "utf-8"
-    )
+    implicit val writeable: BodyWritable[MultipartFormData] =
+      if (useInMemoryBody)
+        writeableOf_MultipartFormDataInMemory("utf-8")
+      else
+        writeableOf_MultipartFormData("utf-8")
 
     execPOSTWithStatusAux(
       request,
@@ -329,16 +332,19 @@ protected trait PlayWSClientEngine
     fileParams: Seq[(String, File, Option[String])] = Nil,
     bodyParams: Seq[(String, Option[Any])] = Nil,
     extraHeaders: Seq[(String, String)] = Nil,
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes,
+    useInMemoryBody: Boolean = false
   )(
     implicit filePartToContent: FilePart => String = contentTypeByExtension
   ): Future[RichResponse] = {
     val request = getWSRequestOptional(Some(endPoint), endPointParam, params, extraHeaders)
     val formData = createMultipartFormData(fileParams, bodyParams)
 
-    implicit val writeable: BodyWritable[MultipartFormData] = writeableOf_MultipartFormData(
-      "utf-8"
-    )
+    implicit val writeable: BodyWritable[MultipartFormData] =
+      if (useInMemoryBody)
+        writeableOf_MultipartFormDataInMemory("utf-8")
+      else
+        writeableOf_MultipartFormData("utf-8")
 
     execPUTAux(
       request,

@@ -30,7 +30,10 @@ trait WSClientBase extends CloseableService {
       "jpg" -> "image/jpeg",
       "jpeg" -> "image/jpeg",
       "gif" -> "image/gif",
-      "svg" -> "image/svg+xml"
+      "svg" -> "image/svg+xml",
+      "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )
 
     val contentTypeAux = file.contentType.orElse {

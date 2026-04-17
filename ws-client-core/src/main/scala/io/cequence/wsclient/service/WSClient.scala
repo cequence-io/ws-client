@@ -99,6 +99,9 @@ trait WSClient extends WSClientBase {
   /**
    * @param fileParams
    *   the third param in a tuple is a display (header) file name
+   * @param useInMemoryBody
+   *   if true, materializes the entire body in memory avoiding chunked transfer encoding;
+   *   use when the target server does not support chunked requests (e.g. behind Cloudflare)
    */
   def execPOSTMultipart(
     endPoint: PEP,
@@ -106,7 +109,8 @@ trait WSClient extends WSClientBase {
     params: Seq[(PT, Option[Any])] = Nil,
     fileParams: Seq[(PT, File, Option[String])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil,
-    extraHeaders: Seq[(String, String)] = Nil
+    extraHeaders: Seq[(String, String)] = Nil,
+    useInMemoryBody: Boolean = false
   ): Future[Response] =
     execPOSTMultipartRich(
       endPoint,
@@ -114,12 +118,16 @@ trait WSClient extends WSClientBase {
       params,
       fileParams,
       bodyParams,
-      extraHeaders
+      extraHeaders,
+      useInMemoryBody = useInMemoryBody
     ).map(getResponseOrError)
 
   /**
    * @param fileParams
    *   the third param in a tuple is a display (header) file name
+   * @param useInMemoryBody
+   *   if true, materializes the entire body in memory avoiding chunked transfer encoding;
+   *   use when the target server does not support chunked requests (e.g. behind Cloudflare)
    */
   def execPOSTMultipartRich(
     endPoint: PEP,
@@ -128,7 +136,8 @@ trait WSClient extends WSClientBase {
     fileParams: Seq[(PT, File, Option[String])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil,
     extraHeaders: Seq[(String, String)] = Nil,
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes,
+    useInMemoryBody: Boolean = false
   )(
     implicit filePartToContent: FilePart => String = contentTypeByExtension
   ): Future[RichResponse]
@@ -289,6 +298,9 @@ trait WSClient extends WSClientBase {
   /**
    * @param fileParams
    *   the third param in a tuple is a display (header) file name
+   * @param useInMemoryBody
+   *   if true, materializes the entire body in memory avoiding chunked transfer encoding;
+   *   use when the target server does not support chunked requests (e.g. behind Cloudflare)
    */
   def execPUTMultipart(
     endPoint: PEP,
@@ -296,7 +308,8 @@ trait WSClient extends WSClientBase {
     params: Seq[(PT, Option[Any])] = Nil,
     fileParams: Seq[(PT, File, Option[String])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil,
-    extraHeaders: Seq[(String, String)] = Nil
+    extraHeaders: Seq[(String, String)] = Nil,
+    useInMemoryBody: Boolean = false
   ): Future[Response] =
     execPUTMultipartRich(
       endPoint,
@@ -304,12 +317,16 @@ trait WSClient extends WSClientBase {
       params,
       fileParams,
       bodyParams,
-      extraHeaders
+      extraHeaders,
+      useInMemoryBody = useInMemoryBody
     ).map(getResponseOrError)
 
   /**
    * @param fileParams
    *   the third param in a tuple is a display (header) file name
+   * @param useInMemoryBody
+   *   if true, materializes the entire body in memory avoiding chunked transfer encoding;
+   *   use when the target server does not support chunked requests (e.g. behind Cloudflare)
    */
   def execPUTMultipartRich(
     endPoint: PEP,
@@ -318,7 +335,8 @@ trait WSClient extends WSClientBase {
     fileParams: Seq[(PT, File, Option[String])] = Nil,
     bodyParams: Seq[(PT, Option[Any])] = Nil,
     extraHeaders: Seq[(String, String)] = Nil,
-    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes,
+    useInMemoryBody: Boolean = false
   )(
     implicit filePartToContent: FilePart => String = contentTypeByExtension
   ): Future[RichResponse]
