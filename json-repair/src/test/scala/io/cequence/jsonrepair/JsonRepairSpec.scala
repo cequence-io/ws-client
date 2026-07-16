@@ -65,10 +65,12 @@ class JsonRepairSpec extends AnyFlatSpec with Matchers {
       """{"key": 12345678901234567890}"""
     ) shouldBe """{"key":12345678901234567890}"""
 
+    // single-quoted strings so the unicode escape is substituted on both Scala 2 and 3
+    // (Scala 3 no longer substitutes unicode escapes inside triple-quoted strings)
     JsonRepair.repairJson(
-      """{"key": "value\u263A"}""",
+      "{\"key\": \"value\u263A\"}",
       ensureAscii = false
-    ) shouldBe """{"key":"value\u263A"}"""
+    ) shouldBe "{\"key\":\"value\u263A\"}"
 
     JsonRepair.repairJson(
       """{"key": "value\\nvalue"}"""
@@ -521,7 +523,7 @@ class JsonRepairSpec extends AnyFlatSpec with Matchers {
         |    "value": "Name",
         |    "reference": "value value value value"
         |  }
-        |}""".stripMargin,
+        |}""".stripMargin
     ) shouldBe
       """{"key":{"value":"Name","reference":"value value value value"}}""".stripMargin
   }

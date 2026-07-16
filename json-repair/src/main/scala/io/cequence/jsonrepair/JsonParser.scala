@@ -543,7 +543,7 @@ class JsonParser(
         }
 
       case _ =>
-        // no second quote scenario
+      // no second quote scenario
     }
 
     // PART III
