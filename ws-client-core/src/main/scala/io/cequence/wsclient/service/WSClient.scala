@@ -100,8 +100,8 @@ trait WSClient extends WSClientBase {
    * @param fileParams
    *   the third param in a tuple is a display (header) file name
    * @param useInMemoryBody
-   *   if true, materializes the entire body in memory avoiding chunked transfer encoding;
-   *   use when the target server does not support chunked requests (e.g. behind Cloudflare)
+   *   if true, materializes the entire body in memory avoiding chunked transfer encoding; use
+   *   when the target server does not support chunked requests (e.g. behind Cloudflare)
    */
   def execPOSTMultipart(
     endPoint: PEP,
@@ -126,8 +126,8 @@ trait WSClient extends WSClientBase {
    * @param fileParams
    *   the third param in a tuple is a display (header) file name
    * @param useInMemoryBody
-   *   if true, materializes the entire body in memory avoiding chunked transfer encoding;
-   *   use when the target server does not support chunked requests (e.g. behind Cloudflare)
+   *   if true, materializes the entire body in memory avoiding chunked transfer encoding; use
+   *   when the target server does not support chunked requests (e.g. behind Cloudflare)
    */
   def execPOSTMultipartRich(
     endPoint: PEP,
@@ -299,8 +299,8 @@ trait WSClient extends WSClientBase {
    * @param fileParams
    *   the third param in a tuple is a display (header) file name
    * @param useInMemoryBody
-   *   if true, materializes the entire body in memory avoiding chunked transfer encoding;
-   *   use when the target server does not support chunked requests (e.g. behind Cloudflare)
+   *   if true, materializes the entire body in memory avoiding chunked transfer encoding; use
+   *   when the target server does not support chunked requests (e.g. behind Cloudflare)
    */
   def execPUTMultipart(
     endPoint: PEP,
@@ -325,8 +325,8 @@ trait WSClient extends WSClientBase {
    * @param fileParams
    *   the third param in a tuple is a display (header) file name
    * @param useInMemoryBody
-   *   if true, materializes the entire body in memory avoiding chunked transfer encoding;
-   *   use when the target server does not support chunked requests (e.g. behind Cloudflare)
+   *   if true, materializes the entire body in memory avoiding chunked transfer encoding; use
+   *   when the target server does not support chunked requests (e.g. behind Cloudflare)
    */
   def execPUTMultipartRich(
     endPoint: PEP,

@@ -8,12 +8,30 @@ import java.io.File
 import scala.concurrent.Future
 
 /**
- * WS client with an "engine"
+ * WS client with a site-stateless "engine": the service holds its [[SiteBinding]] (base URL,
+ * auth context, error recovery, label) and feeds it into every engine call. The engine itself
+ * carries no site state, so ONE engine can back any number of services/providers.
+ *
+ * Ownership: `close()` closes the engine only when the service OWNS it (`ownsEngine`, default
+ * true - the plain-factory case, where the factory created a private engine for this service).
+ * Services built on a SHARED engine (`withEngine` hatches) override it to false - the shared
+ * engine is closed once, by its creator, when done with all services.
  *
  * @since July
  *   2024
  */
 trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSClientEngine[T] {
+
+  /**
+   * The site this service talks to - threaded into every engine call.
+   */
+  protected def site: SiteBinding
+
+  /**
+   * Whether `close()` closes the engine. True (default) for a private, factory-created engine;
+   * false for a shared, caller-supplied one.
+   */
+  protected def ownsEngine: Boolean = true
 
   /////////
   // GET //
@@ -27,6 +45,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execGETRich(
+      site,
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),
@@ -47,6 +66,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPOSTRich(
+      site,
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),
@@ -64,6 +84,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPOSTBodyRich(
+      site,
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),
@@ -89,6 +110,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     implicit filePartToContent: FilePart => String = contentTypeByExtension
   ): Future[RichResponse] =
     engine.execPOSTMultipartRich(
+      site,
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),
@@ -108,6 +130,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPOSTURLEncodedRich(
+      site,
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),
@@ -125,6 +148,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPOSTFileRich(
+      site,
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(urlParams),
@@ -145,6 +169,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execDELETERich(
+      site,
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),
@@ -165,6 +190,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPATCHRich(
+      site,
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),
@@ -186,6 +212,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPUTRich(
+      site,
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),
@@ -203,6 +230,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPUTBodyRich(
+      site,
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),
@@ -228,6 +256,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     implicit filePartToContent: FilePart => String = contentTypeByExtension
   ): Future[RichResponse] =
     engine.execPUTMultipartRich(
+      site,
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(params),
@@ -247,6 +276,7 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     engine.execPUTFileRich(
+      site,
       endPoint.toString,
       endPointParam,
       paramTuplesToStrings(urlParams),
@@ -259,7 +289,8 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
   // CLOSE //
   ///////////
 
-  def close() = engine.close()
+  def close() =
+    if (ownsEngine) engine.close()
 
   // aux
 
@@ -273,11 +304,12 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
   ) =
     params.map { case (k, v1, v2) => (k.toString, v1, v2) }
 
-  // engine delegates
+  // site delegates (kept for source compatibility with pre-stateless-engine code)
+
   protected def createURL(
     endpoint: Option[String],
     value: Option[String] = None
-  ): String = engine.createURL(endpoint, value)
+  ): String = site.createURL(endpoint, value)
 
   protected def toJsBodyObject(
     bodyParams: Seq[(String, Option[JsValue])]
@@ -285,5 +317,5 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
     engine.toJsBodyObject(bodyParams)
 
   protected def requestContext: WsRequestContext =
-    engine.requestContext
+    site.requestContextFn()
 }

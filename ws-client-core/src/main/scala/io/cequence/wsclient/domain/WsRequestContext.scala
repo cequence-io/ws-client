@@ -1,10 +1,12 @@
 package io.cequence.wsclient.domain
 
-import io.cequence.wsclient.service.ws.Timeouts
-
+/**
+ * Per-request, per-site data attached to every call an engine makes - purely request-scoped,
+ * carried by the [[SiteBinding]] fed into each engine call and re-evaluatable on every request
+ * (see `SiteBinding.requestContextFun`). Client-level settings (timeouts, proxy) live in
+ * `io.cequence.wsclient.service.spi.TransportSettings` instead.
+ */
 case class WsRequestContext(
-  explTimeouts: Option[Timeouts] = None,
-
   /**
    * Auth headers (HTTP headers) to be added to each request.
    */
@@ -13,10 +15,5 @@ case class WsRequestContext(
   /**
    * Extra parameters to be added to each request.
    */
-  extraParams: Seq[(String, String)] = Nil,
-
-  /**
-   * Proxy URL to route requests through.
-   */
-  proxyURL: Option[String] = None
+  extraParams: Seq[(String, String)] = Nil
 )
