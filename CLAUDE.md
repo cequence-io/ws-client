@@ -14,7 +14,7 @@ The project includes:
 - Streaming support for large payloads
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 1.0.0-SNAPSHOT
+Current version: 1.0.0
 
 ## Build Commands
 
@@ -72,7 +72,8 @@ The project is organized into 11 SBT modules (8 handwritten + 3 Pekko mirrors):
    - Implements `PlayWSClientEngine` using Play WS standalone client
    - Handles HTTP methods: GET, POST, DELETE, PATCH, PUT
    - Supports multiple content types: JSON, multipart/form-data, URL-encoded, file uploads, streaming
-   - Default timeouts: 120 seconds for both request and readout
+   - Default timeouts (for unset `Timeouts` fields): 60 s request/read, 5 s connect, 60 s pooled-connection-idle
+     (the jdk/sttp engines default the request timeout to 120 s)
 
 4. **ws-client-play-akka-stream** - Streaming extensions (named `ws-client-play-stream` before 1.0.0)
    - Depends on `ws-client-core-akka` and `ws-client-play-akka`
@@ -89,12 +90,14 @@ The project is organized into 11 SBT modules (8 handwritten + 3 Pekko mirrors):
 6. **ws-client-jdk / ws-client-sttp / ws-client-pekko-http** - additional backends
    - `ws-client-jdk`: zero-dependency engine on the JDK 11+ `java.net.http.HttpClient`
      (depends only on ws-client-core; Scala 2.12/2.13/3.2). Multipart is materialized in memory
-     via `MultipartBodyBuilder` (core); no streaming.
+     via `MultipartBodyBuilder` (core); output (SSE) streaming via the backend-agnostic
+     `WSClientOutputStreamCore` (`Flow.Publisher`) contract; no input streaming.
    - `ws-client-sttp`: engine over sttp client4 `core` (Scala 2.12/2.13; sttp4's Scala 3 needs
      3.3+). The provider uses sttp's JDK-based `HttpClientFutureBackend`; a custom sttp backend
      can be passed to `SttpWSClientEngine.apply`. The engine owns and closes its backend.
    - `ws-client-pekko-http`: direct pekko-http client engine (depends on ws-client-core-pekko;
-     Scala 2.13). Supports input streaming (`execPOSTSource`). No Play WS / shaded AHC.
+     Scala 2.13). Supports input streaming (`execPOSTSource`) and native output (SSE) streaming.
+     No Play WS / shaded AHC.
    - All three use `StringBackedResponse` / `SimpleRichResponse` from core (no streaming source
      on responses).
 
@@ -123,7 +126,7 @@ WSClientBase (basic request handling)
   ↓
 WSClient (HTTP method definitions with PEP/PT type parameters)
   ↓
-WSClientEngine (URL construction, adds coreUrl and requestContext)
+WSClientEngine (site-stateless engine contract: transportSettings + copy; every call takes a SiteBinding)
   ↓
 PlayWSClientEngine (concrete Play WS implementation, mixes in WSClientInputStreamExtraAkka)
 ```
@@ -143,9 +146,9 @@ resolves a provider in this order: explicit engine id → config key `ws-client.
 provider, else highest `priority`; ties and an empty classpath throw `CequenceWSException`).
 
 ```scala
-import io.cequence.wsclient.service.spi.{EngineSettings, WSClientEngineRegistry}
+import io.cequence.wsclient.service.spi.{TransportSettings, WSClientEngineRegistry}
 
-val engine = WSClientEngineRegistry(EngineSettings("https://api.example.com"))
+val engine = WSClientEngineRegistry() // site-stateless: the target site rides on each call as a SiteBinding
 ```
 
 Engine ids (by auto-selection priority): `play-pekko-stream` (21), `play-pekko` (20),
@@ -165,7 +168,7 @@ by `EngineCapability.OutputStreaming`/`InputStreaming` using the same resolution
 requiredCapabilities, classLoader)` overload). `pekko-http` implements output streaming natively;
 `ws-client-play-akka-stream`/`-pekko-stream` register the stream engines as providers.
 
-**Owned-system lifecycle:** every discovery-created engine eagerly creates a dedicated ActorSystem whose threads are DAEMON (`akka/pekko.daemonic = on` override, with the application's config as fallback) - a leaked engine cannot block JVM exit, but `engine.close()` remains the correct way to release it (terminates the client AND the system). To share a caller-owned ActorSystem across engines instead, use the direct constructors (`PlayWSClientEngine(...)`, `PlayWSStreamClientEngine(...)`, `PekkoHttpWSClientEngine(...)`) - engines built that way never touch your system on close().
+**Owned-system lifecycle:** every discovery-created akka/pekko-based engine eagerly creates a dedicated ActorSystem whose threads are DAEMON (`akka/pekko.daemonic = on` override, with the application's config as fallback) - a leaked engine cannot block JVM exit, but `engine.close()` remains the correct way to release it (terminates the client AND the system). To share a caller-owned ActorSystem across engines instead, use the direct constructors (`PlayWSClientEngine(...)`, `PlayWSStreamClientEngine(...)`, `PekkoHttpWSClientEngine(...)`) - engines built that way never touch your system on close().
 
 #### Service Adapters
 The library provides composable service adapters in `io.cequence.wsclient.service.adapter`:
@@ -191,13 +194,12 @@ This allows callers to handle non-2xx responses gracefully without exceptions.
 - `PlayWsResponse extends StreamedResponse` - concrete implementation backed by Play WS
 
 #### Request Context
-`WsRequestContext` provides request-scoped configuration:
-- Authentication headers
-- Extra query parameters
-- Custom timeouts via `Timeouts` case class
-- Proxy URL
+`WsRequestContext` carries per-request data only:
+- Authentication headers (`authHeaders`)
+- Extra query parameters (`extraParams`)
 
-Use `PlayWSClientEngine.withContextFun()` to provide dynamic context per request.
+Client-level settings (timeouts, proxy) live in `TransportSettings` instead. Use
+`SiteBinding.requestContextFun` to re-evaluate the context on every request (e.g. token refresh).
 
 ### Cross-Version Compatibility
 
@@ -238,6 +240,8 @@ Scala per project and an `inThisBuild` lookup sees the stale default version.
 
 ### Creating a WS Client
 ```scala
+import io.cequence.wsclient.domain.{SiteBinding, WsRequestContext}
+import io.cequence.wsclient.service.spi.TransportSettings
 import io.cequence.wsclient.service.ws.PlayWSClientEngine
 import akka.stream.Materializer
 import scala.concurrent.ExecutionContext
@@ -245,25 +249,30 @@ import scala.concurrent.ExecutionContext
 implicit val materializer: Materializer = ???
 implicit val ec: ExecutionContext = ???
 
-val client = PlayWSClientEngine(
-  coreUrl = "https://api.example.com",
-  requestContext = WsRequestContext()
-)
+// site-stateless engine on a caller-owned environment (or use WSClientEngineRegistry() for discovery)
+val engine = PlayWSClientEngine(TransportSettings())
+
+// the site rides on every call
+val site = SiteBinding("https://api.example.com", WsRequestContext())
 ```
 
 ### Making Requests
+Engine-level calls are `*Rich` and take the `SiteBinding` first:
+
 ```scala
 // Simple GET
-client.execGET(endPoint = "users", params = Seq("id" -> Some(123)))
+engine.execGETRich(site, endPoint = "users", params = Seq("id" -> Some(123)))
 
 // POST with JSON body
-client.execPOST(
+engine.execPOSTRich(
+  site,
   endPoint = "users",
   bodyParams = Seq("name" -> Some(Json.toJson("John")))
 )
 
 // Rich response with error handling
-client.execGETRich(
+engine.execGETRich(
+  site,
   endPoint = "users",
   acceptableStatusCodes = Seq(200, 404)
 ).map { response =>
@@ -273,6 +282,10 @@ client.execGETRich(
   }
 }
 ```
+
+Services extending `WSClientWithEngineBase` hold their `SiteBinding` once and expose the
+site-less, endpoint-first variants (`execGET`, `execGETRich`, ...) shown in the Rich Response
+Pattern section.
 
 ### Using Service Adapters
 Service adapters are applied via the `ServiceBaseAdapters` trait pattern. Extend your service with this trait and compose adapters:
@@ -308,14 +321,13 @@ val loggedService = log(service, "MyService")
   honored by the Play/jdk/sttp engines; pekko-http warns and ignores it (CONNECT-only proxy
   support). A proxy is a property of the shared client - all engines bound to one transport
   share it
-- On the discovery path, `EngineSettings.recoverErrors` is composed with the engine's default
-  normalization via `EngineSettings.resolveRecoverErrors` - user recovery sees Cequence
-  exceptions for recognized transport failures (portable across engines); explicit factories
-  keep the raw replace-the-default semantics
-- `EngineSettings.requestContextFun` re-evaluates the request context per request on every
-  engine (token refresh etc.); providers read the context via `settings.requestContextFn`.
-  All backend companions also expose a `withContextFun` factory. Client-level settings
-  (connect timeout, proxy; all timeouts on Play) are captured once at construction/first use
+- `SiteBinding.recoverErrors` is composed with the engine's default normalization via
+  `SiteBinding.resolveRecoverErrors` (on every creation path) - user recovery sees Cequence
+  exceptions for recognized transport failures (portable across engines)
+- `SiteBinding.requestContextFun` re-evaluates the request context per request on every
+  engine (token refresh etc.); engines read the context exclusively via
+  `site.requestContextFn`. Client-level settings (connect timeout, proxy; all timeouts on
+  Play) are captured once at construction/first use
 - Artifact rename hazard: the pre-1.0 `ws-client-play` / `ws-client-play-stream` artifacts and
   their ≥ 1.0.0 successors `ws-client-play-akka` / `ws-client-play-akka-stream` share FQCNs
   but not artifact ids, so there is no eviction - old + new on one classpath means
@@ -324,5 +336,4 @@ val loggedService = log(service, "MyService")
   the conflicting jars (covers akka+pekko mixing and old+renamed coexistence); with the config
   key `ws-client.strict-classpath = true` (or the same system property) it throws a
   `CequenceWSException` instead, on every lookup - recommended for CI
-- Error recovery is customizable via `recoverErrors` parameter in `PlayWSClientEngine`
 - JSON repair is procedural (faithful port from Python) and may not be idiomatic Scala
