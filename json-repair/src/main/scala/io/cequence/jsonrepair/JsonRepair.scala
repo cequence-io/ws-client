@@ -279,14 +279,17 @@ object JsonRepair {
               s
             }
 
-            // Check if the string is a number with mixed quotes
+            // Check if the string is a number with mixed quotes - stray apostrophes around or
+            // inside a number ("'1.0", "1'000") are quote debris, not content, so they are
+            // ignored here (and only here - in text they are kept)
+            val numberCandidate = cleanedString.replace("'", "")
             if (
               convertNumbers &&
-              cleanedString.forall(c =>
+              numberCandidate.forall(c =>
                 c.isDigit || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E' || c.isWhitespace
               )
             ) {
-              val trimmed = cleanedString.trim
+              val trimmed = numberCandidate.trim
               try {
                 JsNumber(BigDecimal(trimmed))
               } catch {

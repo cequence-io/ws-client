@@ -39,6 +39,11 @@ class JsonRepairSpec extends AnyFlatSpec with Matchers {
     JsonRepair.repairJson(
       """{"text": "I don't know", "n": {"x": 1}"""
     ) shouldBe """{"text":"I don't know","n":{"x":1}}"""
+    // ...but stray apostrophes around/inside a number are still quote debris for convertNumbers
+    (JsonRepair.loads(
+      """{"outer": {"v": "'1.5", "w": "2'5", "t": "don't"}}""",
+      convertNumbers = true
+    ) \ "outer").get shouldBe Json.obj("v" -> 1.5, "w" -> 25, "t" -> "don't")
   }
 
   it should "handle basic invalid types correctly" in {
