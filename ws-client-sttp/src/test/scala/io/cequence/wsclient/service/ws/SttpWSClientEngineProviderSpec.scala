@@ -161,6 +161,33 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       }
     }
 
+    "POST a URL-encoded body keeping every value of a repeated key, in order" in {
+      withEchoServer { port =>
+        val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+        val response = Await.result(
+          engine
+            .execPOSTURLEncodedRich(
+              SiteBinding(s"http://localhost:$port"),
+              "form",
+              bodyParams = Seq(
+                "color" -> Some("red"),
+                "size" -> Some("L"),
+                "color" -> Some("blue")
+              )
+            )
+            .map(engine.getResponseOrError),
+          30.seconds
+        )
+
+        (response.json \ "body").get shouldBe JsString("color=red&size=L&color=blue")
+        (response.json \ "contentType").get.as[String] should startWith(
+          "application/x-www-form-urlencoded"
+        )
+
+        engine.close()
+      }
+    }
+
     "POST an in-memory multipart body with a Content-Length" in {
       withEchoServer { port =>
         val file = File.createTempFile("ws-client-sttp-test", ".txt")

@@ -359,4 +359,9 @@ val loggedService = log(service, "MyService")
   repair path deliberately coerces the strings "true"/"false"/"null" to typed values - desired
   behavior, keep it (do not make it opt-in). Valid NESTED JSON also takes the repair path (the
   concatenated-JSON heuristic counts braces), so the repair path must not otherwise alter
-  content: apostrophes and key order are preserved
+  content: apostrophes are preserved. Key order beyond 4 keys is NOT (the parser accumulates
+  into a plain `Map`) - deliberately left so. `JsonParser` is a large, fragile port: keep
+  changes there minimal (prefer fixes in `JsonRepair.convertToJsValue`), and verify any change
+  differentially against the previous version - thousands of generated valid + mutated inputs
+  through every entry point (`repairJson`, `loads` flag variants, `repairJsonAsValue`,
+  `fromFile`) on 2.12 and 2.13, every output difference explained

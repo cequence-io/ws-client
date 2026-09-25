@@ -179,7 +179,9 @@ final class SttpWSClientEngine private[ws] (
     execRequest(
       site,
       request(site, Method.POST, endPoint, endPointParam, params, extraHeaders)
-        .body(bodyData.toMap),
+        // as an ordered Seq (not a Map): repeated keys (array-style form fields) keep every
+        // value, as on the jdk / pekko-http engines; toList - immutable Seq on Scala 2.12
+        .body(bodyData.toList, "utf-8"),
       Some(endPoint),
       acceptableStatusCodes
     )

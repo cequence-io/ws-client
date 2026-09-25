@@ -267,8 +267,10 @@ object JsonRepair {
             val cleanedString = if (s.contains("'") || s.contains("\"")) {
               // Handle mixed quotes more robustly
               if (
-                (s.startsWith("\"") && s.endsWith("\"")) ||
-                (s.startsWith("'") && s.endsWith("'"))
+                s.length >= 2 && (
+                  (s.startsWith("\"") && s.endsWith("\"")) ||
+                    (s.startsWith("'") && s.endsWith("'"))
+                )
               ) {
                 s.substring(1, s.length - 1)
               } else {
@@ -300,14 +302,14 @@ object JsonRepair {
             }
         }
       case m: Map[_, _] =>
-        // via an ordered Seq: on Scala 2.12 `Map.map` rebuilds a hash map, losing the
-        // parser's (insertion-ordered) key order
-        JsObject(m.asInstanceOf[Map[String, Any]].toSeq.map { case (k, v) =>
+        JsObject(m.asInstanceOf[Map[String, Any]].map { case (k, v) =>
           // Clean key from quotes if needed
           val cleanKey =
             if (
-              (k.startsWith("\"") && k.endsWith("\"")) ||
-              (k.startsWith("'") && k.endsWith("'"))
+              k.length >= 2 && (
+                (k.startsWith("\"") && k.endsWith("\"")) ||
+                  (k.startsWith("'") && k.endsWith("'"))
+              )
             ) {
               k.substring(1, k.length - 1)
             } else if (k.contains("\"")) {
