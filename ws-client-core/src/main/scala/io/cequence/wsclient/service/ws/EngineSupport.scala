@@ -54,4 +54,18 @@ private[wsclient] object EngineSupport {
       pooledConnectionIdleTimeout =
         explicit.pooledConnectionIdleTimeout.orElse(defaults.pooledConnectionIdleTimeout)
     )
+
+  /**
+   * The media type carried by a raw `Content-Type: <media type>\r\n` header line - the format
+   * the `FilePart => String` content functions produce (see
+   * `WSClientBase.contentTypeByExtension`); `None` for an empty or any other line.
+   */
+  def contentTypeOfHeaderLine(headerLine: String): Option[String] = {
+    val prefix = s"${HttpHeaderNames.CONTENT_TYPE}: "
+    val line = headerLine.stripSuffix("\r\n")
+    if (line.regionMatches(true, 0, prefix, 0, prefix.length))
+      Some(line.substring(prefix.length).trim).filter(_.nonEmpty)
+    else
+      None
+  }
 }

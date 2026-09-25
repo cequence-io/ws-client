@@ -311,6 +311,22 @@ lazy val `ws-client-sttp` =
     )
     .dependsOn(`ws-client-core`, `ws-client-testkit` % Test)
 
+val zioHttpVersion = "3.11.6"
+
+lazy val `ws-client-zio-http` =
+  (project in file("ws-client-zio-http"))
+    .settings(
+      name := "ws-client-zio-http",
+      crossScalaVersions := List(scala212, scala213), // zio-http's Scala 3 artifacts need 3.3+
+      libraryDependencies += "dev.zio" %% "zio-http" % zioHttpVersion,
+      // ZStream -> org.reactivestreams Publisher (then FlowAdapters -> java.util.concurrent.Flow)
+      libraryDependencies += "dev.zio" %% "zio-interop-reactivestreams" % "2.0.2",
+      libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      testLoggingSettings,
+      publish / skip := false
+    )
+    .dependsOn(`ws-client-core`, `ws-client-testkit` % Test)
+
 lazy val `ws-client-pekko-http` =
   (project in file("ws-client-pekko-http"))
     .settings(
@@ -340,6 +356,7 @@ lazy val root = (project in file("."))
     `ws-client-jdk`,
     `ws-client-sttp`,
     `ws-client-pekko-http`,
+    `ws-client-zio-http`,
     `ws-client-testkit`,
     `json-repair`
   )

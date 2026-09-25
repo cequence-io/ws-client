@@ -73,6 +73,7 @@ Other backends:
 - **ws-client-jdk** - backend on the JDK 11+ `java.net.http.HttpClient` (Scala 2.12, 2.13, 3); no Akka/Pekko/Play WS - it needs only `ws-client-core` (play-json, Jackson, Typesafe config, scala-logging)
 - **ws-client-sttp** - backend over [sttp client4](https://sttp.softwaremill.com) (Scala 2.12, 2.13), unlocking any sttp `Future` backend (OkHttp, Armeria, Pekko-HTTP, ...)
 - **ws-client-pekko-http** - direct pekko-http client backend (Scala 2.13), no Play WS / shaded AsyncHttpClient layer; supports input and output (SSE) streaming
+- **ws-client-zio-http** - backend on the [zio-http](https://zio.dev/zio-http) (Netty) client and the ZIO runtime (Scala 2.12, 2.13); output (SSE) streaming via `Flow.Publisher`. A ZIO application can run it on its own `Client` via `ZioHttpWSClientEngine.layer()`. With a proxy, target host names are still resolved through local DNS
 
 Independent:
 
@@ -110,6 +111,7 @@ Available engines (auto-selection picks the highest priority present):
 | `play-pekko-stream` | ws-client-play-pekko-stream | 21 | input + output streaming, multipart |
 | `play-pekko` | ws-client-play-pekko | 20 | input streaming, multipart |
 | `pekko-http` | ws-client-pekko-http | 15 | input + output streaming, multipart |
+| `zio-http` | ws-client-zio-http | 13 | output streaming (`Flow.Publisher`), multipart |
 | `play-akka-stream` | ws-client-play-akka-stream | 11 | input + output streaming, multipart |
 | `play-akka` | ws-client-play-akka | 10 | input streaming, multipart |
 | `sttp` | ws-client-sttp | 5 | multipart |
@@ -135,7 +137,7 @@ val streamedEngine = StreamedEngineRegistry.outputStreamed()
 val inputEngine = StreamedEngineRegistry.inputStreamed()
 ```
 
-Engines created through discovery own their execution environment (actor system / backend). To supply your own `Materializer`/`ExecutionContext`/backend, use the explicit factories (`PlayWSClientEngine(transportSettings)`, `PlayWSStreamClientEngine(...)`, `JdkWSClientEngine(...)`, `SttpWSClientEngine(...)`, `PekkoHttpWSClientEngine(...)`) - they take only client-level `TransportSettings`; the site is per call.
+Engines created through discovery own their execution environment (actor system / backend). To supply your own `Materializer`/`ExecutionContext`/backend, use the explicit factories (`PlayWSClientEngine(transportSettings)`, `PlayWSStreamClientEngine(...)`, `JdkWSClientEngine(...)`, `SttpWSClientEngine(...)`, `PekkoHttpWSClientEngine(...)`, `ZioHttpWSClientEngine(client)` / `ZioHttpWSClientEngine.layer()`) - they take only client-level `TransportSettings`; the site is per call.
 
 ## One Engine, Many Sites 🔗
 
