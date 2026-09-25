@@ -15,7 +15,7 @@ import io.cequence.wsclient.stream.{
 }
 import org.reactivestreams.FlowAdapters
 import play.api.libs.json.{JsValue, Json}
-import zio.http.netty.{NettyConfig, WsClientDaemonNettyDriver}
+import zio.http.netty.NettyConfig
 import zio.http.netty.client.NettyClientDriver
 import zio.http.{
   Body,
@@ -39,14 +39,23 @@ import zio.interop.reactivestreams.Adapters
 import zio.stream.ZStream
 import zio.{Chunk, Runtime, Scope, Unsafe, ZEnvironment, ZIO, ZLayer}
 
+import io.netty.channel.nio.NioIoHandler
+import io.netty.channel.socket.nio.NioSocketChannel
+import io.netty.channel.{Channel, ChannelFactory, EventLoopGroup, MultiThreadIoEventLoopGroup}
+import io.netty.util.concurrent.{DefaultThreadFactory, ThreadPerTaskExecutor}
+
 import java.io.File
+import java.lang.reflect.Constructor
 import java.net.UnknownHostException
 import java.nio.ByteBuffer
 import java.nio.channels.UnresolvedAddressException
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{Flow, TimeoutException}
+import scala.collection.immutable.ListMap
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.Try
+import scala.util.control.NonFatal
 
 /**
  * A SITE-STATELESS engine on the [[https://zio.dev/zio-http zio-http]] client (Netty) and the
@@ -462,14 +471,25 @@ final class ZioHttpWSClientEngine private[ws] (
                 response.body.asStream.chunks.map(chunk => ByteBuffer.wrap(chunk.toArray))
               )
             else
-              // never expose an error page as stream data - fail with a bounded diagnostic
-              response.body.asString.map(errorBody =>
-                ZStream.fail(
-                  new CequenceWSException(
-                    s"$label: HTTP ${response.status.code} - ${errorBody.take(500)}"
+              // never expose an error page as stream data - fail with a bounded diagnostic:
+              // at most MaxErrorBodyBytes are read, within the request timeout, so a huge or
+              // never-ending error body is neither buffered nor able to stall the stream
+              response.body.asStream
+                .take(MaxErrorBodyBytes)
+                .runCollect
+                .timeout(requestTimeout)
+                .map(bytes =>
+                  new String(bytes.getOrElse(Chunk.empty).toArray, StandardCharsets.UTF_8)
+                )
+                // a failed diagnostic read must not mask the HTTP status
+                .orElseSucceed("")
+                .map(errorBody =>
+                  ZStream.fail(
+                    new CequenceWSException(
+                      s"$label: HTTP ${response.status.code} - ${errorBody.take(500)}"
+                    )
                   )
                 )
-              )
           }
       }
 
@@ -650,7 +670,7 @@ final class ZioHttpWSClientEngine private[ws] (
       ZIO.attemptBlocking {
         val boundary = MultipartBodyBuilder.generateBoundary
         val formData = MultipartFormData(
-          dataParts = dataParts.map { case (key, value) => (key, Seq(value)) }.toMap,
+          dataParts = groupValues(dataParts),
           files = fileParts.map(_._1)
         )
         Body
@@ -680,6 +700,13 @@ final class ZioHttpWSClientEngine private[ws] (
 
   private def isContentType(headerName: String) = headerName.equalsIgnoreCase("Content-Type")
 
+  // repeated keys keep every value (as the streamed multipart path does); keys stay in
+  // first-occurrence order. Form fields are few, so the quadratic grouping is irrelevant
+  private def groupValues(pairs: Seq[(String, String)]): Map[String, Seq[String]] =
+    ListMap(pairs.map(_._1).distinct.map { key =>
+      key -> pairs.collect { case (`key`, value) => value }
+    }: _*)
+
   private def timeoutException(label: String) =
     new TimeoutException(s"$label: no response within ${requestTimeout.toMillis} ms")
 
@@ -707,6 +734,8 @@ object ZioHttpWSClientEngine {
   private val DefaultReadTimeoutMs: Int = 120 * 1000
   private val DefaultPooledIdleTimeoutMs: Int = 60 * 1000 // matches the Play engines
   private val MaxConnectionsPerHost = 1024
+  private val MaxErrorBodyBytes =
+    4 * 1024 // read of a non-2xx stream's body, for the error message
 
   /**
    * An engine on a caller-supplied `Client` and `Runtime` - e.g. the ones of a ZIO
@@ -784,20 +813,105 @@ object ZioHttpWSClientEngine {
     }
 
     val nettyConfig = NettyConfig.defaultWithFastShutdown
-    try
-      // daemon event-loop threads: a never-closed engine must not block JVM exit
-      build(WsClientDaemonNettyDriver.layer(nettyConfig))
-    catch {
-      // WsClientDaemonNettyDriver reaches into zio-http internals - if a different zio-http
-      // version on the classpath changed them, degrade to the stock (non-daemon) driver
-      case e: Throwable
-          if e
-            .isInstanceOf[LinkageError] || ThrowableUtil.hasCause(e, classOf[LinkageError]) =>
-        logger.warn(
-          s"zio-http internals changed (${e.getMessage}) - using the stock Netty driver, whose threads are NOT daemon: close() the engine before JVM exit."
-        )
-        build(ZLayer.succeed(nettyConfig) >>> NettyClientDriver.live)
+    def stockDriver = ZLayer.succeed(nettyConfig) >>> NettyClientDriver.live
+
+    DaemonDriver.constructors match {
+      case Some(constructors) =>
+        try
+          // daemon event-loop threads: a never-closed engine must not block JVM exit
+          build(DaemonDriver.layer(nettyConfig, constructors))
+        catch {
+          case e: Throwable if NonFatal(e) || e.isInstanceOf[LinkageError] =>
+            logger.warn(
+              s"Could not build the daemon-threaded zio-http driver (${e.getMessage}) - using the stock one, whose threads are NOT daemon: close() the engine before JVM exit."
+            )
+            build(stockDriver)
+        }
+
+      case None => build(stockDriver)
     }
+  }
+
+  /**
+   * A zio-http client driver whose Netty event loops run on DAEMON threads (zio-http's stock
+   * driver uses Netty's default, non-daemon ones, and offers no public hook for them). Built
+   * from public zio-http / Netty API plus two constructors that are package-private in Scala
+   * (public in bytecode) - `NettyClientDriver` and `NettyRuntime` - reached REFLECTIVELY: a
+   * zio-http upgrade that changes them cannot break compilation, only the lookup below, which
+   * then falls back to the stock driver with a warning.
+   */
+  private object DaemonDriver {
+
+    final case class Constructors(
+      driver: Constructor[_],
+      nettyRuntime: Constructor[_]
+    )
+
+    lazy val constructors: Option[Constructors] =
+      Try {
+        val nettyRuntimeClass = Class.forName("zio.http.netty.NettyRuntime")
+        Constructors(
+          driver = classOf[NettyClientDriver].getConstructor(
+            classOf[ChannelFactory[_]],
+            classOf[EventLoopGroup],
+            nettyRuntimeClass
+          ),
+          nettyRuntime = nettyRuntimeClass.getConstructor(classOf[Runtime[_]])
+        )
+      }.fold(
+        e => {
+          logger.warn(
+            s"zio-http internals changed (${e.getMessage}) - using the stock Netty driver, whose threads are NOT daemon: close() the engine before JVM exit."
+          )
+          None
+        },
+        Some(_)
+      )
+
+    def layer(
+      config: NettyConfig,
+      constructors: Constructors
+    ): ZLayer[Any, Throwable, ClientDriver] =
+      ZLayer.scoped {
+        for {
+          eventLoopGroup <- ZIO.acquireRelease(
+            ZIO.succeed(
+              new MultiThreadIoEventLoopGroup(
+                config.nThreads,
+                new ThreadPerTaskExecutor(
+                  new DefaultThreadFactory("ws-client-zio-http", true)
+                ),
+                NioIoHandler.newFactory()
+              )
+            )
+          )(group =>
+            ZIO
+              .attemptBlocking(
+                group
+                  .shutdownGracefully(
+                    config.shutdownQuietPeriod,
+                    config.shutdownTimeOut,
+                    config.shutdownTimeUnit
+                  )
+                  .await()
+              )
+              .ignore
+          )
+          runtime <- ZIO.runtime[Any]
+          driver <- ZIO.attempt {
+            val channelFactory = new ChannelFactory[Channel] {
+              override def newChannel(): Channel = new NioSocketChannel()
+            }
+            constructors.driver
+              .newInstance(
+                channelFactory,
+                eventLoopGroup,
+                constructors.nettyRuntime.newInstance(runtime).asInstanceOf[AnyRef]
+              )
+              .asInstanceOf[ClientDriver]
+          }
+        } yield driver
+      }
   }
 
   // a new client (connection pool) on an EXISTING driver - the driver stays owned by the

@@ -26,8 +26,11 @@ class ZioHttpWSClientEngineProvider extends WSClientEngineProvider {
 
   override val engineId = "zio-http"
 
-  // output streaming but no input streaming: below pekko-http (15), above the akka stack
-  override val priority = 13
+  // below every akka/pekko engine: zio-http streams only through the Flow-typed
+  // WSClientOutputStreamCore, so the flavored StreamedEngineRegistry (which casts to the
+  // Source-typed akka/pekko traits) must never auto-select it over a Source-typed engine;
+  // above sttp (5) and jdk (0)
+  override val priority = 7
 
   override val capabilities: Set[EngineCapability] =
     Set(EngineCapability.Multipart, EngineCapability.OutputStreaming)

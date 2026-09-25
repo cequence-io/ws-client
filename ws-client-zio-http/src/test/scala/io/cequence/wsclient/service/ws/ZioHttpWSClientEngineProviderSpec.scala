@@ -69,6 +69,9 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         EngineCapability.Multipart,
         EngineCapability.OutputStreaming
       )
+      // below every akka/pekko engine (play-akka = 10): the flavored StreamedEngineRegistry
+      // cannot use a Flow-only streaming engine and must never auto-select it over theirs
+      providers.head.priority should be < 10
     }
 
     "create a working engine that can GET, and close idempotently" in {
@@ -178,6 +181,32 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         (response.json \ "contentLength").as[String] should not be empty
         (response.json \ "transferEncoding").as[String] shouldBe empty
         (response.json \ "body").as[String] should include("filename=\"display.txt\"")
+
+        engine.close()
+      }
+    }
+
+    "keep every value of a repeated form key in an in-memory multipart body" in {
+      withEchoServer { port =>
+        val engine = newEngine()
+        val response = Await.result(
+          engine
+            .execPOSTMultipartRich(
+              SiteBinding(s"http://localhost:$port"),
+              "upload",
+              bodyParams =
+                Seq("tag" -> Some("first"), "other" -> Some("x"), "tag" -> Some("second")),
+              useInMemoryBody = true
+            )
+            .map(engine.getResponseOrError),
+          30.seconds
+        )
+
+        val body = (response.json \ "body").as[String]
+        // MultipartBodyBuilder writes data-part names unquoted (`form-data; name=tag`)
+        """name=tag\r\n""".r.findAllMatchIn(body).size shouldBe 2
+        body should include("first")
+        body should include("second")
 
         engine.close()
       }
@@ -474,6 +503,56 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         subscriber.received shouldBe empty
         subscriber.error.get shouldBe a[CequenceWSException]
         subscriber.error.get.getMessage should include("HTTP 401")
+
+        engine.close()
+      }
+    }
+
+    "bound the error-body read of a non-2xx stream: size and time" in {
+      val huge = "x" * (5 * 1024 * 1024)
+      withServer(
+        "/huge" -> { exchange => respond(exchange, 500, huge, "text/html") },
+        "/trickle" -> { exchange =>
+          // an endless error body: one byte every 100 ms
+          exchange.sendResponseHeaders(503, 0)
+          val os = exchange.getResponseBody
+          try
+            while (true) {
+              os.write('x'.toInt)
+              os.flush()
+              Thread.sleep(100)
+            }
+          catch { case _: Throwable => } // client gone
+          finally
+            try os.close()
+            catch { case _: Throwable => }
+        }
+      ) { port =>
+        val engine = WSClientEngineRegistry.outputStreamed(
+          TransportSettings(timeouts = Timeouts(requestTimeout = Some(1000))),
+          Some(expectedEngineId)
+        )
+        val site = SiteBinding(s"http://localhost:$port")
+
+        def failureOf(endPoint: String) = {
+          val subscriber = new LatchedSubscriber[java.nio.ByteBuffer]
+          engine
+            .execRawStreamPublisher(site, endPoint, "GET", None, Nil, Nil, Nil)
+            .subscribe(subscriber)
+          subscriber.awaitDone(15) shouldBe true
+          subscriber.error.get
+        }
+
+        val hugeError = failureOf("huge")
+        hugeError shouldBe a[CequenceWSException]
+        hugeError.getMessage should include("HTTP 500")
+        hugeError.getMessage.length should be < 1000
+
+        val started = System.nanoTime()
+        val trickleError = failureOf("trickle")
+        trickleError.getMessage should include("HTTP 503")
+        // bounded by the 1 s request timeout, not by the endless body
+        (System.nanoTime() - started) / 1000000 should be < 10000L
 
         engine.close()
       }

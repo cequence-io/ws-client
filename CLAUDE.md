@@ -105,11 +105,13 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      `FlowAdapters`, then the jdk engine's framing pipeline); the stream status is checked before
      any byte is exposed. Discovery-created engines own a Netty driver + client (`close()`
      releases both); `copy(reuseExecContext = true)` shares the driver. `ZioHttpWSClientEngine(client)`
-     / `.layer()` run on a caller-owned `Client` (never closed). NOTE:
-     `src/main/scala/zio/http/netty/WsClientDaemonNettyDriver.scala` deliberately lives in
-     zio-http's package (package-private constructor) to give Netty DAEMON threads; the engine
-     falls back to the stock non-daemon driver on a `LinkageError`. With a proxy, zio-http still
-     resolves the TARGET host via local DNS.
+     / `.layer()` run on a caller-owned `Client` (never closed). Owned engines run Netty on
+     DAEMON threads: zio-http has no public hook for that, so `ZioHttpWSClientEngine.DaemonDriver`
+     reaches the package-private `NettyClientDriver` / `NettyRuntime` constructors REFLECTIVELY
+     (a zio-http upgrade cannot break compilation) and falls back to the stock non-daemon driver
+     with a warning if the lookup fails - re-check it on zio-http upgrades (the spec asserts the
+     daemon driver is in use). With a proxy, zio-http still resolves the TARGET host via local
+     DNS.
    - All four use `StringBackedResponse` / `SimpleRichResponse` from core (no streaming source
      on responses) and the shared `EngineSupport` scaffolding (core, `private[wsclient]`).
 
@@ -172,8 +174,10 @@ val engine = WSClientEngineRegistry() // site-stateless: the target site rides o
 ```
 
 Engine ids (by auto-selection priority): `play-pekko-stream` (21), `play-pekko` (20),
-`pekko-http` (15), `zio-http` (13), `play-akka-stream` (11), `play-akka` (10), `sttp` (5),
-`jdk` (0). The stream
+`pekko-http` (15), `play-akka-stream` (11), `play-akka` (10), `zio-http` (7), `sttp` (5),
+`jdk` (0). Engines that stream only through the Flow-typed `WSClientOutputStreamCore` (zio-http,
+jdk) rank below every akka/pekko engine: the flavored `StreamedEngineRegistry` casts to the
+Source-typed traits and must never auto-select them over a Source-typed engine. The stream
 engines are strict supersets of their base engines. Discovered engines own their execution
 environment - actor system or sttp backend (`close()` releases it, idempotent). Callers who want
 to supply their own `Materializer`/`ExecutionContext`/backend should keep using the explicit
@@ -345,11 +349,12 @@ val loggedService = log(service, "MyService")
   `reuseExecContext = false` spins up an owned daemon system (discovery-created engines only). Engines resolve `Timeouts` per field (missing
   fields fall back to defaults - a partially-specified `Timeouts` never disables the request
   timeout)
-- Query-param encoding contract: the jdk/sttp/pekko-http engines take raw values and
+- Query-param encoding contract: the jdk/sttp/pekko-http/zio-http engines take raw values and
   percent-encode them; the Play engines pass values through verbatim (pre-existing behavior
   kept for backward compatibility - callers pre-encode reserved characters there)
 - `TransportSettings.proxyURL` ("host:port" or "scheme://host:port", port required) is
-  honored by the Play/jdk/sttp engines; pekko-http warns and ignores it (CONNECT-only proxy
+  honored by the Play/jdk/sttp/zio-http engines (zio-http tunnels via CONNECT but resolves the
+  target host through local DNS); pekko-http warns and ignores it (CONNECT-only proxy
   support). A proxy is a property of the shared client - all engines bound to one transport
   share it
 - `SiteBinding.recoverErrors` is composed with the engine's default normalization via

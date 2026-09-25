@@ -111,9 +111,9 @@ Available engines (auto-selection picks the highest priority present):
 | `play-pekko-stream` | ws-client-play-pekko-stream | 21 | input + output streaming, multipart |
 | `play-pekko` | ws-client-play-pekko | 20 | input streaming, multipart |
 | `pekko-http` | ws-client-pekko-http | 15 | input + output streaming, multipart |
-| `zio-http` | ws-client-zio-http | 13 | output streaming (`Flow.Publisher`), multipart |
 | `play-akka-stream` | ws-client-play-akka-stream | 11 | input + output streaming, multipart |
 | `play-akka` | ws-client-play-akka | 10 | input streaming, multipart |
+| `zio-http` | ws-client-zio-http | 7 | output streaming (`Flow.Publisher`), multipart |
 | `sttp` | ws-client-sttp | 5 | multipart |
 | `jdk` | ws-client-jdk | 0 | output streaming (`Flow.Publisher`), multipart (in-memory) |
 
@@ -171,9 +171,9 @@ val island = engine.copy(reuseExecContext = false)
 //   engines built on a caller-supplied environment throw - create those via their factory)
 ```
 
-**Query-parameter encoding** differs between the engine families: the `jdk`, `sttp`, and `pekko-http` engines expect **raw (unencoded) parameter values** and percent-encode them for you; the Play-based engines pass values through verbatim (long-standing behavior, kept for backward compatibility), so with those you must pre-encode values containing reserved characters yourself. Keep this in mind when swapping engines - a pre-encoded value like `a%20b` gets double-encoded on the non-Play engines.
+**Query-parameter encoding** differs between the engine families: the `jdk`, `sttp`, `pekko-http`, and `zio-http` engines expect **raw (unencoded) parameter values** and percent-encode them for you; the Play-based engines pass values through verbatim (long-standing behavior, kept for backward compatibility), so with those you must pre-encode values containing reserved characters yourself. Keep this in mind when swapping engines - a pre-encoded value like `a%20b` gets double-encoded on the non-Play engines.
 
-**Proxy support**: `TransportSettings.proxyURL` (accepted forms: `host:port` or `scheme://host:port`) is honored by the Play, `jdk`, and `sttp` engines; the `pekko-http` engine logs a warning and ignores it (pekko-http only supports CONNECT-tunneling proxies).
+**Proxy support**: `TransportSettings.proxyURL` (accepted forms: `host:port` or `scheme://host:port`) is honored by the Play, `jdk`, `sttp`, and `zio-http` engines (`zio-http` tunnels via `CONNECT` and still resolves the target host through local DNS); the `pekko-http` engine logs a warning and ignores it (pekko-http only supports CONNECT-tunneling proxies).
 
 **Custom error recovery** (`SiteBinding.recoverErrors`) composes with the engine's built-in transport-failure normalization: your partial function sees the Cequence exception taxonomy (`CequenceWSTimeoutException`, `CequenceWSUnknownHostException`, ...) for failures the backend recognizes, so the same recovery logic is portable across engines.
 

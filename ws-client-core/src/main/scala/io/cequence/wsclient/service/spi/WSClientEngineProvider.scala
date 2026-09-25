@@ -24,9 +24,12 @@ trait WSClientEngineProvider {
    *
    * Policy for the bundled engines (0-21): richer/newer stacks rank higher, and a stream
    * engine ranks exactly one above the base engine it supersedes: `play-pekko-stream` (21) >
-   * `play-pekko` (20) > `pekko-http` (15) > `zio-http` (13) > `play-akka-stream` (11) >
-   * `play-akka` (10) > `sttp` (5) > `jdk` (0). Third-party providers that want to win
-   * auto-selection over any bundled engine should use 100 or higher.
+   * `play-pekko` (20) > `pekko-http` (15) > `play-akka-stream` (11) > `play-akka` (10) >
+   * `zio-http` (7) > `sttp` (5) > `jdk` (0). Engines that stream only through the Flow-typed
+   * `WSClientOutputStreamCore` (zio-http, jdk) rank below every akka/pekko engine, so the
+   * flavored `StreamedEngineRegistry` (which needs the Source-typed traits) never auto-selects
+   * them over a Source-typed engine. Third-party providers that want to win auto-selection
+   * over any bundled engine should use 100 or higher.
    */
   def priority: Int = 0
 
