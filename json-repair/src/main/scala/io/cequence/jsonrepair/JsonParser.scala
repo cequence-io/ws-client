@@ -1,5 +1,6 @@
 package io.cequence.jsonrepair
 
+import scala.collection.immutable.ListMap
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.util.control.Breaks.break
@@ -229,7 +230,8 @@ class JsonParser(
    * whitespace skip final '}' return object map
    */
   def parseObject(): JsonObject = {
-    var obj = Map.empty[String, JsonValue]
+    // insertion-ordered: a plain immutable Map scrambles key order beyond 4 keys
+    var obj: JsonObject = ListMap.empty[String, JsonValue]
 
     // This condition mimics (self.get_char_at() or '}') != '}'
     // i.e., continue while current char is not '}' or is None

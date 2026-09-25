@@ -248,6 +248,89 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       }
     }
 
+    "not follow a redirect to another origin (no body/secret-header forwarding)" in {
+      val stolen = new java.util.concurrent.atomic.AtomicInteger(0)
+      val attacker = HttpServer.create(new InetSocketAddress(0), 0)
+      attacker.createContext(
+        "/",
+        new HttpHandler {
+          override def handle(exchange: HttpExchange): Unit = {
+            stolen.incrementAndGet()
+            exchange.sendResponseHeaders(200, -1)
+            exchange.close()
+          }
+        }
+      )
+      attacker.start()
+
+      // 307 preserves the method and the body - the most dangerous redirect to follow
+      val redirector = HttpServer.create(new InetSocketAddress(0), 0)
+      redirector.createContext(
+        "/",
+        new HttpHandler {
+          override def handle(exchange: HttpExchange): Unit = {
+            exchange.getRequestBody.readAllBytes()
+            exchange.getResponseHeaders.add(
+              "Location",
+              s"http://localhost:${attacker.getAddress.getPort}/steal"
+            )
+            exchange.sendResponseHeaders(307, -1)
+            exchange.close()
+          }
+        }
+      )
+      redirector.start()
+
+      try {
+        val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+        val site = SiteBinding(
+          s"http://localhost:${redirector.getAddress.getPort}",
+          requestContext = WsRequestContext(authHeaders = Seq("X-Api-Key" -> "secret"))
+        )
+
+        val response = Await.result(
+          engine.execPOSTBodyRich(site, "upload", body = Json.obj("data" -> "private")),
+          30.seconds
+        )
+
+        response.status.code shouldBe 307
+        response.response shouldBe None
+        stolen.get() shouldBe 0
+
+        engine.close()
+      } finally {
+        redirector.stop(0)
+        attacker.stop(0)
+      }
+    }
+
+    "evaluate a dynamic request context exactly once per request" in {
+      withEchoServer { port =>
+        val evaluations = new java.util.concurrent.atomic.AtomicInteger(0)
+        val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+        val site = SiteBinding(
+          s"http://localhost:$port",
+          requestContextFun = Some { () =>
+            val n = evaluations.incrementAndGet()
+            WsRequestContext(
+              authHeaders = Seq("Authorization" -> s"Bearer token-$n"),
+              extraParams = Seq("tenant" -> s"tenant-$n")
+            )
+          }
+        )
+
+        val response = Await.result(
+          engine.execGETRich(site, "ping").map(engine.getResponseOrError),
+          30.seconds
+        )
+
+        evaluations.get() shouldBe 1
+        (response.json \ "auth").get shouldBe JsString("Bearer token-1")
+
+        engine.close()
+      }
+    }
+
     // ---------------------------------------------------------------------------
     // engine.copy() - a new engine with its own OWNED backend rebuilt from
     // possibly-changed TransportSettings, closed independently of the one it was

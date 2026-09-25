@@ -23,6 +23,24 @@ class JsonRepairSpec extends AnyFlatSpec with Matchers {
     JsonRepair.repairJson("Null", handleLiterals = true) shouldBe "null"
   }
 
+  it should "keep apostrophes and key order on the repair path" in {
+    // valid but nested JSON is routed through the repair parser by the concatenation
+    // heuristic - the "true" -> true coercion there is intended, content corruption is not
+    JsonRepair.repairJson(
+      """{"outer":{"flag":"true","name":"O'Reilly"}}"""
+    ) shouldBe """{"outer":{"flag":true,"name":"O'Reilly"}}"""
+    JsonRepair.repairJson(
+      """{"outer":{"it's":"don't stop"}}"""
+    ) shouldBe """{"outer":{"it's":"don't stop"}}"""
+    JsonRepair.repairJson(
+      """{"a":{"k1":1,"k2":2,"k3":3,"k4":4,"k5":5,"k6":6,"k7":7}}"""
+    ) shouldBe """{"a":{"k1":1,"k2":2,"k3":3,"k4":4,"k5":5,"k6":6,"k7":7}}"""
+    // genuinely malformed input (missing closing brace)
+    JsonRepair.repairJson(
+      """{"text": "I don't know", "n": {"x": 1}"""
+    ) shouldBe """{"text":"I don't know","n":{"x":1}}"""
+  }
+
   it should "handle basic invalid types correctly" in {
     JsonRepair.repairJson("true") shouldBe "true"
     JsonRepair.repairJson("false") shouldBe "false"

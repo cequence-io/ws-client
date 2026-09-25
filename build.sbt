@@ -94,10 +94,35 @@ lazy val akkaStreamLibs = Def.setting {
 
 val loggingLibs = Def.setting {
   Seq(
-    "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
-    "ch.qos.logback" % "logback-classic" % "1.4.14" // requires JDK11, in order to use JDK8 switch to 1.3.5
+    // the SLF4J API only (via scala-logging) - a library must not ship a logging BACKEND: it
+    // hijacks the host's logging, and logback's no-config default is root=DEBUG, under which
+    // Play's shaded AHC logs complete request headers (incl. Authorization)
+    "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5"
   )
 }
+
+// logging backend for this build's own tests only, configured by the shared
+// test-resources/logback-test.xml; 1.5.x is the JDK 11 compatible line
+val logbackVersion = "1.5.38"
+
+lazy val testLoggingSettings = Seq(
+  libraryDependencies += "ch.qos.logback" % "logback-classic" % logbackVersion % Test,
+  Test / unmanagedResourceDirectories += (ThisBuild / baseDirectory).value / "test-resources"
+)
+
+// play-json (2.8.2 / 2.10.0-RC6) pins Jackson 2.11.4, affected by CVE-2025-52999 (deeply
+// nested input -> StackOverflowError) and CVE-2020-36518. Declared directly - not as
+// dependencyOverrides, which never reach the published POM - so the patched line also wins in
+// consumers' resolution; Jackson 2.15+ additionally enforces StreamReadConstraints (nesting
+// depth, string/number length) on every parse
+val jacksonVersion = "2.22.3"
+
+lazy val jacksonLibs = Seq(
+  "com.fasterxml.jackson.core" % "jackson-core" % jacksonVersion,
+  "com.fasterxml.jackson.core" % "jackson-databind" % jacksonVersion,
+  "com.fasterxml.jackson.datatype" % "jackson-datatype-jdk8" % jacksonVersion,
+  "com.fasterxml.jackson.datatype" % "jackson-datatype-jsr310" % jacksonVersion
+)
 
 val akkaHttpVersion = "10.5.1" //"10.5.0-M1"
 
@@ -153,9 +178,11 @@ lazy val `ws-client-core` =
   (project in file("ws-client-core")).settings(
     name := "ws-client-core",
     libraryDependencies += "com.typesafe.play" %% "play-json" % playJsonVersion.value,
+    libraryDependencies ++= jacksonLibs,
     libraryDependencies += "com.typesafe" % "config" % "1.4.3",
     libraryDependencies ++= loggingLibs.value,
     libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+    testLoggingSettings,
     // WSClientEngineRegistrySpec mutates the JVM-global 'ws-client.engine' system property;
     // fork so it cannot race the other modules' registry-based suites in the shared sbt JVM
     Test / fork := true,
@@ -175,9 +202,11 @@ lazy val `json-repair` =
   (project in file("json-repair")).settings(
     name := "json-repair",
     libraryDependencies += "com.typesafe.play" %% "play-json" % playJsonVersion.value,
+    libraryDependencies ++= jacksonLibs,
     libraryDependencies += "org.scalactic" %% "scalactic" % "3.2.16",
     libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
     libraryDependencies ++= loggingLibs.value,
+    testLoggingSettings,
     publish / skip := false
   )
 
@@ -187,6 +216,7 @@ lazy val `ws-client-play-akka` =
       name := "ws-client-play-akka", // named "ws-client-play" before 1.0.0
       libraryDependencies ++= playWsDependencies.value,
       libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      testLoggingSettings,
       publish / skip := false
     )
     .dependsOn(`ws-client-core-akka`)
@@ -198,6 +228,7 @@ lazy val `ws-client-play-akka-stream` =
       name := "ws-client-play-akka-stream",
       libraryDependencies += "com.typesafe.akka" %% "akka-http" % akkaHttpVersion, // JSON WS Streaming
       libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      testLoggingSettings,
       publish / skip := false
     )
     .dependsOn(`ws-client-core-akka`, `ws-client-play-akka`)
@@ -224,6 +255,7 @@ lazy val `ws-client-play-pekko` =
       crossScalaVersions := pekkoScalaVersions,
       libraryDependencies ++= playWsPekkoDependencies.value,
       libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      testLoggingSettings,
       PekkoGenerator.generatorSettings(`ws-client-play-akka`),
       publish / skip := false
     )
@@ -236,6 +268,7 @@ lazy val `ws-client-play-pekko-stream` =
       crossScalaVersions := pekkoScalaVersions,
       libraryDependencies += "org.apache.pekko" %% "pekko-http" % pekkoHttpVersion, // JSON WS Streaming
       libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      testLoggingSettings,
       PekkoGenerator.generatorSettings(`ws-client-play-akka-stream`),
       publish / skip := false
     )
@@ -248,6 +281,7 @@ lazy val `ws-client-jdk` =
     .settings(
       name := "ws-client-jdk",
       libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      testLoggingSettings,
       publish / skip := false
     )
     .dependsOn(`ws-client-core`)
@@ -261,6 +295,7 @@ lazy val `ws-client-sttp` =
       crossScalaVersions := List(scala212, scala213), // sttp4's Scala 3 artifacts need 3.3+
       libraryDependencies += "com.softwaremill.sttp.client4" %% "core" % sttpVersion,
       libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      testLoggingSettings,
       publish / skip := false
     )
     .dependsOn(`ws-client-core`)
@@ -272,6 +307,7 @@ lazy val `ws-client-pekko-http` =
       crossScalaVersions := pekkoScalaVersions,
       libraryDependencies += "org.apache.pekko" %% "pekko-http" % pekkoHttpVersion,
       libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      testLoggingSettings,
       publish / skip := false
     )
     .dependsOn(`ws-client-core-pekko`)
