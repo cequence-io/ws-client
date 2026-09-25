@@ -16,7 +16,9 @@ import io.cequence.wsclient.service.spi.{
 }
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
-import play.api.libs.json.{JsString, Json}
+import io.cequence.wsclient.testkit.LatchedSubscriber
+import io.cequence.wsclient.testkit.TestServers.{withDumbProxy, withEchoServer}
+import play.api.libs.json.{JsString, JsValue, Json}
 
 import java.io.{File, PrintWriter}
 import java.net.InetSocketAddress
@@ -29,127 +31,6 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     scala.concurrent.ExecutionContext.global
 
   private val expectedEngineId = "jdk"
-
-  // a plain Flow.Subscriber - deliberately no stream library involved
-  private class LatchedJsonSubscriber
-      extends java.util.concurrent.Flow.Subscriber[play.api.libs.json.JsValue] {
-    private val buffer = scala.collection.mutable.ListBuffer[play.api.libs.json.JsValue]()
-    @volatile var error: Option[Throwable] = None
-    @volatile var completed = false
-    private val done = new java.util.concurrent.CountDownLatch(1)
-    private var subscription: java.util.concurrent.Flow.Subscription = _
-
-    def received: List[play.api.libs.json.JsValue] = buffer.toList
-
-    override def onSubscribe(s: java.util.concurrent.Flow.Subscription): Unit = {
-      subscription = s
-      s.request(1)
-    }
-    override def onNext(item: play.api.libs.json.JsValue): Unit = {
-      buffer += item
-      subscription.request(1)
-    }
-    override def onError(t: Throwable): Unit = {
-      error = Some(t)
-      done.countDown()
-    }
-    override def onComplete(): Unit = {
-      completed = true
-      done.countDown()
-    }
-    def awaitDone(seconds: Int): Unit = {
-      done.await(seconds.toLong, java.util.concurrent.TimeUnit.SECONDS)
-      ()
-    }
-  }
-
-  private def withEchoServer(test: (Int) => Unit): Unit = {
-    val server = HttpServer.create(new InetSocketAddress(0), 0)
-    server.createContext(
-      "/",
-      new HttpHandler {
-        override def handle(exchange: HttpExchange): Unit = {
-          val requestBody =
-            new String(exchange.getRequestBody.readAllBytes(), "UTF-8")
-          val response = Json
-            .obj(
-              "status" -> "ok",
-              "method" -> exchange.getRequestMethod,
-              "contentType" -> Option(exchange.getRequestHeaders.getFirst("Content-Type"))
-                .getOrElse[String](""),
-              // all values, comma-joined - catches duplicated headers
-              "contentTypes" -> Option(exchange.getRequestHeaders.get("Content-Type"))
-                .map(String.join(",", _))
-                .getOrElse[String](""),
-              "transferEncoding" -> Option(
-                exchange.getRequestHeaders.getFirst("Transfer-encoding")
-              ).getOrElse[String](""),
-              "contentLength" -> Option(exchange.getRequestHeaders.getFirst("Content-length"))
-                .getOrElse[String](""),
-              "query" -> Option(exchange.getRequestURI.getRawQuery).getOrElse[String](""),
-              "auth" -> Option(exchange.getRequestHeaders.getFirst("Authorization"))
-                .getOrElse[String](""),
-              "body" -> requestBody
-            )
-            .toString
-            .getBytes("UTF-8")
-          exchange.getResponseHeaders.add("Content-Type", "application/json")
-          exchange.sendResponseHeaders(200, response.length)
-          val os = exchange.getResponseBody
-          os.write(response)
-          os.close()
-        }
-      }
-    )
-    server.start()
-    try
-      test(server.getAddress.getPort)
-    finally
-      server.stop(0)
-  }
-
-  // a single-connection HTTP proxy stub: captures the request line (absolute-form for proxied
-  // plain-http requests) and answers with a fixed JSON response
-  private def withDumbProxy(test: (Int, () => String) => Unit): Unit = {
-    val server = new java.net.ServerSocket(0)
-    @volatile var requestLine = ""
-
-    val thread = new Thread(new Runnable {
-      override def run(): Unit =
-        try {
-          // serve until the test closes the server socket - some clients probe with an
-          // extra connection, so a single accept would be flaky
-          while (true) {
-            val socket = server.accept()
-            try {
-              val in = new java.io.BufferedReader(
-                new java.io.InputStreamReader(socket.getInputStream, "UTF-8")
-              )
-              val firstLine = in.readLine()
-              if (firstLine != null && requestLine.isEmpty) requestLine = firstLine
-              // drain the headers
-              var line = in.readLine()
-              while (line != null && line.nonEmpty) line = in.readLine()
-
-              val body = """{"status":"proxied"}"""
-              val response =
-                s"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n$body"
-              socket.getOutputStream.write(response.getBytes("UTF-8"))
-              socket.getOutputStream.flush()
-            } finally
-              socket.close()
-          }
-        } catch {
-          case _: Throwable => // server closed by the test - nothing to do
-        }
-    })
-    thread.start()
-
-    try
-      test(server.getLocalPort, () => requestLine)
-    finally
-      server.close()
-  }
 
   s"$expectedEngineId provider" should {
 
@@ -511,7 +392,7 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         Thread.sleep(200)
         requestCount.get() shouldBe 0
 
-        val subscriber = new LatchedJsonSubscriber
+        val subscriber = new LatchedSubscriber[JsValue]
         publisher.subscribe(subscriber)
         subscriber.awaitDone(30)
 
@@ -521,7 +402,7 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         subscriber.error shouldBe None
 
         // SINGLE-SHOT contract: a second subscriber is rejected
-        val second = new LatchedJsonSubscriber
+        val second = new LatchedSubscriber[JsValue]
         publisher.subscribe(second)
         second.awaitDone(5)
         second.error.map(_.getClass.getSimpleName) shouldBe Some("IllegalStateException")
@@ -556,7 +437,7 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         val copyEngine = engine.copy()
         val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
 
-        val subscriber = new LatchedJsonSubscriber
+        val subscriber = new LatchedSubscriber[JsValue]
         copyEngine.execJsonStreamPublisher(site, "events", "GET").subscribe(subscriber)
         subscriber.awaitDone(30)
 
@@ -591,7 +472,7 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
           WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
         val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
 
-        val subscriber = new LatchedJsonSubscriber
+        val subscriber = new LatchedSubscriber[JsValue]
         engine
           .execJsonStreamPublisher(
             site,

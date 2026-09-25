@@ -14,6 +14,7 @@ import io.cequence.wsclient.service.spi.{
 }
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
+import io.cequence.wsclient.testkit.TestServers.{withDumbProxy, withEchoServer}
 import play.api.libs.json.{JsString, Json}
 
 import java.io.{File, PrintWriter}
@@ -27,89 +28,6 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     scala.concurrent.ExecutionContext.global
 
   private val expectedEngineId = "sttp"
-
-  private def withEchoServer(test: (Int) => Unit): Unit = {
-    val server = HttpServer.create(new InetSocketAddress(0), 0)
-    server.createContext(
-      "/",
-      new HttpHandler {
-        override def handle(exchange: HttpExchange): Unit = {
-          val requestBody =
-            new String(exchange.getRequestBody.readAllBytes(), "UTF-8")
-          val response = Json
-            .obj(
-              "status" -> "ok",
-              "method" -> exchange.getRequestMethod,
-              "contentType" -> Option(exchange.getRequestHeaders.getFirst("Content-Type"))
-                .getOrElse[String](""),
-              "transferEncoding" -> Option(
-                exchange.getRequestHeaders.getFirst("Transfer-encoding")
-              ).getOrElse[String](""),
-              "contentLength" -> Option(exchange.getRequestHeaders.getFirst("Content-length"))
-                .getOrElse[String](""),
-              "auth" -> Option(exchange.getRequestHeaders.getFirst("Authorization"))
-                .getOrElse[String](""),
-              "body" -> requestBody
-            )
-            .toString
-            .getBytes("UTF-8")
-          exchange.getResponseHeaders.add("Content-Type", "application/json")
-          exchange.sendResponseHeaders(200, response.length)
-          val os = exchange.getResponseBody
-          os.write(response)
-          os.close()
-        }
-      }
-    )
-    server.start()
-    try
-      test(server.getAddress.getPort)
-    finally
-      server.stop(0)
-  }
-
-  // a single-connection HTTP proxy stub: captures the request line (absolute-form for proxied
-  // plain-http requests) and answers with a fixed JSON response
-  private def withDumbProxy(test: (Int, () => String) => Unit): Unit = {
-    val server = new java.net.ServerSocket(0)
-    @volatile var requestLine = ""
-
-    val thread = new Thread(new Runnable {
-      override def run(): Unit =
-        try {
-          // serve until the test closes the server socket - some clients probe with an
-          // extra connection, so a single accept would be flaky
-          while (true) {
-            val socket = server.accept()
-            try {
-              val in = new java.io.BufferedReader(
-                new java.io.InputStreamReader(socket.getInputStream, "UTF-8")
-              )
-              val firstLine = in.readLine()
-              if (firstLine != null && requestLine.isEmpty) requestLine = firstLine
-              // drain the headers
-              var line = in.readLine()
-              while (line != null && line.nonEmpty) line = in.readLine()
-
-              val body = """{"status":"proxied"}"""
-              val response =
-                s"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n$body"
-              socket.getOutputStream.write(response.getBytes("UTF-8"))
-              socket.getOutputStream.flush()
-            } finally
-              socket.close()
-          }
-        } catch {
-          case _: Throwable => // server closed by the test - nothing to do
-        }
-    })
-    thread.start()
-
-    try
-      test(server.getLocalPort, () => requestLine)
-    finally
-      server.close()
-  }
 
   s"$expectedEngineId provider" should {
 
