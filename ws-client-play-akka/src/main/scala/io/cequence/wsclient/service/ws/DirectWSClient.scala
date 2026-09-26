@@ -32,6 +32,13 @@ final class DirectWSClient(
 }
 
 object DirectWSClient {
+
+  /**
+   * @param url
+   *   base URL; without a scheme it defaults to `https://` (plain HTTP requires an explicit
+   *   `http://`). Schemes other than http/https are rejected with an
+   *   `IllegalArgumentException`.
+   */
   def apply(
     url: String,
     headers: Seq[(String, String)] = Nil,
@@ -39,12 +46,30 @@ object DirectWSClient {
   )(
     implicit materializer: Materializer,
     ec: ExecutionContext
-  ): DirectWSClient = {
-    val finalURL = if (url.startsWith("http")) url else s"http://${url}"
-
+  ): DirectWSClient =
     new DirectWSClient(
-      SiteBinding(finalURL, WsRequestContext(authHeaders = headers)),
+      SiteBinding(normalizeUrl(url), WsRequestContext(authHeaders = headers)),
       PlayWSClientEngine(transportSettings)
     )
+
+  private val SchemePrefix = "^([a-zA-Z][a-zA-Z0-9+.-]*)://".r
+
+  // the auth headers must never go out in plain text by accident - hence HTTPS by default.
+  // Error messages deliberately omit the URL itself (it may carry credentials)
+  private[ws] def normalizeUrl(url: String): String = {
+    val trimmed = url.trim
+
+    SchemePrefix.findPrefixMatchOf(trimmed) match {
+      case Some(m) =>
+        val scheme = m.group(1).toLowerCase
+        if (scheme != "http" && scheme != "https")
+          throw new IllegalArgumentException(
+            s"Unsupported URL scheme '$scheme' - only http:// and https:// are allowed."
+          )
+        trimmed
+
+      case None =>
+        s"https://$trimmed"
+    }
   }
 }

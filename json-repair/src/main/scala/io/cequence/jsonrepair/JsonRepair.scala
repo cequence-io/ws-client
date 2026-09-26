@@ -267,25 +267,31 @@ object JsonRepair {
             val cleanedString = if (s.contains("'") || s.contains("\"")) {
               // Handle mixed quotes more robustly
               if (
-                (s.startsWith("\"") && s.endsWith("\"")) ||
-                (s.startsWith("'") && s.endsWith("'"))
+                s.length >= 2 && (
+                  (s.startsWith("\"") && s.endsWith("\"")) ||
+                    (s.startsWith("'") && s.endsWith("'"))
+                )
               ) {
                 s.substring(1, s.length - 1)
               } else {
-                s.replace("'", "").replace("\\\"", "\"")
+                // apostrophes inside a value are content ("O'Reilly", "don't") - keep them
+                s.replace("\\\"", "\"")
               }
             } else {
               s
             }
 
-            // Check if the string is a number with mixed quotes
+            // Check if the string is a number with mixed quotes - stray apostrophes around or
+            // inside a number ("'1.0", "1'000") are quote debris, not content, so they are
+            // ignored here (and only here - in text they are kept)
+            val numberCandidate = cleanedString.replace("'", "")
             if (
               convertNumbers &&
-              cleanedString.forall(c =>
+              numberCandidate.forall(c =>
                 c.isDigit || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E' || c.isWhitespace
               )
             ) {
-              val trimmed = cleanedString.trim
+              val trimmed = numberCandidate.trim
               try {
                 JsNumber(BigDecimal(trimmed))
               } catch {
@@ -300,13 +306,15 @@ object JsonRepair {
           // Clean key from quotes if needed
           val cleanKey =
             if (
-              (k.startsWith("\"") && k.endsWith("\"")) ||
-              (k.startsWith("'") && k.endsWith("'"))
+              k.length >= 2 && (
+                (k.startsWith("\"") && k.endsWith("\"")) ||
+                  (k.startsWith("'") && k.endsWith("'"))
+              )
             ) {
               k.substring(1, k.length - 1)
-            } else if (k.contains("'") || k.contains("\"")) {
-              // Handle mixed quotes in keys more thoroughly
-              k.replace("'", "").replace("\\\"", "\"")
+            } else if (k.contains("\"")) {
+              // Handle mixed quotes in keys (apostrophes inside a key are content - keep them)
+              k.replace("\\\"", "\"")
             } else {
               k
             }

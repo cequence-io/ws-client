@@ -41,6 +41,8 @@ If you only need the core abstractions without Akka/Pekko dependencies:
 
 > ⚠️ **The Akka and Pekko flavors are mutually exclusive on one classpath.** The Pekko modules are generated from the Akka ones and deliberately keep the same package and class names (the same trade-off Play made between 2.9 and 3.0), so downstream code compiles unchanged against either flavor - switch by swapping the artifact and your `Materializer` import. Never depend on both: which classes (implicits such as `asSafeSource` included) actually load then depends on jar order. `WSClientEngineRegistry` detects such duplicated classes at runtime and logs a warning naming the conflicting jars; set the config key `ws-client.strict-classpath = true` (or `-Dws-client.strict-classpath=true`) to fail engine resolution with an exception instead - recommended for CI.
 
+> ℹ️ **Logging:** the library logs through the SLF4J API only and ships no logging backend - bring your own (e.g. logback). Keep `play.shaded.ahc.org.asynchttpclient.netty.handler` at `INFO` or above: at `DEBUG` Play's shaded AsyncHttpClient logs complete request headers, including `Authorization`.
+
 > ⚠️ **Upgrading from ≤ 0.8.1:** the Akka-based Play modules were renamed for symmetry with the Pekko flavor - `ws-client-play` → `ws-client-play-akka` and `ws-client-play-stream` → `ws-client-play-akka-stream`. The old and new artifacts contain the same packages and classes but have different artifact ids, so dependency resolution will **not** evict the old ones - with both on the classpath, which classes win depends on jar order, and engine discovery may not find the `play-akka`/`play-akka-stream` providers. Make sure no transitive dependency still pulls the old artifacts, or exclude them explicitly:
 >
 > ```scala
@@ -68,7 +70,7 @@ Pekko flavor (Scala 2.13; sources generated from the Akka modules at build time)
 
 Other backends:
 
-- **ws-client-jdk** - zero-dependency backend on the JDK 11+ `java.net.http.HttpClient` (Scala 2.12, 2.13, 3); no Akka/Pekko/Play at all
+- **ws-client-jdk** - backend on the JDK 11+ `java.net.http.HttpClient` (Scala 2.12, 2.13, 3); no Akka/Pekko/Play WS - it needs only `ws-client-core` (play-json, Jackson, Typesafe config, scala-logging)
 - **ws-client-sttp** - backend over [sttp client4](https://sttp.softwaremill.com) (Scala 2.12, 2.13), unlocking any sttp `Future` backend (OkHttp, Armeria, Pekko-HTTP, ...)
 - **ws-client-pekko-http** - direct pekko-http client backend (Scala 2.13), no Play WS / shaded AsyncHttpClient layer; supports input and output (SSE) streaming
 

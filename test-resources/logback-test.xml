@@ -1,0 +1,18 @@
+<!--
+  Test-only logging config, shared by every module (see testLoggingSettings in build.sbt).
+  The published artifacts ship no logging backend - hosts bring their own.
+-->
+<configuration>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- logs complete request headers (incl. Authorization) at DEBUG - keep it off in any config -->
+  <logger name="play.shaded.ahc.org.asynchttpclient.netty.handler" level="WARN"/>
+
+  <root level="INFO">
+    <appender-ref ref="STDOUT"/>
+  </root>
+</configuration>

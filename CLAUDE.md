@@ -88,8 +88,9 @@ The project is organized into 11 SBT modules (8 handwritten + 3 Pekko mirrors):
    - 140+ tests ported from original Python library
 
 6. **ws-client-jdk / ws-client-sttp / ws-client-pekko-http** - additional backends
-   - `ws-client-jdk`: zero-dependency engine on the JDK 11+ `java.net.http.HttpClient`
-     (depends only on ws-client-core; Scala 2.12/2.13/3.2). Multipart is materialized in memory
+   - `ws-client-jdk`: Akka/Pekko/Play-WS-free engine on the JDK 11+ `java.net.http.HttpClient`
+     (depends only on ws-client-core - i.e. play-json, Jackson, Typesafe config, scala-logging;
+     Scala 2.12/2.13/3.2). Multipart is materialized in memory
      via `MultipartBodyBuilder` (core); output (SSE) streaming via the backend-agnostic
      `WSClientOutputStreamCore` (`Flow.Publisher`) contract; no input streaming.
    - `ws-client-sttp`: engine over sttp client4 `core` (Scala 2.12/2.13; sttp4's Scala 3 needs
@@ -105,8 +106,11 @@ The project is organized into 11 SBT modules (8 handwritten + 3 Pekko mirrors):
    - Sources are GENERATED at build time by `project/PekkoGenerator.scala` from the corresponding
      Akka modules (`akka.*` → `org.apache.pekko.*` rewrite). NEVER edit files under
      `target/**/src_managed` - edit the Akka module sources instead; the Pekko flavor follows.
-   - Handwritten exceptions: `PlayPekkoWSClientEngineProvider.scala` and the `META-INF/services`
-     resource (the generator skips `*EngineProvider.scala` files because engine ids/priorities differ).
+   - Handwritten exceptions: `PlayPekkoWSClientEngineProvider.scala`,
+     `PlayPekkoStreamWSClientEngineProvider.scala` and their `META-INF/services` resources (the
+     generator skips `*EngineProvider.scala` files because engine ids/priorities differ), plus all
+     test specs - the generator mirrors Compile sources only, so each Pekko module has its own
+     handwritten specs.
    - `ws-client-play-pekko` uses `org.playframework` play-ws 3.x (its play-json 3.x dependency is
      excluded - core's `com.typesafe.play` play-json is used instead);
      `ws-client-play-pekko-stream` uses pekko-http.
@@ -212,7 +216,8 @@ The build manages different dependency versions for Scala 2.12, 2.13, and 3.2:
 Scala 3 requires manual cross-version suffix handling (e.g., `akka-stream_2.13` for Scala 3).
 
 Cross-building is per-project: the Pekko modules declare `crossScalaVersions := List(scala213)`, so
-`sbt +compile` from the root builds them only for 2.13 while the rest build for all three versions.
+`sbt +compile` from the root builds them only for 2.13. `ws-client-sttp` (2.12/2.13) and
+`ws-client-pekko-http` (2.13) also narrow their versions; the rest build for all three.
 Version-dependent dependency settings must be `Def.setting`s reading the project-level
 `scalaVersion` (NOT `inThisBuild` settingKeys) - with heterogeneous crossScalaVersions, `+` switches
 Scala per project and an `inThisBuild` lookup sees the stale default version.
@@ -226,6 +231,9 @@ Scala per project and an `inThisBuild` lookup sees the stale default version.
   an embedded `com.sun.net.httpserver.HttpServer`, close idempotency)
 - Run `sbt test` for all tests or `sbt <module>/test` for specific module
 - Note: `sbt ws-client-play-akka/test` also runs core and json-repair tests (aggregation)
+- Test logging: logback is a `% Test` dependency of every module with tests (`testLoggingSettings`
+  in build.sbt), configured by the shared `test-resources/logback-test.xml`
+- CI: `.github/workflows/ci.yml` runs `sbt scalafmtCheckAll scalafmtSbtCheck` and `sbt +test`
 
 ## Key Dependencies
 
@@ -233,7 +241,12 @@ Scala per project and an `inThisBuild` lookup sees the stale default version.
 - Play WS Standalone - HTTP client
 - Akka Streams - Reactive stream processing (in `ws-client-core-akka` and downstream)
 - Akka HTTP - WebSocket and SSE support (streaming module)
-- scala-logging + logback - Logging
+- scala-logging - Logging via the SLF4J API only. No logging BACKEND is published (logback is
+  test-scope): a backend would hijack the host's logging, and logback's no-config default is
+  DEBUG, under which Play's shaded AHC logs complete request headers incl. `Authorization`
+- Jackson - declared directly in core and json-repair (overriding the 2.11.4 that play-json pins)
+  so consumers resolve a patched line; its `StreamReadConstraints` bound nesting depth and
+  string/number length on every parse
 - ScalaTest - Testing framework (test scope)
 
 ## Common Development Patterns
@@ -326,8 +339,14 @@ val loggedService = log(service, "MyService")
   exceptions for recognized transport failures (portable across engines)
 - `SiteBinding.requestContextFun` re-evaluates the request context per request on every
   engine (token refresh etc.); engines read the context exclusively via
-  `site.requestContextFn`. Client-level settings (connect timeout, proxy; all timeouts on
+  `site.requestContextFn` - exactly ONCE per request, so its headers and query params come
+  from the same evaluation. Client-level settings (connect timeout, proxy; all timeouts on
   Play) are captured once at construction/first use
+- No engine follows redirects (sttp disables its follow-by-default per request) - a 3xx comes
+  back as a non-acceptable status. Following redirects would re-send bodies and custom secret
+  headers (e.g. `X-Api-Key`) to whatever origin the `Location` names
+- `DirectWSClient` defaults a scheme-less URL to `https://` and rejects schemes other than
+  http/https; plain HTTP needs an explicit `http://`
 - Artifact rename hazard: the pre-1.0 `ws-client-play` / `ws-client-play-stream` artifacts and
   their ≥ 1.0.0 successors `ws-client-play-akka` / `ws-client-play-akka-stream` share FQCNs
   but not artifact ids, so there is no eviction - old + new on one classpath means
@@ -336,4 +355,13 @@ val loggedService = log(service, "MyService")
   the conflicting jars (covers akka+pekko mixing and old+renamed coexistence); with the config
   key `ws-client.strict-classpath = true` (or the same system property) it throws a
   `CequenceWSException` instead, on every lookup - recommended for CI
-- JSON repair is procedural (faithful port from Python) and may not be idiomatic Scala
+- JSON repair is procedural (faithful port from Python) and may not be idiomatic Scala. Its
+  repair path deliberately coerces the strings "true"/"false"/"null" to typed values - desired
+  behavior, keep it (do not make it opt-in). Valid NESTED JSON also takes the repair path (the
+  concatenated-JSON heuristic counts braces), so the repair path must not otherwise alter
+  content: apostrophes are preserved. Key order beyond 4 keys is NOT (the parser accumulates
+  into a plain `Map`) - deliberately left so. `JsonParser` is a large, fragile port: keep
+  changes there minimal (prefer fixes in `JsonRepair.convertToJsValue`), and verify any change
+  differentially against the previous version - thousands of generated valid + mutated inputs
+  through every entry point (`repairJson`, `loads` flag variants, `repairJsonAsValue`,
+  `fromFile`) on 2.12 and 2.13, every output difference explained

@@ -6,7 +6,7 @@ import io.cequence.wsclient.service.spi.TransportSettings
 import play.api.libs.json.{JsValue, Json}
 import sttp.client4._
 import sttp.client4.httpclient.HttpClientFutureBackend
-import sttp.model.{MediaType, Uri}
+import sttp.model.{MediaType, Method, Uri}
 
 import java.io.File
 import java.net.UnknownHostException
@@ -29,6 +29,9 @@ import scala.concurrent.{ExecutionContext, Future}
  * mapped; `readTimeout`/`pooledConnectionIdleTimeout` are ignored, and `connectTimeout` can
  * only be set on the backend itself (the discovery provider does this via `TransportSettings`;
  * with `SttpWSClientEngine.apply` configure it via `BackendOptions` on your own backend).
+ *
+ * Redirects are never followed (a per-request option, so it binds caller-supplied backends
+ * too) - a 3xx comes back as a non-acceptable status, like on every other engine.
  *
  * `close()` closes the backend.
  */
@@ -88,7 +91,7 @@ final class SttpWSClientEngine private[ws] (
   ): Future[RichResponse] =
     execRequest(
       site,
-      baseRequest(site, extraHeaders).get(uri(site, endPoint, endPointParam, params)),
+      request(site, Method.GET, endPoint, endPointParam, params, extraHeaders),
       Some(endPoint),
       acceptableStatusCodes
     )
@@ -128,7 +131,7 @@ final class SttpWSClientEngine private[ws] (
     execRequest(
       site,
       withJsonBody(
-        baseRequest(site, extraHeaders).post(uri(site, endPoint, endPointParam, params)),
+        request(site, Method.POST, endPoint, endPointParam, params, extraHeaders),
         body
       ),
       Some(endPoint),
@@ -151,7 +154,7 @@ final class SttpWSClientEngine private[ws] (
     execRequest(
       site,
       withMultipartBody(
-        baseRequest(site, extraHeaders).post(uri(site, endPoint, endPointParam, params)),
+        request(site, Method.POST, endPoint, endPointParam, params, extraHeaders),
         fileParams,
         bodyParams,
         useInMemoryBody
@@ -175,9 +178,10 @@ final class SttpWSClientEngine private[ws] (
 
     execRequest(
       site,
-      baseRequest(site, extraHeaders)
-        .post(uri(site, endPoint, endPointParam, params))
-        .body(bodyData.toMap),
+      request(site, Method.POST, endPoint, endPointParam, params, extraHeaders)
+        // as an ordered Seq (not a Map): repeated keys (array-style form fields) keep every
+        // value, as on the jdk / pekko-http engines; toList - immutable Seq on Scala 2.12
+        .body(bodyData.toList, "utf-8"),
       Some(endPoint),
       acceptableStatusCodes
     )
@@ -194,9 +198,7 @@ final class SttpWSClientEngine private[ws] (
   ): Future[RichResponse] =
     execRequest(
       site,
-      baseRequest(site, extraHeaders)
-        .post(uri(site, endPoint, endPointParam, urlParams))
-        .body(file),
+      request(site, Method.POST, endPoint, endPointParam, urlParams, extraHeaders).body(file),
       Some(endPoint),
       acceptableStatusCodes
     )
@@ -215,7 +217,7 @@ final class SttpWSClientEngine private[ws] (
   ): Future[RichResponse] =
     execRequest(
       site,
-      baseRequest(site, extraHeaders).delete(uri(site, endPoint, endPointParam, params)),
+      request(site, Method.DELETE, endPoint, endPointParam, params, extraHeaders),
       Some(endPoint),
       acceptableStatusCodes
     )
@@ -236,7 +238,7 @@ final class SttpWSClientEngine private[ws] (
     execRequest(
       site,
       withJsonBody(
-        baseRequest(site, extraHeaders).patch(uri(site, endPoint, endPointParam, params)),
+        request(site, Method.PATCH, endPoint, endPointParam, params, extraHeaders),
         toJsBodyObject(bodyParams)
       ),
       Some(endPoint),
@@ -278,7 +280,7 @@ final class SttpWSClientEngine private[ws] (
     execRequest(
       site,
       withJsonBody(
-        baseRequest(site, extraHeaders).put(uri(site, endPoint, endPointParam, params)),
+        request(site, Method.PUT, endPoint, endPointParam, params, extraHeaders),
         body
       ),
       Some(endPoint),
@@ -301,7 +303,7 @@ final class SttpWSClientEngine private[ws] (
     execRequest(
       site,
       withMultipartBody(
-        baseRequest(site, extraHeaders).put(uri(site, endPoint, endPointParam, params)),
+        request(site, Method.PUT, endPoint, endPointParam, params, extraHeaders),
         fileParams,
         bodyParams,
         useInMemoryBody
@@ -321,9 +323,7 @@ final class SttpWSClientEngine private[ws] (
   ): Future[RichResponse] =
     execRequest(
       site,
-      baseRequest(site, extraHeaders)
-        .put(uri(site, endPoint, endPointParam, urlParams))
-        .body(file),
+      request(site, Method.PUT, endPoint, endPointParam, urlParams, extraHeaders).body(file),
       Some(endPoint),
       acceptableStatusCodes
     )
@@ -332,29 +332,45 @@ final class SttpWSClientEngine private[ws] (
   // Aux //
   /////////
 
-  private def baseRequest(
+  private def request(
     site: SiteBinding,
+    method: Method,
+    endPoint: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])],
     extraHeaders: Seq[(String, String)]
-  ) = {
+  ): Request[String] = {
+    // resolved ONCE per request, so its headers and query params always come from the same
+    // evaluation of a dynamic context (e.g. the same tenant/token)
     val requestContext = site.requestContextFn()
 
+    baseRequest(requestContext, extraHeaders)
+      .method(method, uri(site, requestContext, endPoint, endPointParam, params))
+  }
+
+  private def baseRequest(
+    requestContext: WsRequestContext,
+    extraHeaders: Seq[(String, String)]
+  ) = {
     val withHeaders = (requestContext.authHeaders ++ extraHeaders).foldLeft(basicRequest) {
       case (request, (key, value)) => request.header(key, value)
     }
 
     withHeaders
       .readTimeout(timeouts.requestTimeout.getOrElse(defaultRequestTimeout).millis)
+      // sttp follows redirects by default, re-sending bodies and custom secret headers (e.g.
+      // X-Api-Key) to whatever origin the Location names; no other engine follows redirects
+      .followRedirects(false)
       .response(asStringAlways)
   }
 
   private def uri(
     site: SiteBinding,
+    requestContext: WsRequestContext,
     endPoint: String,
     endPointParam: Option[String],
     params: Seq[(String, Option[Any])]
   ): Uri = {
-    val requestContext = site.requestContextFn()
-
     val extraStringParams = requestContext.extraParams.map { case (tag, value) =>
       (tag, Some(value))
     }
