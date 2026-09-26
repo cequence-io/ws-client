@@ -113,6 +113,30 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       }
     }
 
+    "release its Netty event loops on close(), for the original and a driver-sharing copy" in {
+      withEchoServer { port =>
+        def zioThreads(except: Set[Thread]) =
+          Thread.getAllStackTraces.keySet.asScala.toSet
+            .diff(except)
+            .filter(t => t.isAlive && t.getName.startsWith("ws-client-zio-http"))
+
+        val before = Thread.getAllStackTraces.keySet.asScala.toSet
+        val engine = newEngine()
+        val copy = engine.copy()
+        get(copy, SiteBinding(s"http://localhost:$port"))
+        zioThreads(before) should not be empty
+
+        copy.close() // releases only the copy's pool - the driver belongs to the original
+        get(engine, SiteBinding(s"http://localhost:$port"))
+        engine.close()
+
+        val deadline = System.currentTimeMillis() + 10000
+        while (zioThreads(before).nonEmpty && System.currentTimeMillis() < deadline)
+          Thread.sleep(100)
+        zioThreads(before).map(_.getName) shouldBe empty
+      }
+    }
+
     "POST a JSON body" in {
       withEchoServer { port =>
         val engine = newEngine()

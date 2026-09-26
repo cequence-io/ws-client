@@ -37,7 +37,7 @@ import zio.http.{
 }
 import zio.interop.reactivestreams.Adapters
 import zio.stream.ZStream
-import zio.{Chunk, Runtime, Scope, Unsafe, ZEnvironment, ZIO, ZLayer}
+import zio.{Chunk, Exit, Runtime, Scope, Unsafe, ZEnvironment, ZIO, ZLayer}
 
 import io.netty.channel.nio.NioIoHandler
 import io.netty.channel.socket.nio.NioSocketChannel
@@ -722,7 +722,7 @@ final class ZioHttpWSClientEngine private[ws] (
   override def close(): Unit =
     owned.foreach(stack =>
       if (closed.compareAndSet(false, true))
-        Unsafe.unsafe(implicit u => stack.runtime.unsafe.shutdown())
+        stack.shutdown()
     )
 }
 
@@ -774,9 +774,35 @@ object ZioHttpWSClientEngine {
   private type DriverEnv = ClientDriver with DnsResolver
 
   private[ws] final class OwnedStack(
-    val runtime: Runtime.Scoped[Client],
+    val runtime: Runtime[Client],
+    val shutdown: () => Unit,
     val driverEnvironment: ZEnvironment[DriverEnv]
   )
+
+  /**
+   * Builds `layer` on a scope of its own, returning its runtime and the scope's release. Not
+   * `Runtime.unsafe.fromLayer`: that registers a JVM shutdown hook per call and never removes
+   * it, so hooks (each keeping a closed stack reachable) would pile up across engine
+   * create/close cycles and copies. On a build failure the scope is closed, releasing whatever
+   * was already acquired (e.g. the event loops of a half-built driver).
+   */
+  private def scopedRuntime[R](layer: ZLayer[Any, Throwable, R]): (Runtime[R], () => Unit) =
+    Unsafe.unsafe { implicit u =>
+      Runtime.default.unsafe.run {
+        Scope.make.flatMap { scope =>
+          scope
+            .extend[Any](layer.toRuntime)
+            .onError(cause => scope.close(Exit.failCause(cause)))
+            .map { runtime =>
+              val release = () =>
+                Unsafe.unsafe { implicit u =>
+                  Runtime.default.unsafe.run(scope.close(Exit.unit)).getOrThrowFiberFailure()
+                }
+              (runtime, release)
+            }
+        }
+      }.getOrThrowFiberFailure()
+    }
 
   /**
    * A self-contained, OWNED engine (discovery path): its own Netty driver and client, released
@@ -804,12 +830,9 @@ object ZioHttpWSClientEngine {
 
   private def fullStack(transportSettings: TransportSettings): OwnedStack = {
     def build(driver: ZLayer[Any, Throwable, ClientDriver]) = {
-      val runtime = Unsafe.unsafe { implicit u =>
-        Runtime.unsafe.fromLayer(
-          (driver ++ DnsResolver.default) >+> clientLayer(transportSettings)
-        )
-      }
-      new OwnedStack(runtime, runtime.environment)
+      val (runtime, shutdown) =
+        scopedRuntime((driver ++ DnsResolver.default) >+> clientLayer(transportSettings))
+      new OwnedStack(runtime, shutdown, runtime.environment)
     }
 
     val nettyConfig = NettyConfig.defaultWithFastShutdown
@@ -920,12 +943,11 @@ object ZioHttpWSClientEngine {
     driverEnvironment: ZEnvironment[DriverEnv],
     transportSettings: TransportSettings
   ): OwnedStack = {
-    val runtime = Unsafe.unsafe { implicit u =>
-      Runtime.unsafe.fromLayer(
+    val (runtime, shutdown) =
+      scopedRuntime(
         ZLayer.succeedEnvironment(driverEnvironment) >>> clientLayer(transportSettings)
       )
-    }
-    new OwnedStack(runtime, driverEnvironment)
+    new OwnedStack(runtime, shutdown, driverEnvironment)
   }
 
   private def clientLayer(
