@@ -55,7 +55,8 @@ final class JdkWSClientEngine private[ws] (
 )(
   implicit override protected val ec: ExecutionContext
 ) extends WSClientEngine
-    with WSClientOutputStreamCore {
+    with WSClientOutputStreamCore
+    with EngineSupport {
 
   // the copy always builds its own HttpClient from the given settings, so it is closed
   // independently of this engine - there is no actor system here (jdk uses only `ec`), so
@@ -66,7 +67,6 @@ final class JdkWSClientEngine private[ws] (
   ): JdkWSClientEngine = new JdkWSClientEngine(transportSettings)(ec)
 
   private val defaultConnectTimeout: Int = 5 * 1000 // matches the Play engines' AHC default
-  private val defaultRequestTimeout: Int = 120 * 1000 // two minutes
 
   private lazy val client: HttpClient = {
     val builder = HttpClient.newBuilder()
@@ -80,24 +80,16 @@ final class JdkWSClientEngine private[ws] (
     builder.build()
   }
 
-  // resolved per field - java.net.http has no defaults of its own, so a partially-specified
-  // Timeouts (e.g. only readTimeout) must not silently drop the request timeout
-  // (indefinite hang)
-  private val timeouts: Timeouts = {
-    val expl = transportSettings.timeouts
-    expl.copy(requestTimeout = expl.requestTimeout.orElse(Some(defaultRequestTimeout)))
-  }
+  // java.net.http has no defaults of its own - without the per-field resolution a
+  // partially-specified Timeouts would mean an indefinite hang
+  private val timeouts: Timeouts = EngineSupport.resolveTimeouts(
+    transportSettings.timeouts,
+    Timeouts(requestTimeout = Some(EngineSupport.DefaultRequestTimeoutMs))
+  )
 
-  private def serviceName(site: SiteBinding): String =
-    site.label.getOrElse(getClass.getSimpleName)
-
-  private def recoverErrors(
-    site: SiteBinding
-  ): String => PartialFunction[Throwable, RichResponse] =
-    SiteBinding.resolveRecoverErrors(
-      site.recoverErrors,
-      JdkWSClientEngine.defaultRecoverErrors
-    )
+  override protected def defaultRecoverErrors
+    : String => PartialFunction[Throwable, RichResponse] =
+    JdkWSClientEngine.defaultRecoverErrors
 
   /////////
   // GET //
@@ -666,12 +658,6 @@ final class JdkWSClientEngine private[ws] (
   }
 
   private def encode(value: String) = URLEncoder.encode(value, "UTF-8")
-
-  private def serviceAndEndpoint(
-    site: SiteBinding,
-    endPointForLogging: Option[String]
-  ) =
-    s"${serviceName(site)}${endPointForLogging.map("." + _).getOrElse("")}"
 
   // java.net.http.HttpClient needs no explicit teardown - trivially idempotent
   override def close(): Unit = ()

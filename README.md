@@ -73,6 +73,7 @@ Other backends:
 - **ws-client-jdk** - backend on the JDK 11+ `java.net.http.HttpClient` (Scala 2.12, 2.13, 3); no Akka/Pekko/Play WS - it needs only `ws-client-core` (play-json, Jackson, Typesafe config, scala-logging)
 - **ws-client-sttp** - backend over [sttp client4](https://sttp.softwaremill.com) (Scala 2.12, 2.13), unlocking any sttp `Future` backend (OkHttp, Armeria, Pekko-HTTP, ...)
 - **ws-client-pekko-http** - direct pekko-http client backend (Scala 2.13), no Play WS / shaded AsyncHttpClient layer; supports input and output (SSE) streaming
+- **ws-client-zio-http** - backend on the [zio-http](https://zio.dev/zio-http) (Netty) client and the ZIO runtime (Scala 2.12, 2.13); output (SSE) streaming via `Flow.Publisher`. A ZIO application can run it on its own `Client` via `ZioHttpWSClientEngine.layer()`. With a proxy, target host names are still resolved through local DNS
 
 Independent:
 
@@ -112,6 +113,7 @@ Available engines (auto-selection picks the highest priority present):
 | `pekko-http` | ws-client-pekko-http | 15 | input + output streaming, multipart |
 | `play-akka-stream` | ws-client-play-akka-stream | 11 | input + output streaming, multipart |
 | `play-akka` | ws-client-play-akka | 10 | input streaming, multipart |
+| `zio-http` | ws-client-zio-http | 7 | output streaming (`Flow.Publisher`), multipart |
 | `sttp` | ws-client-sttp | 5 | multipart |
 | `jdk` | ws-client-jdk | 0 | output streaming (`Flow.Publisher`), multipart (in-memory) |
 
@@ -135,7 +137,7 @@ val streamedEngine = StreamedEngineRegistry.outputStreamed()
 val inputEngine = StreamedEngineRegistry.inputStreamed()
 ```
 
-Engines created through discovery own their execution environment (actor system / backend). To supply your own `Materializer`/`ExecutionContext`/backend, use the explicit factories (`PlayWSClientEngine(transportSettings)`, `PlayWSStreamClientEngine(...)`, `JdkWSClientEngine(...)`, `SttpWSClientEngine(...)`, `PekkoHttpWSClientEngine(...)`) - they take only client-level `TransportSettings`; the site is per call.
+Engines created through discovery own their execution environment (actor system / backend). To supply your own `Materializer`/`ExecutionContext`/backend, use the explicit factories (`PlayWSClientEngine(transportSettings)`, `PlayWSStreamClientEngine(...)`, `JdkWSClientEngine(...)`, `SttpWSClientEngine(...)`, `PekkoHttpWSClientEngine(...)`, `ZioHttpWSClientEngine(client)` / `ZioHttpWSClientEngine.layer()`) - they take only client-level `TransportSettings`; the site is per call.
 
 ## One Engine, Many Sites 🔗
 
@@ -169,9 +171,9 @@ val island = engine.copy(reuseExecContext = false)
 //   engines built on a caller-supplied environment throw - create those via their factory)
 ```
 
-**Query-parameter encoding** differs between the engine families: the `jdk`, `sttp`, and `pekko-http` engines expect **raw (unencoded) parameter values** and percent-encode them for you; the Play-based engines pass values through verbatim (long-standing behavior, kept for backward compatibility), so with those you must pre-encode values containing reserved characters yourself. Keep this in mind when swapping engines - a pre-encoded value like `a%20b` gets double-encoded on the non-Play engines.
+**Query-parameter encoding** differs between the engine families: the `jdk`, `sttp`, `pekko-http`, and `zio-http` engines expect **raw (unencoded) parameter values** and percent-encode them for you; the Play-based engines pass values through verbatim (long-standing behavior, kept for backward compatibility), so with those you must pre-encode values containing reserved characters yourself. Keep this in mind when swapping engines - a pre-encoded value like `a%20b` gets double-encoded on the non-Play engines.
 
-**Proxy support**: `TransportSettings.proxyURL` (accepted forms: `host:port` or `scheme://host:port`) is honored by the Play, `jdk`, and `sttp` engines; the `pekko-http` engine logs a warning and ignores it (pekko-http only supports CONNECT-tunneling proxies).
+**Proxy support**: `TransportSettings.proxyURL` (accepted forms: `host:port` or `scheme://host:port`) is honored by the Play, `jdk`, `sttp`, and `zio-http` engines (`zio-http` tunnels via `CONNECT` and still resolves the target host through local DNS); the `pekko-http` engine logs a warning and ignores it (pekko-http only supports CONNECT-tunneling proxies).
 
 **Custom error recovery** (`SiteBinding.recoverErrors`) composes with the engine's built-in transport-failure normalization: your partial function sees the Cequence exception taxonomy (`CequenceWSTimeoutException`, `CequenceWSUnknownHostException`, ...) for failures the backend recognizes, so the same recovery logic is portable across engines.
 

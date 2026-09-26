@@ -67,11 +67,11 @@ class PekkoHttpWSClientEngine(
   val ec: ExecutionContext
 ) extends WSClientEngine
     with WSClientInputStreamExtraPekko
-    with WSClientOutputStreamExtraPekko {
+    with WSClientOutputStreamExtraPekko
+    with EngineSupport {
 
   private val logger = LoggerFactory.getLogger("PekkoHttpWSClientEngine")
 
-  private val defaultRequestTimeout: Int = 120 * 1000 // two minutes
   private val defaultReadoutTimeout: Int = 120 * 1000 // two minutes
 
   // the system-wide materializer; its lifecycle is bound to the actor system
@@ -99,28 +99,17 @@ class PekkoHttpWSClientEngine(
       .getOrElse(base)
   }
 
-  // resolved per field so a partially-specified Timeouts (e.g. only connectTimeout) never
-  // silently drops the request timeout
-  private val timeouts: Timeouts = {
-    val expl = transportSettings.timeouts
-    expl.copy(
-      requestTimeout = expl.requestTimeout.orElse(Some(defaultRequestTimeout)),
-      readTimeout = expl.readTimeout.orElse(Some(defaultReadoutTimeout))
+  private val timeouts: Timeouts = EngineSupport.resolveTimeouts(
+    transportSettings.timeouts,
+    Timeouts(
+      requestTimeout = Some(EngineSupport.DefaultRequestTimeoutMs),
+      readTimeout = Some(defaultReadoutTimeout)
     )
-  }
+  )
 
-  private def serviceName(site: SiteBinding): String =
-    site.label.getOrElse(getClass.getSimpleName)
-
-  // composes the site's custom error recovery (if any) over the engine's default
-  // transport-failure normalization - see SiteBinding.resolveRecoverErrors
-  private def recoverErrors(
-    site: SiteBinding
-  ): String => PartialFunction[Throwable, RichResponse] =
-    SiteBinding.resolveRecoverErrors(
-      site.recoverErrors,
-      PekkoHttpWSClientEngine.defaultRecoverErrors
-    )
+  override protected def defaultRecoverErrors
+    : String => PartialFunction[Throwable, RichResponse] =
+    PekkoHttpWSClientEngine.defaultRecoverErrors
 
   //////////
   // Copy //
@@ -786,12 +775,6 @@ class PekkoHttpWSClientEngine(
       }
     }.recover(recoverErrors(site)(serviceAndEndpoint(site, Some(endPoint))))
   }
-
-  protected def serviceAndEndpoint(
-    site: SiteBinding,
-    endPointForLogging: Option[String]
-  ): String =
-    s"${serviceName(site)}${endPointForLogging.map("." + _).getOrElse("")}"
 
   ///////////
   // Close //

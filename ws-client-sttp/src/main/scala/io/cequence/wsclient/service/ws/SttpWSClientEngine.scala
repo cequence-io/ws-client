@@ -40,7 +40,8 @@ final class SttpWSClientEngine private[ws] (
   override val transportSettings: TransportSettings
 )(
   implicit override protected val ec: ExecutionContext
-) extends WSClientEngine {
+) extends WSClientEngine
+    with EngineSupport {
 
   // the copy always builds its own OWNED backend from the given settings (via
   // SttpWSClientEngine.buildBackend) and closes it independently of this engine - the
@@ -57,25 +58,14 @@ final class SttpWSClientEngine private[ws] (
       transportSettings
     )(ec)
 
-  private val defaultRequestTimeout: Int = 120 * 1000 // two minutes
+  // sttp maps only the request timeout (per request); a partially-specified Timeouts falls
+  // back to the default instead of dropping it
+  private val requestTimeoutMs: Int =
+    transportSettings.timeouts.requestTimeout.getOrElse(EngineSupport.DefaultRequestTimeoutMs)
 
-  // resolved per field so a partially-specified Timeouts (e.g. only readTimeout) never
-  // silently drops the request timeout
-  private val timeouts: Timeouts = {
-    val expl = transportSettings.timeouts
-    expl.copy(requestTimeout = expl.requestTimeout.orElse(Some(defaultRequestTimeout)))
-  }
-
-  private def serviceName(site: SiteBinding): String =
-    site.label.getOrElse(getClass.getSimpleName)
-
-  private def recoverErrors(
-    site: SiteBinding
-  ): String => PartialFunction[Throwable, RichResponse] =
-    SiteBinding.resolveRecoverErrors(
-      site.recoverErrors,
-      SttpWSClientEngine.defaultRecoverErrors
-    )
+  override protected def defaultRecoverErrors
+    : String => PartialFunction[Throwable, RichResponse] =
+    SttpWSClientEngine.defaultRecoverErrors
 
   /////////
   // GET //
@@ -357,7 +347,7 @@ final class SttpWSClientEngine private[ws] (
     }
 
     withHeaders
-      .readTimeout(timeouts.requestTimeout.getOrElse(defaultRequestTimeout).millis)
+      .readTimeout(requestTimeoutMs.millis)
       // sttp follows redirects by default, re-sending bodies and custom secret headers (e.g.
       // X-Api-Key) to whatever origin the Location names; no other engine follows redirects
       .followRedirects(false)
@@ -469,12 +459,6 @@ final class SttpWSClientEngine private[ws] (
         )
       }
       .recover(recoverErrors(site)(serviceAndEndpoint(site, endPointForLogging)))
-
-  private def serviceAndEndpoint(
-    site: SiteBinding,
-    endPointForLogging: Option[String]
-  ) =
-    s"${serviceName(site)}${endPointForLogging.map("." + _).getOrElse("")}"
 
   override def close(): Unit = {
     backend.close()
