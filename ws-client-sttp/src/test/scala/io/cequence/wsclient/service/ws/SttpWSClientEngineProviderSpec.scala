@@ -106,6 +106,47 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       }
     }
 
+    "POST repeated form keys in an in-memory multipart body, and a streamed one under the file's base name" in {
+      withEchoServer { port =>
+        val file = java.io.File.createTempFile("ws-client-sttp-", ".txt")
+        file.deleteOnExit()
+        val writer = new java.io.PrintWriter(file)
+        writer.print("file-content")
+        writer.close()
+
+        val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+        val site = SiteBinding(s"http://localhost:$port")
+        def post(useInMemoryBody: Boolean) =
+          (Await
+            .result(
+              engine
+                .execPOSTMultipartRich(
+                  site,
+                  "upload",
+                  fileParams = Seq(("file", file, None)),
+                  bodyParams = Seq("tag" -> Some("first"), "tag" -> Some("second")),
+                  useInMemoryBody = useInMemoryBody
+                )
+                .map(engine.getResponseOrError),
+              30.seconds
+            )
+            .json \ "body").as[String]
+
+        Seq(true, false).foreach { inMemory =>
+          val body = post(inMemory)
+          withClue(s"useInMemoryBody = $inMemory: ") {
+            """name="?tag"?\r\n""".r.findAllMatchIn(body).size shouldBe 2
+            body should include("first")
+            body should include("second")
+            body should include(s"""filename="${file.getName}"""")
+            body should not include file.getParent
+          }
+        }
+
+        engine.close()
+      }
+    }
+
     "POST an in-memory multipart body with a Content-Length" in {
       withEchoServer { port =>
         val file = File.createTempFile("ws-client-sttp-test", ".txt")

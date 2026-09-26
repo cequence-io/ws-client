@@ -17,17 +17,19 @@ import io.cequence.wsclient.domain.{
 import io.cequence.wsclient.service.{
   JsonStreamFrames,
   SourcePublishersAkka,
+  StreamErrorBody,
   WSClientOutputStreamExtraAkka
 }
 import io.cequence.wsclient.service.spi.TransportSettings
-import io.cequence.wsclient.service.ws.PlayWSClientEngine
+import io.cequence.wsclient.service.ws.{EngineSupport, PlayWSClientEngine}
 import org.slf4j.LoggerFactory
 import play.api.libs.json.JsValue
 import play.api.libs.ws.JsonBodyWritables._
 
 import java.net.UnknownHostException
 import java.util.concurrent.TimeoutException
-import scala.concurrent.ExecutionContext
+import scala.concurrent.duration._
+import scala.concurrent.{ExecutionContext, Future}
 
 /**
  * The Play WS (Akka) streaming flavor of the site-stateless engine - a strict superset of
@@ -137,6 +139,10 @@ class PlayWSStreamClientEngine(
     val prefix = serviceAndEndpoint(site, Some(endPoint))
 
     {
+      // already mapped (e.g. a non-2xx stream status) - pass through, don't re-wrap
+      case e: CequenceWSException =>
+        logger.error(e.getMessage)
+        throw e
       case e: JsonParseException =>
         val message = s"$prefix: Response is not a JSON. ${e.getMessage}."
         logger.error(message)
@@ -247,9 +253,22 @@ class PlayWSStreamClientEngine(
     } else
       request
 
+    // never expose an error page as stream data: a non-2xx status fails the stream with a
+    // bounded diagnostic
     val source =
-      requestWithBody.withMethod(method).stream().map { response =>
-        response.bodyAsSource
+      requestWithBody.withMethod(method).stream().flatMap { response =>
+        if (response.status / 100 == 2)
+          Future.successful(response.bodyAsSource)
+        else
+          StreamErrorBody
+            .read(response.bodyAsSource, EngineSupport.ErrorBodyReadTimeoutMs.millis)
+            .map(errorBody =>
+              Source.failed[ByteString](
+                new CequenceWSException(
+                  EngineSupport.streamErrorMessage(prefix, response.status, errorBody)
+                )
+              )
+            )
       }
 
     // keep it like this because of older version of akka-stream (futureSource vs fromFutureSource)

@@ -14,7 +14,7 @@ The project includes:
 - Streaming support for large payloads
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 1.0.0
+Current version: 1.1.0
 
 ## Build Commands
 
@@ -365,6 +365,15 @@ val loggedService = log(service, "MyService")
   `site.requestContextFn` - exactly ONCE per request, so its headers and query params come
   from the same evaluation. Client-level settings (connect timeout, proxy; all timeouts on
   Play) are captured once at construction/first use
+- Streaming: every engine checks the HTTP status BEFORE exposing a streamed body - a non-2xx
+  status fails the stream with a `CequenceWSException` (`EngineSupport.streamErrorMessage`,
+  "<svc>: HTTP <status> - <start of body>"), reading at most `EngineSupport.MaxErrorBodyBytes`
+  (4 KiB) of the error body within 10 s or the request timeout (core `BoundedBodyReader` for
+  `Flow` bodies, core-akka `StreamErrorBody` for `Source` bodies). The akka/pekko
+  `handleException` passes Cequence exceptions through unwrapped
+- Form fields: repeated keys keep every value on every engine (`EngineSupport.groupValues`,
+  never `.toMap`); multipart files go out under their BASE name (`FilePart.filenameAux`) unless
+  a display name is given
 - No engine follows redirects (sttp disables its follow-by-default per request) - a 3xx comes
   back as a non-acceptable status. Following redirects would re-send bodies and custom secret
   headers (e.g. `X-Api-Key`) to whatever origin the `Location` names

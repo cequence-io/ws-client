@@ -5,6 +5,7 @@ import io.cequence.wsclient.domain._
 import io.cequence.wsclient.service.{
   JsonStreamFrames,
   SourcePublishersPekko,
+  StreamErrorBody,
   WSClientEngine,
   WSClientInputStreamExtraPekko,
   WSClientOutputStreamExtraPekko
@@ -85,7 +86,7 @@ class PekkoHttpWSClientEngine(
     // plain-http requests routinely can't use - so the proxy URL is not honored here
     transportSettings.proxyURL.foreach(proxyUrl =>
       logger.warn(
-        s"PekkoHttpWSClientEngine: TransportSettings.proxyURL ('$proxyUrl') is not supported by the pekko-http engine and is IGNORED - use the Play, jdk, or sttp engine for proxied traffic."
+        s"PekkoHttpWSClientEngine: TransportSettings.proxyURL (${ProxyUrlUtil.redacted(proxyUrl)}) is not supported by the pekko-http engine and is IGNORED - use the Play, jdk, or sttp engine for proxied traffic."
       )
     )
 
@@ -106,6 +107,15 @@ class PekkoHttpWSClientEngine(
       readTimeout = Some(defaultReadoutTimeout)
     )
   )
+
+  // deadline for reading a non-2xx stream's body (for the error message only)
+  private val errorBodyReadTimeout: FiniteDuration =
+    math
+      .min(
+        timeouts.requestTimeout.getOrElse(EngineSupport.DefaultRequestTimeoutMs),
+        EngineSupport.ErrorBodyReadTimeoutMs
+      )
+      .millis
 
   override protected def defaultRecoverErrors
     : String => PartialFunction[Throwable, RichResponse] =
@@ -553,9 +563,24 @@ class PekkoHttpWSClientEngine(
     val request =
       buildRequest(site, httpMethod, endPoint, endPointParam, params, extraHeaders, entity)
 
-    val source = singleRequestWithTimeout(request).map(_.entity.dataBytes)
-
     val svc = serviceAndEndpoint(site, Some(endPoint))
+
+    // never expose an error page as stream data: a non-2xx status fails the stream with a
+    // bounded diagnostic
+    val source = singleRequestWithTimeout(request).flatMap { response =>
+      if (response.status.isSuccess())
+        Future.successful(response.entity.dataBytes)
+      else
+        StreamErrorBody
+          .read(response.entity.dataBytes, errorBodyReadTimeout)
+          .map(errorBody =>
+            Source.failed[ByteString](
+              new CequenceWSException(
+                EngineSupport.streamErrorMessage(svc, response.status.intValue, errorBody)
+              )
+            )
+          )
+    }
 
     Source
       .futureSource(source)
@@ -591,6 +616,10 @@ class PekkoHttpWSClientEngine(
     val svc = serviceAndEndpoint(site, Some(endPoint))
 
     {
+      // already mapped (e.g. a non-2xx stream status) - pass through, don't re-wrap
+      case e: CequenceWSException =>
+        streamLogger.error(e.getMessage)
+        throw e
       case e: JsonParseException =>
         val message = s"$svc: Response is not a JSON. ${e.getMessage}."
         streamLogger.error(message)
@@ -670,14 +699,8 @@ class PekkoHttpWSClientEngine(
 
   // the (implicit) file-part-to-content function produces a raw header line
   // ("content-type: <media type>\r\n") or an empty string - extract the content type from it
-  private def parseContentType(headerLine: String): Option[ContentType] = {
-    val prefix = s"${HttpHeaderNames.CONTENT_TYPE}: "
-    val trimmed = headerLine.stripSuffix("\r\n")
-    if (trimmed.startsWith(prefix))
-      ContentType.parse(trimmed.stripPrefix(prefix)).toOption
-    else
-      None
-  }
+  private def parseContentType(headerLine: String): Option[ContentType] =
+    EngineSupport.contentTypeOfHeaderLine(headerLine).flatMap(ContentType.parse(_).toOption)
 
   private def buildRequest(
     site: SiteBinding,

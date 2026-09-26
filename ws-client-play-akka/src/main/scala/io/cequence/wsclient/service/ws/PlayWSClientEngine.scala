@@ -70,7 +70,7 @@ class PlayWSClientEngine(
   private object DefaultTimeouts {
     val readTimeout = 60000
     val requestTimeout = 60000
-    val connectTimeout = 5000
+    val connectTimeout = EngineSupport.DefaultConnectTimeoutMs
     val pooledConnectionIdleTimeout = 60000
   }
 
@@ -260,12 +260,13 @@ class PlayWSClientEngine(
   ): Future[RichResponse] = {
     val request =
       getWSRequestOptional(site, Some(endPoint), endPointParam, params, extraHeaders)
-    val bodyData = bodyParams.collect { case (key, Some(value)) =>
+    // repeated keys (array-style form fields) keep every value
+    val bodyData = EngineSupport.groupValues(bodyParams.collect { case (key, Some(value)) =>
       (key, value.toString)
-    }.toMap
+    })
 
-    implicit val writeable: BodyWritable[Map[String, String]] =
-      DefaultBodyWritables.writeableOf_urlEncodedSimpleForm
+    implicit val writeable: BodyWritable[Map[String, Seq[String]]] =
+      DefaultBodyWritables.writeableOf_urlEncodedForm
 
     execPOSTWithStatusAux(
       site,
@@ -342,9 +343,9 @@ class PlayWSClientEngine(
     fileParams: Seq[(String, File, Option[String])] = Nil,
     bodyParams: Seq[(String, Option[Any])] = Nil
   ) = MultipartFormData(
-    dataParts = bodyParams.collect { case (key, Some(value)) =>
-      (key, Seq(value.toString))
-    }.toMap,
+    dataParts = EngineSupport.groupValues(bodyParams.collect { case (key, Some(value)) =>
+      (key, value.toString)
+    }),
     files = fileParams.map { case (key, file, headerFileName) =>
       FilePart(key, file.getPath, headerFileName)
     }

@@ -8,6 +8,7 @@ import io.cequence.wsclient.service.{
 }
 import io.cequence.wsclient.service.spi.TransportSettings
 import io.cequence.wsclient.stream.{
+  BoundedBodyReader,
   DeferredPublisher,
   ErrorMappedPublisher,
   FuturePublisher,
@@ -23,7 +24,7 @@ import java.net.http.{HttpClient, HttpRequest, HttpResponse, HttpTimeoutExceptio
 import java.net.{ConnectException, URI, URLEncoder, UnknownHostException}
 import java.nio.channels.UnresolvedAddressException
 import java.time.Duration
-import java.util.concurrent.CompletionException
+import java.util.concurrent.{CompletableFuture, CompletionException, CompletionStage}
 import scala.concurrent.{blocking, ExecutionContext, Future, Promise}
 
 /**
@@ -66,7 +67,7 @@ final class JdkWSClientEngine private[ws] (
     reuseExecContext: Boolean = true
   ): JdkWSClientEngine = new JdkWSClientEngine(transportSettings)(ec)
 
-  private val defaultConnectTimeout: Int = 5 * 1000 // matches the Play engines' AHC default
+  private val defaultConnectTimeout: Int = EngineSupport.DefaultConnectTimeoutMs
 
   private lazy val client: HttpClient = {
     val builder = HttpClient.newBuilder()
@@ -86,6 +87,14 @@ final class JdkWSClientEngine private[ws] (
     transportSettings.timeouts,
     Timeouts(requestTimeout = Some(EngineSupport.DefaultRequestTimeoutMs))
   )
+
+  // deadline for reading a non-2xx stream's body (for the error message only)
+  private val errorBodyReadTimeoutMs: Long = math
+    .min(
+      timeouts.requestTimeout.getOrElse(EngineSupport.DefaultRequestTimeoutMs),
+      EngineSupport.ErrorBodyReadTimeoutMs
+    )
+    .toLong
 
   override protected def defaultRecoverErrors
     : String => PartialFunction[Throwable, RichResponse] =
@@ -426,11 +435,41 @@ final class JdkWSClientEngine private[ws] (
         else
           builder.method(method, BodyPublishers.noBody())
 
+      type Body = java.util.concurrent.Flow.Publisher[java.util.List[java.nio.ByteBuffer]]
+      val label = serviceAndEndpoint(site, Some(endPoint))
+
+      // never expose an error page as stream data: a non-2xx status fails the stream with a
+      // bounded diagnostic
       val bodyPublisher =
         client
           .sendAsync(request.build(), BodyHandlers.ofPublisher())
-          .thenApply[java.util.concurrent.Flow.Publisher[java.util.List[java.nio.ByteBuffer]]](
-            response => response.body()
+          .thenCompose[Body](
+            new java.util.function.Function[HttpResponse[Body], CompletionStage[Body]] {
+              override def apply(response: HttpResponse[Body]): CompletionStage[Body] =
+                if (response.statusCode() / 100 == 2)
+                  CompletableFuture.completedFuture(response.body())
+                else
+                  BoundedBodyReader
+                    .utf8(
+                      new TransformPublisher(
+                        response.body(),
+                        () => new StreamTransformers.ByteBufferListFlatten
+                      ),
+                      EngineSupport.MaxErrorBodyBytes,
+                      errorBodyReadTimeoutMs
+                    )
+                    .thenCompose[Body](
+                      new java.util.function.Function[String, CompletionStage[Body]] {
+                        override def apply(errorBody: String): CompletionStage[Body] =
+                          CompletableFuture.failedFuture[Body](
+                            new CequenceWSException(
+                              EngineSupport
+                                .streamErrorMessage(label, response.statusCode(), errorBody)
+                            )
+                          )
+                      }
+                    )
+            }
           )
 
       new ErrorMappedPublisher(
@@ -536,9 +575,9 @@ final class JdkWSClientEngine private[ws] (
     implicit filePartToContent: FilePart => String
   ): Future[RichResponse] = {
     val formData = MultipartFormData(
-      dataParts = bodyParams.collect { case (key, Some(value)) =>
-        (key, Seq(value.toString))
-      }.toMap,
+      dataParts = EngineSupport.groupValues(bodyParams.collect { case (key, Some(value)) =>
+        (key, value.toString)
+      }),
       files = fileParams.map { case (key, file, headerFileName) =>
         FilePart(key, file.getPath, headerFileName)
       }

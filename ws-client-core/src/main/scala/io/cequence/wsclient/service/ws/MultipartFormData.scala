@@ -12,7 +12,12 @@ case class FilePart(
   contentType: Option[String] = None
 ) {
   def name = s""""${key}""""
-  def filenameAux: String = headerFileName.getOrElse(path)
+  // the file name sent to the server: the display name if given, else the file's BASE name -
+  // never the local path, which would disclose the local directory layout
+  def filenameAux: String = headerFileName.getOrElse {
+    val baseName = new java.io.File(path).getName
+    if (baseName.nonEmpty) baseName else path
+  }
   def filenamePart = s""""${filenameAux}""""
 
   def extension: String = filenameAux.split('.').last

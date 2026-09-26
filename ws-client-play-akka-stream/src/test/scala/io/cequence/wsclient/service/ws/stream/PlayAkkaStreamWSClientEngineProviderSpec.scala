@@ -127,6 +127,39 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
       )
     }
 
+    "fail a stream on a non-2xx status instead of parsing the error page" in {
+      io.cequence.wsclient.testkit.TestServers.withServer("/events" -> { exchange =>
+        io.cequence.wsclient.testkit.TestServers
+          .respond(exchange, 401, """{"error":"invalid api key"}""")
+      }) { port =>
+        val runSystem = akka.actor.ActorSystem("stream-error-spec-runner")
+        try {
+          val engine = io.cequence.wsclient.service.spi.StreamedEngineRegistry.outputStreamed(
+            TransportSettings(),
+            Some(expectedEngineId)
+          )
+          val failure = Await.result(
+            engine
+              .execJsonStream(SiteBinding(s"http://localhost:$port"), "events", "POST")
+              .runWith(akka.stream.scaladsl.Sink.seq)(
+                akka.stream.Materializer(runSystem)
+              )
+              .failed,
+            30.seconds
+          )
+
+          failure shouldBe a[io.cequence.wsclient.domain.CequenceWSException]
+          failure.getMessage should include("HTTP 401")
+          failure.getMessage should include("invalid api key")
+
+          engine.close()
+        } finally {
+          runSystem.terminate()
+          ()
+        }
+      }
+    }
+
     "expose the neutral Flow.Publisher contract (cold, [DONE]-terminated)" in {
       val requestCount = new java.util.concurrent.atomic.AtomicInteger(0)
       val server = HttpServer.create(new InetSocketAddress(0), 0)

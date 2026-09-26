@@ -8,6 +8,14 @@ import org.slf4j.LoggerFactory
 
 import scala.concurrent.Future
 
+/**
+ * Sends EVERY call to ALL underlying services at once and completes with the first response.
+ *
+ * Privacy and cost: the complete request - body, user data, and each service's own credentials
+ * \- reaches every configured provider, and the losing calls are NOT cancelled (the engines
+ * are Future-based): they run to completion and are billed by their providers. Only combine
+ * providers that may all see the data.
+ */
 private final class ParallelTakeFirstAdapter[+S <: CloseableService](
   underlyings: Seq[S]
 )(

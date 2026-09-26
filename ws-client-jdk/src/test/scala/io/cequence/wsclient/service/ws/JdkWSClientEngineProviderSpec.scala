@@ -17,7 +17,12 @@ import io.cequence.wsclient.service.spi.{
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 import io.cequence.wsclient.testkit.LatchedSubscriber
-import io.cequence.wsclient.testkit.TestServers.{withDumbProxy, withEchoServer}
+import io.cequence.wsclient.testkit.TestServers.{
+  respond,
+  withDumbProxy,
+  withEchoServer,
+  withServer
+}
 import play.api.libs.json.{JsString, JsValue, Json}
 
 import java.io.{File, PrintWriter}
@@ -80,6 +85,39 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         (response.json \ "method").get shouldBe JsString("POST")
         (response.json \ "contentType").get shouldBe JsString("application/json")
         Json.parse((response.json \ "body").get.as[String]) shouldBe Json.obj("name" -> "John")
+
+        engine.close()
+      }
+    }
+
+    "POST a multipart body with repeated keys, under the file's base name" in {
+      withEchoServer { port =>
+        val file = File.createTempFile("ws-client-jdk-test", ".txt")
+        file.deleteOnExit()
+        val writer = new PrintWriter(file)
+        writer.print("file-content")
+        writer.close()
+
+        val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+        val body = (Await
+          .result(
+            engine
+              .execPOSTMultipartRich(
+                SiteBinding(s"http://localhost:$port"),
+                "upload",
+                fileParams = Seq(("file", file, None)),
+                bodyParams = Seq("tag" -> Some("first"), "tag" -> Some("second"))
+              )
+              .map(engine.getResponseOrError),
+            30.seconds
+          )
+          .json \ "body").as[String]
+
+        """name=tag\r\n""".r.findAllMatchIn(body).size shouldBe 2
+        body should include("first")
+        body should include("second")
+        body should include(s"""filename="${file.getName}"""")
+        body should not include file.getParent
 
         engine.close()
       }
@@ -491,6 +529,27 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         engine.close()
       } finally
         server.stop(0)
+    }
+
+    "fail a stream on a non-2xx status instead of parsing the error page" in {
+      withServer("/events" -> { exchange =>
+        respond(exchange, 401, """{"error":"invalid api key"}""")
+      }) { port =>
+        val engine =
+          WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+        val subscriber = new LatchedSubscriber[JsValue]
+        engine
+          .execJsonStreamPublisher(SiteBinding(s"http://localhost:$port"), "events", "POST")
+          .subscribe(subscriber)
+
+        subscriber.awaitDone(30) shouldBe true
+        subscriber.received shouldBe empty
+        subscriber.error.get shouldBe a[io.cequence.wsclient.domain.CequenceWSException]
+        subscriber.error.get.getMessage should include("HTTP 401")
+        subscriber.error.get.getMessage should include("invalid api key")
+
+        engine.close()
+      }
     }
 
     "deliver raw bytes and stop after downstream cancellation" in {
