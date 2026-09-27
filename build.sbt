@@ -9,7 +9,7 @@ ThisBuild / description := "Generic WebServices library with Play WS impl./backe
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala213
-ThisBuild / version := "1.0.0"
+ThisBuild / version := "1.1.0"
 ThisBuild / isSnapshot := false
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 
@@ -107,7 +107,17 @@ val logbackVersion = "1.5.38"
 
 lazy val testLoggingSettings = Seq(
   libraryDependencies += "ch.qos.logback" % "logback-classic" % logbackVersion % Test,
-  Test / unmanagedResourceDirectories += (ThisBuild / baseDirectory).value / "test-resources"
+  Test / unmanagedResourceDirectories += (ThisBuild / baseDirectory).value / "test-resources",
+  // the test-only ws-client-testkit is never published: keep its `% Test` project dependency
+  // out of the published POMs
+  pomPostProcess := { (node: scala.xml.Node) =>
+    new scala.xml.transform.RuleTransformer(new scala.xml.transform.RewriteRule {
+      override def transform(n: scala.xml.Node): scala.xml.NodeSeq =
+        if (n.label == "dependency" && (n \ "artifactId").text.startsWith("ws-client-testkit"))
+          scala.xml.NodeSeq.Empty
+        else n
+    }).transform(node).head
+  }
 )
 
 // play-json (2.8.2 / 2.10.0-RC6) pins Jackson 2.11.4, affected by CVE-2025-52999 (deeply
@@ -219,7 +229,7 @@ lazy val `ws-client-play-akka` =
       testLoggingSettings,
       publish / skip := false
     )
-    .dependsOn(`ws-client-core-akka`)
+    .dependsOn(`ws-client-core-akka`, `ws-client-testkit` % Test)
     .aggregate(`ws-client-core`, `ws-client-core-akka`, `json-repair`)
 
 lazy val `ws-client-play-akka-stream` =
@@ -231,7 +241,7 @@ lazy val `ws-client-play-akka-stream` =
       testLoggingSettings,
       publish / skip := false
     )
-    .dependsOn(`ws-client-core-akka`, `ws-client-play-akka`)
+    .dependsOn(`ws-client-core-akka`, `ws-client-play-akka`, `ws-client-testkit` % Test)
     .aggregate(`ws-client-core`, `ws-client-core-akka`, `ws-client-play-akka`)
 
 // Pekko modules - sources are generated from the corresponding akka modules by PekkoGenerator;
@@ -259,7 +269,7 @@ lazy val `ws-client-play-pekko` =
       PekkoGenerator.generatorSettings(`ws-client-play-akka`),
       publish / skip := false
     )
-    .dependsOn(`ws-client-core-pekko`)
+    .dependsOn(`ws-client-core-pekko`, `ws-client-testkit` % Test)
 
 lazy val `ws-client-play-pekko-stream` =
   (project in file("ws-client-play-pekko-stream"))
@@ -272,7 +282,7 @@ lazy val `ws-client-play-pekko-stream` =
       PekkoGenerator.generatorSettings(`ws-client-play-akka-stream`),
       publish / skip := false
     )
-    .dependsOn(`ws-client-core-pekko`, `ws-client-play-pekko`)
+    .dependsOn(`ws-client-core-pekko`, `ws-client-play-pekko`, `ws-client-testkit` % Test)
 
 // Fixtures shared by the engine specs (embedded echo/SSE/proxy servers, a latched
 // Flow.Subscriber) - never published, used in Test scope only. Sharing core's test classpath
@@ -337,7 +347,7 @@ lazy val `ws-client-pekko-http` =
       testLoggingSettings,
       publish / skip := false
     )
-    .dependsOn(`ws-client-core-pekko`)
+    .dependsOn(`ws-client-core-pekko`, `ws-client-testkit` % Test)
 
 lazy val root = (project in file("."))
   .settings(

@@ -1,5 +1,5 @@
 # WS Client (Cequence)
-[![version](https://img.shields.io/badge/version-1.0.0-green.svg)](https://cequence.io) [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](https://opensource.org/licenses/MIT) [![Twitter Follow](https://img.shields.io/twitter/follow/cequence_io?style=social)](https://twitter.com/0xbnd)
+[![version](https://img.shields.io/badge/version-1.1.0-green.svg)](https://cequence.io) [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](https://opensource.org/licenses/MIT) [![Twitter Follow](https://img.shields.io/twitter/follow/cequence_io?style=social)](https://twitter.com/0xbnd)
 
 This repository contains a simple and efficient Web Service client implemented in Scala. The client is designed to interact with RESTful web services, making it easy to send requests, handle responses, and manage errors.
 
@@ -14,13 +14,13 @@ The currently supported Scala versions are **2.12, 2.13**, and **3** for the Akk
 To install the library, add the following dependency to your *build.sbt*
 
 ```
-"io.cequence" %% "ws-client-play-akka" % "1.0.0"     // Akka-based (Play WS 2.x)
+"io.cequence" %% "ws-client-play-akka" % "1.1.0"     // Akka-based (Play WS 2.x)
 ```
 
 or, for the Pekko flavor:
 
 ```
-"io.cequence" %% "ws-client-play-pekko" % "1.0.0"    // Pekko-based (Play WS 3.x)
+"io.cequence" %% "ws-client-play-pekko" % "1.1.0"    // Pekko-based (Play WS 3.x)
 ```
 
 or to *pom.xml* (if you use maven)
@@ -29,19 +29,32 @@ or to *pom.xml* (if you use maven)
 <dependency>
     <groupId>io.cequence</groupId>
     <artifactId>ws-client-play-akka_2.12</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
 </dependency>
 ```
 
 If you only need the core abstractions without Akka/Pekko dependencies:
 
 ```
-"io.cequence" %% "ws-client-core" % "1.0.0"
+"io.cequence" %% "ws-client-core" % "1.1.0"
 ```
 
 > ⚠️ **The Akka and Pekko flavors are mutually exclusive on one classpath.** The Pekko modules are generated from the Akka ones and deliberately keep the same package and class names (the same trade-off Play made between 2.9 and 3.0), so downstream code compiles unchanged against either flavor - switch by swapping the artifact and your `Materializer` import. Never depend on both: which classes (implicits such as `asSafeSource` included) actually load then depends on jar order. `WSClientEngineRegistry` detects such duplicated classes at runtime and logs a warning naming the conflicting jars; set the config key `ws-client.strict-classpath = true` (or `-Dws-client.strict-classpath=true`) to fail engine resolution with an exception instead - recommended for CI.
 
 > ℹ️ **Logging:** the library logs through the SLF4J API only and ships no logging backend - bring your own (e.g. logback). Keep `play.shaded.ahc.org.asynchttpclient.netty.handler` at `INFO` or above: at `DEBUG` Play's shaded AsyncHttpClient logs complete request headers, including `Authorization`.
+
+> ⚠️ **Upgrading to 1.1.0** - behavior changes:
+> - **No logging backend is shipped anymore.** `logback-classic` used to come transitively; add your own SLF4J backend (e.g. logback).
+> - **The sttp engine no longer follows redirects** - a 3xx comes back as a non-acceptable status, as on every other engine.
+> - **Streaming calls fail on a non-2xx status**, on every engine, with a `CequenceWSException` (`"<service>: HTTP 401 - <start of the error body>"`) instead of feeding the error page to the SSE/JSON parser. At most 4 KiB of the error body are read, within 10 s (or the request timeout, if shorter).
+> - **Multipart uploads send the file's base name**, never its local path, unless a display name is given.
+> - **Repeated form keys keep every value** (URL-encoded and multipart bodies) on every engine - previously some engines kept only the last one.
+> - **`DirectWSClient`** defaults a scheme-less URL to `https://` and rejects schemes other than http/https.
+> - **Jackson 2.22** is declared directly (play-json pins 2.11.4, affected by CVE-2025-52999 and CVE-2020-36518): deeply nested JSON now fails with a `CequenceWSException`, and a single JSON string value longer than Jackson's default maximum length no longer parses.
+> - **JsonRepair** keeps apostrophes inside values and keys on its repair path, and no longer crashes on values that are a single quote character.
+> - Proxy URLs are no longer echoed in logs or error messages (only host and port).
+>
+> New: the **`ws-client-zio-http`** engine (engine id `zio-http`) - see the engine table below.
 
 > ⚠️ **Upgrading from ≤ 0.8.1:** the Akka-based Play modules were renamed for symmetry with the Pekko flavor - `ws-client-play` → `ws-client-play-akka` and `ws-client-play-stream` → `ws-client-play-akka-stream`. The old and new artifacts contain the same packages and classes but have different artifact ids, so dependency resolution will **not** evict the old ones - with both on the classpath, which classes win depends on jar order, and engine discovery may not find the `play-akka`/`play-akka-stream` providers. Make sure no transitive dependency still pulls the old artifacts, or exclude them explicitly:
 >

@@ -52,7 +52,6 @@ import java.nio.channels.UnresolvedAddressException
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{Flow, TimeoutException}
-import scala.collection.immutable.ListMap
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.Try
 import scala.util.control.NonFatal
@@ -127,6 +126,12 @@ final class ZioHttpWSClientEngine private[ws] (
 
   private val requestTimeout: zio.Duration =
     zio.Duration.fromMillis(timeouts.requestTimeout.getOrElse(0).toLong)
+
+  // deadline for reading a non-2xx stream's body (for the error message only)
+  private val errorBodyReadTimeout: zio.Duration =
+    zio.Duration.fromMillis(
+      math.min(requestTimeout.toMillis, EngineSupport.ErrorBodyReadTimeoutMs.toLong)
+    )
 
   override protected def defaultRecoverErrors
     : String => PartialFunction[Throwable, RichResponse] =
@@ -472,12 +477,13 @@ final class ZioHttpWSClientEngine private[ws] (
               )
             else
               // never expose an error page as stream data - fail with a bounded diagnostic:
-              // at most MaxErrorBodyBytes are read, within the request timeout, so a huge or
-              // never-ending error body is neither buffered nor able to stall the stream
+              // at most EngineSupport.MaxErrorBodyBytes are read, within the error-body read
+              // timeout, so a huge or never-ending error body is neither buffered nor able to
+              // stall the stream
               response.body.asStream
-                .take(MaxErrorBodyBytes)
+                .take(EngineSupport.MaxErrorBodyBytes)
                 .runCollect
-                .timeout(requestTimeout)
+                .timeout(errorBodyReadTimeout)
                 .map(bytes =>
                   new String(bytes.getOrElse(Chunk.empty).toArray, StandardCharsets.UTF_8)
                 )
@@ -486,7 +492,7 @@ final class ZioHttpWSClientEngine private[ws] (
                 .map(errorBody =>
                   ZStream.fail(
                     new CequenceWSException(
-                      s"$label: HTTP ${response.status.code} - ${errorBody.take(500)}"
+                      EngineSupport.streamErrorMessage(label, response.status.code, errorBody)
                     )
                   )
                 )
@@ -670,7 +676,7 @@ final class ZioHttpWSClientEngine private[ws] (
       ZIO.attemptBlocking {
         val boundary = MultipartBodyBuilder.generateBoundary
         val formData = MultipartFormData(
-          dataParts = groupValues(dataParts),
+          dataParts = EngineSupport.groupValues(dataParts),
           files = fileParts.map(_._1)
         )
         Body
@@ -700,13 +706,6 @@ final class ZioHttpWSClientEngine private[ws] (
 
   private def isContentType(headerName: String) = headerName.equalsIgnoreCase("Content-Type")
 
-  // repeated keys keep every value (as the streamed multipart path does); keys stay in
-  // first-occurrence order. Form fields are few, so the quadratic grouping is irrelevant
-  private def groupValues(pairs: Seq[(String, String)]): Map[String, Seq[String]] =
-    ListMap(pairs.map(_._1).distinct.map { key =>
-      key -> pairs.collect { case (`key`, value) => value }
-    }: _*)
-
   private def timeoutException(label: String) =
     new TimeoutException(s"$label: no response within ${requestTimeout.toMillis} ms")
 
@@ -730,12 +729,9 @@ object ZioHttpWSClientEngine {
 
   private val logger = org.slf4j.LoggerFactory.getLogger("ZioHttpWSClientEngine")
 
-  private val DefaultConnectTimeoutMs: Int = 5 * 1000 // matches the Play/jdk engines
   private val DefaultReadTimeoutMs: Int = 120 * 1000
   private val DefaultPooledIdleTimeoutMs: Int = 60 * 1000 // matches the Play engines
   private val MaxConnectionsPerHost = 1024
-  private val MaxErrorBodyBytes =
-    4 * 1024 // read of a non-2xx stream's body, for the error message
 
   /**
    * An engine on a caller-supplied `Client` and `Runtime` - e.g. the ones of a ZIO
@@ -963,7 +959,7 @@ object ZioHttpWSClientEngine {
       Timeouts(
         requestTimeout = Some(EngineSupport.DefaultRequestTimeoutMs),
         readTimeout = Some(DefaultReadTimeoutMs),
-        connectTimeout = Some(DefaultConnectTimeoutMs),
+        connectTimeout = Some(EngineSupport.DefaultConnectTimeoutMs),
         pooledConnectionIdleTimeout = Some(DefaultPooledIdleTimeoutMs)
       )
     )

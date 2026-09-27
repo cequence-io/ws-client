@@ -14,6 +14,7 @@ import io.cequence.wsclient.service.spi.{
   TransportSettings,
   WSClientEngineRegistry
 }
+import io.cequence.wsclient.testkit.TestServers.withEchoServer
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 import play.api.libs.json.{JsString, Json}
@@ -143,6 +144,71 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         noException should be thrownBy engine.close()
       } finally
         server.stop(0)
+    }
+
+    "POST repeated form keys in an in-memory multipart body, and a streamed one under the file's base name" in {
+      withEchoServer { port =>
+        val file = java.io.File.createTempFile("ws-client-play-", ".txt")
+        file.deleteOnExit()
+        val writer = new java.io.PrintWriter(file)
+        writer.print("file-content")
+        writer.close()
+
+        val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+        val site = SiteBinding(s"http://localhost:$port")
+        def post(useInMemoryBody: Boolean) =
+          (Await
+            .result(
+              engine
+                .execPOSTMultipartRich(
+                  site,
+                  "upload",
+                  fileParams = Seq(("file", file, None)),
+                  bodyParams = Seq("tag" -> Some("first"), "tag" -> Some("second")),
+                  useInMemoryBody = useInMemoryBody
+                )
+                .map(engine.getResponseOrError),
+              30.seconds
+            )
+            .json \ "body").as[String]
+
+        Seq(true, false).foreach { inMemory =>
+          val body = post(inMemory)
+          withClue(s"useInMemoryBody = $inMemory: ") {
+            """name="?tag"?\r\n""".r.findAllMatchIn(body).size shouldBe 2
+            body should include("first")
+            body should include("second")
+            body should include(s"""filename="${file.getName}"""")
+            body should not include file.getParent
+          }
+        }
+
+        engine.close()
+      }
+    }
+
+    "POST every value of a repeated URL-encoded form key" in {
+      withEchoServer { port =>
+        val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+        val body = (Await
+          .result(
+            engine
+              .execPOSTURLEncodedRich(
+                SiteBinding(s"http://localhost:$port"),
+                "form",
+                bodyParams =
+                  Seq("color" -> Some("red"), "size" -> Some("L"), "color" -> Some("blue"))
+              )
+              .map(engine.getResponseOrError),
+            30.seconds
+          )
+          .json \ "body").as[String]
+
+        // grouped by key (first-occurrence order), every value kept
+        body shouldBe "color=red&color=blue&size=L"
+
+        engine.close()
+      }
     }
 
     "merge query params with a query already embedded in the endpoint" in {

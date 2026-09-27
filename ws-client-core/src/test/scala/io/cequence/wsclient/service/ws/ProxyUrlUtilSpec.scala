@@ -27,5 +27,26 @@ class ProxyUrlUtilSpec extends AnyWordSpec with Matchers {
     "fail without a parsable host" in {
       assertThrows[CequenceWSException](ProxyUrlUtil.hostAndPort("://"))
     }
+
+    "never echo the URL (it may carry credentials) in its errors" in {
+      Seq(
+        "http://user:s3cret@proxy.example.com",
+        "http://user:s3cret@[bad",
+        "s3cret^^"
+      ).foreach { url =>
+        val e = the[CequenceWSException] thrownBy ProxyUrlUtil.hostAndPort(url)
+        e.getMessage should not include "s3cret"
+      }
+    }
+  }
+
+  "ProxyUrlUtil.redacted" should {
+
+    "keep only host and port - no credentials, path or query" in {
+      ProxyUrlUtil.redacted("http://user:s3cret@proxy.example.com:8080/p?token=t0k") shouldBe
+        "proxy.example.com:8080"
+      ProxyUrlUtil.redacted("proxy.example.com:3128") shouldBe "proxy.example.com:3128"
+      ProxyUrlUtil.redacted("http://user:s3cret@[bad") shouldBe "<unparseable proxy URL>"
+    }
   }
 }

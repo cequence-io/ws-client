@@ -389,9 +389,9 @@ final class SttpWSClientEngine private[ws] (
       // fully materialized body with a known Content-Length - avoids chunked transfer
       // encoding, which some backends/proxies (e.g. Cloudflare) reject
       val formData = MultipartFormData(
-        dataParts = bodyParams.collect { case (key, Some(value)) =>
-          (key, Seq(value.toString))
-        }.toMap,
+        dataParts = EngineSupport.groupValues(bodyParams.collect { case (key, Some(value)) =>
+          (key, value.toString)
+        }),
         files = fileParams.map { case (key, file, headerFileName) =>
           FilePart(key, file.getPath, headerFileName)
         }
@@ -427,14 +427,8 @@ final class SttpWSClientEngine private[ws] (
 
   // the (implicit) file-part-to-content function produces a raw header line
   // ("content-type: <media type>\r\n") or an empty string - extract the media type from it
-  private def parseContentType(headerLine: String): Option[MediaType] = {
-    val prefix = s"${HttpHeaderNames.CONTENT_TYPE}: "
-    val trimmed = headerLine.stripSuffix("\r\n")
-    if (trimmed.startsWith(prefix))
-      MediaType.parse(trimmed.stripPrefix(prefix)).toOption
-    else
-      None
-  }
+  private def parseContentType(headerLine: String): Option[MediaType] =
+    EngineSupport.contentTypeOfHeaderLine(headerLine).flatMap(MediaType.parse(_).toOption)
 
   private def execRequest(
     site: SiteBinding,
