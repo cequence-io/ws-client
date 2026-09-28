@@ -46,11 +46,23 @@ class WSClientBaseSpec extends AnyWordSpec with Matchers {
 
     "route a structured status failure through the service's handleErrorCodes" in {
       val streamFailure =
-        new CequenceWSHttpStatusException("svc: HTTP 429 - slow down", 429, "slow down")
+        new CequenceWSHttpStatusException("svc.chat: HTTP 429 - slow down", 429, "slow down")
       val mapped = new ClassifyingClient().mapped(streamFailure)
 
       mapped.map(_.getClass) shouldBe Some(classOf[ClassifiedException])
       mapped.map(_.getMessage) shouldBe Some("classified 429: slow down")
+      // the original failure stays reachable for diagnostics
+      mapped.map(_.getSuppressed.toSeq) shouldBe Some(Seq(streamFailure))
+    }
+
+    "keep the original, more informative failure when the service does not classify" in {
+      val streamFailure =
+        new CequenceWSHttpStatusException("svc.chat: HTTP 429 - slow down", 429, "slow down")
+      val mapped = new DefaultClient().mapped(streamFailure)
+
+      // the same instance: service/endpoint label and HTTP status intact
+      mapped.exists(_ eq streamFailure) shouldBe true
+      mapped.map(_.getMessage) shouldBe Some("svc.chat: HTTP 429 - slow down")
     }
 
     "leave any other failure alone" in {

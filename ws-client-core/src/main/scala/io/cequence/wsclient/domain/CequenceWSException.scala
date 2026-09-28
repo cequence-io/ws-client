@@ -24,8 +24,9 @@ class CequenceWSUnknownHostException(
 /**
  * A non-acceptable HTTP status, as a structured failure: `statusCode` and `body` (for a
  * streamed call the error body is bounded - at most `EngineSupport.MaxErrorBodyBytes`).
- * Streaming calls fail with it on a non-2xx status; services classify it through their
- * `handleErrorCodes` via `WSClientBase.mapHttpStatusErrors`.
+ * Streaming calls fail with it on a non-2xx status, and the default `handleErrorCodes` of
+ * non-streamed calls throws it too; services classify it through their own `handleErrorCodes`
+ * via `WSClientBase.mapHttpStatusErrors`.
  */
 class CequenceWSHttpStatusException(
   message: String,

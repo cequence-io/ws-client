@@ -157,6 +157,9 @@ Streaming is added via optional mixin traits in `ws-client-core-akka`:
 - `WSClientInputStreamExtraAkka` (generated Pekko twin: `WSClientInputStreamExtraPekko`) - adds `execPOSTSource`/`execPOSTSourceRich` to `WSClient`
 - `WSClientOutputStreamExtraAkka` (generated Pekko twin: `WSClientOutputStreamExtraPekko`) - adds `execJsonStream`/`execRawStream`; extends the backend-agnostic `WSClientOutputStreamCore` (core), whose `Flow.Publisher`-typed `execJsonStreamPublisher`/`execRawStreamPublisher` every streaming engine also implements
 - `WSClientWithEngineInputStreamingBase` - delegates input stream methods to engine
+- `WSClientWithEngineOutputStreamingBase` - service-level `execJsonStream`/`execRawStream`
+  delegating to the engine, with non-2xx stream failures classified through the service's
+  `handleErrorCodes` (`mapHttpStatusErrors`)
 
 Type parameters `PEP` (endpoint) and `PT` (parameter type) allow subclasses to define their own endpoint and parameter types (commonly enums).
 
@@ -366,7 +369,8 @@ val loggedService = log(service, "MyService")
   from the same evaluation. Client-level settings (connect timeout, proxy; all timeouts on
   Play) are captured once at construction/first use
 - Streaming: every engine checks the HTTP status BEFORE exposing a streamed body - a non-2xx
-  status fails the stream with a `CequenceWSException` (`EngineSupport.streamErrorMessage`,
+  status fails the stream with a `CequenceWSHttpStatusException` - a `CequenceWSException`
+  subclass (`EngineSupport.streamErrorMessage`,
   "<svc>: HTTP <status> - <start of body>"), reading at most `EngineSupport.MaxErrorBodyBytes`
   (4 KiB) of the error body within 10 s or the request timeout (core `BoundedBodyReader` for
   `Flow` bodies, core-akka `StreamErrorBody` for `Source` bodies). The failure is a

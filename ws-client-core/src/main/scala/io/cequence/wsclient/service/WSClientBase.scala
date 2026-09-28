@@ -73,11 +73,29 @@ trait WSClientBase extends CloseableService {
    * non-streamed calls. For engine-level streams: `engine.execJsonStream(site,
    * ...).mapError(mapHttpStatusErrors)` (the service-level streaming methods of
    * `WSClientWithEngineOutputStreamingBase` apply it already).
+   *
+   * For a streamed call `handleErrorCodes` receives the BOUNDED error body (at most
+   * `EngineSupport.MaxErrorBodyBytes` = 4 KiB), not the full body of a non-streamed call. A
+   * service that does not classify (the default `handleErrorCodes`) keeps the original
+   * failure, whose message names the service/endpoint and the HTTP status; a classified
+   * exception carries the original as a suppressed exception.
    */
   protected def mapHttpStatusErrors: PartialFunction[Throwable, Throwable] = {
     case e: CequenceWSHttpStatusException =>
-      try handleErrorCodes(e.statusCode, e.body)
-      catch { case NonFatal(classified) => classified }
+      val classified: Throwable =
+        try handleErrorCodes(e.statusCode, e.body)
+        catch { case NonFatal(mapped) => mapped }
+
+      classified match {
+        // not classified by the service (the default handleErrorCodes) - keep the original,
+        // more informative failure
+        case unclassified: CequenceWSHttpStatusException
+            if unclassified.getClass == classOf[CequenceWSHttpStatusException] =>
+          e
+        case other =>
+          if (other ne e) other.addSuppressed(e)
+          other
+      }
   }
 
   protected def handleNotFoundAndError(response: RichResponse): Option[Response] =
