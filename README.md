@@ -3,7 +3,9 @@
 
 This repository contains a simple and efficient Web Service client implemented in Scala. The client is designed to interact with RESTful web services, making it easy to send requests, handle responses, and manage errors.
 
-**🔥 New**: Pekko-based backend modules (`ws-client-play-pekko`) and classpath-based engine self-discovery - see below.
+Pluggable HTTP engines - Play WS (Akka or Pekko), pekko-http, JDK HttpClient, sttp, and zio-http - picked up automatically from the classpath (see *Engine Self-Discovery* below).
+
+**🔥 New in 1.1**: the `ws-client-zio-http` engine (zio-http / Netty + ZIO runtime), consistent streaming errors across engines, and structured HTTP-status failures that services can classify via `handleErrorCodes`.
 
 As a part of this suite we also provide the [json-repair](./json-repair/README.md) library that can be used to fix common JSON syntax errors, repair malformed JSON objects and arrays.
 

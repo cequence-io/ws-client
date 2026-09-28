@@ -4,13 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**WS Client** is a generic WebServices client library for Scala that provides an abstraction layer over Play WS implementation. The library enables type-safe HTTP requests with support for multiple Scala versions (2.12, 2.13, and 3).
+**WS Client** is a generic WebServices client library for Scala: one site-stateless engine contract with pluggable, classpath-discovered HTTP backends (Play WS on Akka or Pekko, pekko-http, JDK HttpClient, sttp, zio-http). The library enables type-safe HTTP requests with support for multiple Scala versions (2.12, 2.13, and 3).
 
 The project includes:
 - Core WS client interfaces and abstractions (Akka-free), including an engine-discovery SPI
 - Akka-based streaming extensions (optional)
 - Pekko-based mirror modules (source-generated from the Akka ones at build time)
 - Play WS backend implementations (Play WS 2.x/Akka and Play WS 3.x/Pekko)
+- Additional backends: pekko-http, JDK HttpClient, sttp, zio-http (ZIO runtime)
 - Streaming support for large payloads
 - JSON repair utility for fixing malformed JSON from LLMs
 

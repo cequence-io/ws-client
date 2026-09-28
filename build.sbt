@@ -5,7 +5,7 @@ val scala212 = "2.12.18"
 val scala213 = "2.13.11"
 val scala32 = "3.2.2"
 
-ThisBuild / description := "Generic WebServices library with Play WS impl./backends for Akka and Pekko"
+ThisBuild / description := "Generic WebServices client library for Scala with pluggable, auto-discovered HTTP engines: Play WS (Akka / Pekko), pekko-http, JDK HttpClient, sttp and zio-http"
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala213
