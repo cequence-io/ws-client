@@ -544,7 +544,14 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
         subscriber.awaitDone(30) shouldBe true
         subscriber.received shouldBe empty
-        subscriber.error.get shouldBe a[io.cequence.wsclient.domain.CequenceWSException]
+        subscriber.error.get shouldBe a[
+          io.cequence.wsclient.domain.CequenceWSHttpStatusException
+        ]
+        val statusError =
+          subscriber.error.get
+            .asInstanceOf[io.cequence.wsclient.domain.CequenceWSHttpStatusException]
+        statusError.statusCode shouldBe 401
+        statusError.body should include("invalid api key")
         subscriber.error.get.getMessage should include("HTTP 401")
         subscriber.error.get.getMessage should include("invalid api key")
 

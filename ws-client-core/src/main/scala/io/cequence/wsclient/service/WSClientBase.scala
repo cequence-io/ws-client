@@ -4,6 +4,7 @@ import io.cequence.wsclient.domain._
 import io.cequence.wsclient.service.ws.{FilePart, HttpHeaderNames}
 
 import scala.concurrent.ExecutionContext
+import scala.util.control.NonFatal
 
 trait WSClientBase extends CloseableService {
 
@@ -51,11 +52,33 @@ trait WSClientBase extends CloseableService {
       handleErrorCodes(response.status.code, response.status.message)
     )
 
+  /**
+   * Turns a non-acceptable HTTP status into this service's exception - override to classify
+   * (rate limit, auth, overload, ...). The default throws a [[CequenceWSHttpStatusException]]
+   * carrying the status and the body.
+   */
   protected def handleErrorCodes(
     httpCode: Int,
     message: String
   ): Nothing =
-    throw new CequenceWSException(s"Code ${httpCode} : ${message}")
+    throw new CequenceWSHttpStatusException(
+      s"Code ${httpCode} : ${message}",
+      httpCode,
+      message
+    )
+
+  /**
+   * Routes a structured HTTP-status failure - e.g. a STREAMED call's non-2xx response -
+   * through [[handleErrorCodes]], so streams get the same error classification as the
+   * non-streamed calls. For engine-level streams: `engine.execJsonStream(site,
+   * ...).mapError(mapHttpStatusErrors)` (the service-level streaming methods of
+   * `WSClientWithEngineOutputStreamingBase` apply it already).
+   */
+  protected def mapHttpStatusErrors: PartialFunction[Throwable, Throwable] = {
+    case e: CequenceWSHttpStatusException =>
+      try handleErrorCodes(e.statusCode, e.body)
+      catch { case NonFatal(classified) => classified }
+  }
 
   protected def handleNotFoundAndError(response: RichResponse): Option[Response] =
     response.response.orElse(

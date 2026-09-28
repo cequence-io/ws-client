@@ -491,9 +491,7 @@ final class ZioHttpWSClientEngine private[ws] (
                 .orElseSucceed("")
                 .map(errorBody =>
                   ZStream.fail(
-                    new CequenceWSException(
-                      EngineSupport.streamErrorMessage(label, response.status.code, errorBody)
-                    )
+                    EngineSupport.streamStatusException(label, response.status.code, errorBody)
                   )
                 )
           }

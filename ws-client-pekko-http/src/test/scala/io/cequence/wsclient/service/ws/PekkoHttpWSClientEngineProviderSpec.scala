@@ -339,7 +339,11 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
             30.seconds
           )
 
-          failure shouldBe a[io.cequence.wsclient.domain.CequenceWSException]
+          failure shouldBe a[io.cequence.wsclient.domain.CequenceWSHttpStatusException]
+          val statusError =
+            failure.asInstanceOf[io.cequence.wsclient.domain.CequenceWSHttpStatusException]
+          statusError.statusCode shouldBe 401
+          statusError.body should include("invalid api key")
           failure.getMessage should include("HTTP 401")
           failure.getMessage should include("invalid api key")
 

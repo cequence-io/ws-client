@@ -1,6 +1,6 @@
 package io.cequence.wsclient.service.ws
 
-import io.cequence.wsclient.domain.{RichResponse, SiteBinding}
+import io.cequence.wsclient.domain.{CequenceWSHttpStatusException, RichResponse, SiteBinding}
 import io.cequence.wsclient.service.WSClientEngine
 
 import scala.collection.immutable.ListMap
@@ -53,6 +53,18 @@ private[wsclient] object EngineSupport {
     errorBody: String
   ): String =
     s"$label: HTTP $status - ${errorBody.take(500)}"
+
+  // the failure of a streamed call with a non-2xx status - structured (status + bounded body)
+  def streamStatusException(
+    label: String,
+    status: Int,
+    errorBody: String
+  ): CequenceWSHttpStatusException =
+    new CequenceWSHttpStatusException(
+      streamErrorMessage(label, status, errorBody),
+      status,
+      errorBody
+    )
 
   /**
    * Resolves `Timeouts` PER FIELD - each unset field falls back to the engine's default - so a

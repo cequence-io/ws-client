@@ -525,8 +525,15 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
         subscriber.awaitDone(30) shouldBe true
         subscriber.received shouldBe empty
-        subscriber.error.get shouldBe a[CequenceWSException]
+        subscriber.error.get shouldBe a[
+          io.cequence.wsclient.domain.CequenceWSHttpStatusException
+        ]
         subscriber.error.get.getMessage should include("HTTP 401")
+        val statusError =
+          subscriber.error.get
+            .asInstanceOf[io.cequence.wsclient.domain.CequenceWSHttpStatusException]
+        statusError.statusCode shouldBe 401
+        statusError.body should include("invalid api key")
 
         engine.close()
       }

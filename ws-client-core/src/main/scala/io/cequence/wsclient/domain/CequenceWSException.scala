@@ -20,3 +20,15 @@ class CequenceWSUnknownHostException(
 ) extends CequenceWSException(message, cause) {
   def this(message: String) = this(message, null)
 }
+
+/**
+ * A non-acceptable HTTP status, as a structured failure: `statusCode` and `body` (for a
+ * streamed call the error body is bounded - at most `EngineSupport.MaxErrorBodyBytes`).
+ * Streaming calls fail with it on a non-2xx status; services classify it through their
+ * `handleErrorCodes` via `WSClientBase.mapHttpStatusErrors`.
+ */
+class CequenceWSHttpStatusException(
+  message: String,
+  val statusCode: Int,
+  val body: String
+) extends CequenceWSException(message)
