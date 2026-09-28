@@ -66,8 +66,8 @@ import scala.util.control.NonFatal
  *     [[io.cequence.wsclient.service.WSClientOutputStreamCore]] (`java.util.concurrent.Flow`)
  *     contract, with the same framing / `[DONE]` pipeline as the jdk engine. The HTTP status
  *     is checked before any body byte is exposed: a non-2xx response fails the stream with a
- *     `CequenceWSException` instead of being parsed as data. No input streaming (that
- *     capability is akka/pekko `Source`-typed).
+ *     structured `CequenceWSHttpStatusException` (status code + bounded body) instead of being
+ *     parsed as data. No input streaming (that capability is akka/pekko `Source`-typed).
  *   - timeouts: `connectTimeout` -> zio-http `connectionTimeout` (default 5 s); `readTimeout`
  * -> `idleTimeout`, a read-idle timeout on the channel (default 120 s - it also bounds the gap
  * between SSE events); `pooledConnectionIdleTimeout` -> the idle TTL of the dynamic connection
@@ -491,9 +491,7 @@ final class ZioHttpWSClientEngine private[ws] (
                 .orElseSucceed("")
                 .map(errorBody =>
                   ZStream.fail(
-                    new CequenceWSException(
-                      EngineSupport.streamErrorMessage(label, response.status.code, errorBody)
-                    )
+                    EngineSupport.streamStatusException(label, response.status.code, errorBody)
                   )
                 )
           }

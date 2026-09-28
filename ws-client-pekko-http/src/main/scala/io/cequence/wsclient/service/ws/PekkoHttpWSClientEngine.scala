@@ -575,9 +575,7 @@ class PekkoHttpWSClientEngine(
           .read(response.entity.dataBytes, errorBodyReadTimeout)
           .map(errorBody =>
             Source.failed[ByteString](
-              new CequenceWSException(
-                EngineSupport.streamErrorMessage(svc, response.status.intValue, errorBody)
-              )
+              EngineSupport.streamStatusException(svc, response.status.intValue, errorBody)
             )
           )
     }

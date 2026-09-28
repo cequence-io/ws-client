@@ -14,7 +14,7 @@ The project includes:
 - Streaming support for large payloads
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 1.1.0
+Current version: 1.1.1
 
 ## Build Commands
 
@@ -157,6 +157,9 @@ Streaming is added via optional mixin traits in `ws-client-core-akka`:
 - `WSClientInputStreamExtraAkka` (generated Pekko twin: `WSClientInputStreamExtraPekko`) - adds `execPOSTSource`/`execPOSTSourceRich` to `WSClient`
 - `WSClientOutputStreamExtraAkka` (generated Pekko twin: `WSClientOutputStreamExtraPekko`) - adds `execJsonStream`/`execRawStream`; extends the backend-agnostic `WSClientOutputStreamCore` (core), whose `Flow.Publisher`-typed `execJsonStreamPublisher`/`execRawStreamPublisher` every streaming engine also implements
 - `WSClientWithEngineInputStreamingBase` - delegates input stream methods to engine
+- `WSClientWithEngineOutputStreamingBase` - service-level `execJsonStream`/`execRawStream`
+  delegating to the engine, with non-2xx stream failures classified through the service's
+  `handleErrorCodes` (`mapHttpStatusErrors`)
 
 Type parameters `PEP` (endpoint) and `PT` (parameter type) allow subclasses to define their own endpoint and parameter types (commonly enums).
 
@@ -366,11 +369,18 @@ val loggedService = log(service, "MyService")
   from the same evaluation. Client-level settings (connect timeout, proxy; all timeouts on
   Play) are captured once at construction/first use
 - Streaming: every engine checks the HTTP status BEFORE exposing a streamed body - a non-2xx
-  status fails the stream with a `CequenceWSException` (`EngineSupport.streamErrorMessage`,
+  status fails the stream with a `CequenceWSHttpStatusException` - a `CequenceWSException`
+  subclass (`EngineSupport.streamErrorMessage`,
   "<svc>: HTTP <status> - <start of body>"), reading at most `EngineSupport.MaxErrorBodyBytes`
   (4 KiB) of the error body within 10 s or the request timeout (core `BoundedBodyReader` for
-  `Flow` bodies, core-akka `StreamErrorBody` for `Source` bodies). The akka/pekko
-  `handleException` passes Cequence exceptions through unwrapped
+  `Flow` bodies, core-akka `StreamErrorBody` for `Source` bodies). The failure is a
+  structured `CequenceWSHttpStatusException(statusCode, body)` (message unchanged since 1.1.0);
+  services classify it with their own `handleErrorCodes` via `WSClientBase.mapHttpStatusErrors`
+  - automatically in the service-level `execJsonStream` / `execRawStream` of
+  `WSClientWithEngineOutputStreamingBase` (core-akka, generated to core-pekko), or with
+  `.mapError(mapHttpStatusErrors)` on engine-level calls. The default `handleErrorCodes` of
+  non-streamed calls throws the same structured exception. The akka/pekko `handleException`
+  passes Cequence exceptions through unwrapped
 - Form fields: repeated keys keep every value on every engine (`EngineSupport.groupValues`,
   never `.toMap`); multipart files go out under their BASE name (`FilePart.filenameAux`) unless
   a display name is given

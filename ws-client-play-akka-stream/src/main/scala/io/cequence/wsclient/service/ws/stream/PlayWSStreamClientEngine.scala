@@ -264,9 +264,7 @@ class PlayWSStreamClientEngine(
             .read(response.bodyAsSource, EngineSupport.ErrorBodyReadTimeoutMs.millis)
             .map(errorBody =>
               Source.failed[ByteString](
-                new CequenceWSException(
-                  EngineSupport.streamErrorMessage(prefix, response.status, errorBody)
-                )
+                EngineSupport.streamStatusException(prefix, response.status, errorBody)
               )
             )
       }

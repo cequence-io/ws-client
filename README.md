@@ -1,5 +1,5 @@
 # WS Client (Cequence)
-[![version](https://img.shields.io/badge/version-1.1.0-green.svg)](https://cequence.io) [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](https://opensource.org/licenses/MIT) [![Twitter Follow](https://img.shields.io/twitter/follow/cequence_io?style=social)](https://twitter.com/0xbnd)
+[![version](https://img.shields.io/badge/version-1.1.1-green.svg)](https://cequence.io) [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](https://opensource.org/licenses/MIT) [![Twitter Follow](https://img.shields.io/twitter/follow/cequence_io?style=social)](https://twitter.com/0xbnd)
 
 This repository contains a simple and efficient Web Service client implemented in Scala. The client is designed to interact with RESTful web services, making it easy to send requests, handle responses, and manage errors.
 
@@ -14,13 +14,13 @@ The currently supported Scala versions are **2.12, 2.13**, and **3** for the Akk
 To install the library, add the following dependency to your *build.sbt*
 
 ```
-"io.cequence" %% "ws-client-play-akka" % "1.1.0"     // Akka-based (Play WS 2.x)
+"io.cequence" %% "ws-client-play-akka" % "1.1.1"     // Akka-based (Play WS 2.x)
 ```
 
 or, for the Pekko flavor:
 
 ```
-"io.cequence" %% "ws-client-play-pekko" % "1.1.0"    // Pekko-based (Play WS 3.x)
+"io.cequence" %% "ws-client-play-pekko" % "1.1.1"    // Pekko-based (Play WS 3.x)
 ```
 
 or to *pom.xml* (if you use maven)
@@ -29,19 +29,21 @@ or to *pom.xml* (if you use maven)
 <dependency>
     <groupId>io.cequence</groupId>
     <artifactId>ws-client-play-akka_2.12</artifactId>
-    <version>1.1.0</version>
+    <version>1.1.1</version>
 </dependency>
 ```
 
 If you only need the core abstractions without Akka/Pekko dependencies:
 
 ```
-"io.cequence" %% "ws-client-core" % "1.1.0"
+"io.cequence" %% "ws-client-core" % "1.1.1"
 ```
 
 > ⚠️ **The Akka and Pekko flavors are mutually exclusive on one classpath.** The Pekko modules are generated from the Akka ones and deliberately keep the same package and class names (the same trade-off Play made between 2.9 and 3.0), so downstream code compiles unchanged against either flavor - switch by swapping the artifact and your `Materializer` import. Never depend on both: which classes (implicits such as `asSafeSource` included) actually load then depends on jar order. `WSClientEngineRegistry` detects such duplicated classes at runtime and logs a warning naming the conflicting jars; set the config key `ws-client.strict-classpath = true` (or `-Dws-client.strict-classpath=true`) to fail engine resolution with an exception instead - recommended for CI.
 
 > ℹ️ **Logging:** the library logs through the SLF4J API only and ships no logging backend - bring your own (e.g. logback). Keep `play.shaded.ahc.org.asynchttpclient.netty.handler` at `INFO` or above: at `DEBUG` Play's shaded AsyncHttpClient logs complete request headers, including `Authorization`.
+
+> ℹ️ **1.1.1 - classifying HTTP errors of streamed calls.** A streamed call's non-2xx failure is now a structured `CequenceWSHttpStatusException` carrying `statusCode` and `body` (its message is unchanged), and so is the default `handleErrorCodes` failure of non-streamed calls. To get your service's own classification (`handleErrorCodes`) for stream errors too - as the non-streamed calls always had it - either extend `WSClientWithEngineOutputStreamingBase` and use its service-level `execJsonStream` / `execRawStream`, or append `.mapError(mapHttpStatusErrors)` to engine-level `engine.execJsonStream(site, ...)` calls.
 
 > ⚠️ **Upgrading to 1.1.0** - behavior changes:
 > - **No logging backend is shipped anymore.** `logback-classic` used to come transitively; add your own SLF4J backend (e.g. logback).

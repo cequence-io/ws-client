@@ -85,6 +85,44 @@ class PlayPekkoStreamWSClientEngineProviderSpec extends AnyWordSpec with Matcher
       }
     }
 
+    "classify a stream's non-2xx status through the service's handleErrorCodes" in {
+      io.cequence.wsclient.testkit.TestServers.withServer("/events" -> { exchange =>
+        io.cequence.wsclient.testkit.TestServers
+          .respond(exchange, 429, """{"error":"slow down"}""")
+      }) { port =>
+        val runSystem = org.apache.pekko.actor.ActorSystem("stream-classify-spec-runner")
+        try {
+          val streamingEngine =
+            io.cequence.wsclient.service.spi.StreamedEngineRegistry.outputStreamed(
+              TransportSettings(),
+              Some(expectedEngineId)
+            )
+          val service = new StreamingTestService(
+            streamingEngine,
+            SiteBinding(s"http://localhost:$port")
+          )
+
+          val failure = Await.result(
+            service
+              .execJsonStream("events", "POST")
+              .runWith(org.apache.pekko.stream.scaladsl.Sink.seq)(
+                org.apache.pekko.stream.Materializer(runSystem)
+              )
+              .failed,
+            30.seconds
+          )
+
+          failure shouldBe a[RateLimitedTestException]
+          failure.getMessage shouldBe """429: {"error":"slow down"}"""
+
+          streamingEngine.close()
+        } finally {
+          runSystem.terminate()
+          ()
+        }
+      }
+    }
+
     "fail a stream on a non-2xx status instead of parsing the error page" in {
       io.cequence.wsclient.testkit.TestServers.withServer("/events" -> { exchange =>
         io.cequence.wsclient.testkit.TestServers
@@ -106,7 +144,11 @@ class PlayPekkoStreamWSClientEngineProviderSpec extends AnyWordSpec with Matcher
             30.seconds
           )
 
-          failure shouldBe a[io.cequence.wsclient.domain.CequenceWSException]
+          failure shouldBe a[io.cequence.wsclient.domain.CequenceWSHttpStatusException]
+          val statusError =
+            failure.asInstanceOf[io.cequence.wsclient.domain.CequenceWSHttpStatusException]
+          statusError.statusCode shouldBe 401
+          statusError.body should include("invalid api key")
           failure.getMessage should include("HTTP 401")
           failure.getMessage should include("invalid api key")
 
@@ -233,4 +275,29 @@ class PlayPekkoStreamWSClientEngineProviderSpec extends AnyWordSpec with Matcher
         server.stop(0)
     }
   }
+}
+
+// a service with its own error classification - what downstream clients do via handleErrorCodes
+final class RateLimitedTestException(message: String) extends RuntimeException(message)
+
+final class StreamingTestService(
+  override protected val engine: io.cequence.wsclient.service.WSClientEngine
+    with io.cequence.wsclient.service.WSClientOutputStreamExtraPekko,
+  override protected val site: SiteBinding
+)(
+  implicit executionContext: scala.concurrent.ExecutionContext
+) extends io.cequence.wsclient.service.WSClientWithEngineOutputStreamingBase[
+      io.cequence.wsclient.service.WSClientEngine
+        with io.cequence.wsclient.service.WSClientOutputStreamExtraPekko
+    ] {
+  protected type PEP = String
+  protected type PT = String
+
+  override protected implicit val ec: scala.concurrent.ExecutionContext = executionContext
+
+  override protected def handleErrorCodes(
+    httpCode: Int,
+    message: String
+  ): Nothing =
+    throw new RateLimitedTestException(s"$httpCode: $message")
 }

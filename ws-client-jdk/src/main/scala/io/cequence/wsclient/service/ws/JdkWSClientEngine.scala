@@ -462,10 +462,8 @@ final class JdkWSClientEngine private[ws] (
                       new java.util.function.Function[String, CompletionStage[Body]] {
                         override def apply(errorBody: String): CompletionStage[Body] =
                           CompletableFuture.failedFuture[Body](
-                            new CequenceWSException(
-                              EngineSupport
-                                .streamErrorMessage(label, response.statusCode(), errorBody)
-                            )
+                            EngineSupport
+                              .streamStatusException(label, response.statusCode(), errorBody)
                           )
                       }
                     )
