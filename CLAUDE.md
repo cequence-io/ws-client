@@ -386,7 +386,8 @@ val loggedService = log(service, "MyService")
   `WSClientWithEngineOutputStreamingBase` (core-akka, generated to core-pekko), or with
   `.mapError(mapHttpStatusErrors)` on engine-level calls. The default `handleErrorCodes` of
   non-streamed calls throws the same structured exception. The akka/pekko `handleException`
-  passes Cequence exceptions through unwrapped
+  (shared core-akka `StreamFailures`, used by the Play stream and pekko-http engines) passes
+  Cequence exceptions through unwrapped
 - Form fields: repeated keys keep every value on every engine (`EngineSupport.groupValues`,
   never `.toMap`); multipart files go out under their BASE name (`FilePart.filenameAux`) unless
   a display name is given

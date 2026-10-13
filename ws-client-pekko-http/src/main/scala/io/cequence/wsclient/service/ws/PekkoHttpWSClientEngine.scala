@@ -1,11 +1,11 @@
 package io.cequence.wsclient.service.ws
 
-import com.fasterxml.jackson.core.JsonParseException
 import io.cequence.wsclient.domain._
 import io.cequence.wsclient.service.{
   JsonStreamFrames,
   SourcePublishersPekko,
   StreamErrorBody,
+  StreamFailures,
   WSClientEngine,
   WSClientInputStreamExtraPekko,
   WSClientOutputStreamExtraPekko
@@ -21,7 +21,6 @@ import org.apache.pekko.http.scaladsl.settings.{
   ConnectionPoolSettings
 }
 import org.apache.pekko.pattern.after
-import org.apache.pekko.stream.scaladsl.Framing.FramingException
 import org.apache.pekko.stream.scaladsl.{Framing, Source}
 import org.apache.pekko.stream.{Materializer, SystemMaterializer}
 import org.apache.pekko.util.ByteString
@@ -610,36 +609,8 @@ class PekkoHttpWSClientEngine(
   protected def handleException[T](
     site: SiteBinding,
     endPoint: String
-  ): PartialFunction[Throwable, T] = {
-    val svc = serviceAndEndpoint(site, Some(endPoint))
-
-    {
-      // already mapped (e.g. a non-2xx stream status) - pass through, don't re-wrap
-      case e: CequenceWSException =>
-        streamLogger.error(e.getMessage)
-        throw e
-      case e: JsonParseException =>
-        val message = s"$svc: Response is not a JSON. ${e.getMessage}."
-        streamLogger.error(message)
-        throw new CequenceWSException(message)
-      case e: FramingException =>
-        val message = s"$svc: Stream framing problem occurred. ${e.getMessage}."
-        streamLogger.error(message)
-        throw new CequenceWSException(message)
-      case e: TimeoutException =>
-        val message = s"$svc: Time out. ${e.getMessage}."
-        streamLogger.error(message)
-        throw new CequenceWSTimeoutException(message)
-      case e: UnknownHostException =>
-        val message = s"$svc: Host name cannot be resolved. ${e.getMessage}."
-        streamLogger.error(message)
-        throw new CequenceWSUnknownHostException(message)
-      case e: Throwable =>
-        val message = s"$svc: Fatal problem! ${e.getMessage}."
-        streamLogger.error(message)
-        throw new CequenceWSException(message)
-    }
-  }
+  ): PartialFunction[Throwable, T] =
+    StreamFailures.handle(serviceAndEndpoint(site, Some(endPoint)), streamLogger)
 
   /////////
   // Aux //

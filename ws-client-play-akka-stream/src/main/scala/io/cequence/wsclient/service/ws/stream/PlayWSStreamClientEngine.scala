@@ -4,20 +4,14 @@ import akka.NotUsed
 import akka.actor.ActorSystem
 import akka.http.scaladsl.unmarshalling.{Unmarshal, Unmarshaller}
 import akka.stream.Materializer
-import akka.stream.scaladsl.Framing.FramingException
 import akka.stream.scaladsl.{Flow, Framing, Source}
 import akka.util.ByteString
-import com.fasterxml.jackson.core.JsonParseException
-import io.cequence.wsclient.domain.{
-  CequenceWSException,
-  CequenceWSTimeoutException,
-  CequenceWSUnknownHostException,
-  SiteBinding
-}
+import io.cequence.wsclient.domain.{CequenceWSException, SiteBinding}
 import io.cequence.wsclient.service.{
   JsonStreamFrames,
   SourcePublishersAkka,
   StreamErrorBody,
+  StreamFailures,
   WSClientOutputStreamExtraAkka
 }
 import io.cequence.wsclient.service.spi.TransportSettings
@@ -26,8 +20,6 @@ import org.slf4j.LoggerFactory
 import play.api.libs.json.JsValue
 import play.api.libs.ws.JsonBodyWritables._
 
-import java.net.UnknownHostException
-import java.util.concurrent.TimeoutException
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -135,36 +127,8 @@ class PlayWSStreamClientEngine(
   protected def handleException[T](
     site: SiteBinding,
     endPoint: String
-  ): PartialFunction[Throwable, T] = {
-    val prefix = serviceAndEndpoint(site, Some(endPoint))
-
-    {
-      // already mapped (e.g. a non-2xx stream status) - pass through, don't re-wrap
-      case e: CequenceWSException =>
-        logger.error(e.getMessage)
-        throw e
-      case e: JsonParseException =>
-        val message = s"$prefix: Response is not a JSON. ${e.getMessage}."
-        logger.error(message)
-        throw new CequenceWSException(message)
-      case e: FramingException =>
-        val message = s"$prefix: Stream framing problem occurred. ${e.getMessage}."
-        logger.error(message)
-        throw new CequenceWSException(message)
-      case e: TimeoutException =>
-        val message = s"$prefix: Time out. ${e.getMessage}."
-        logger.error(message)
-        throw new CequenceWSTimeoutException(message)
-      case e: UnknownHostException =>
-        val message = s"$prefix: Host name cannot be resolved. ${e.getMessage}."
-        logger.error(message)
-        throw new CequenceWSUnknownHostException(message)
-      case e: Throwable =>
-        val message = s"$prefix: Fatal problem! ${e.getMessage}."
-        logger.error(message)
-        throw new CequenceWSException(message)
-    }
-  }
+  ): PartialFunction[Throwable, T] =
+    StreamFailures.handle(serviceAndEndpoint(site, Some(endPoint)), logger)
 
   protected def execFramedStream[T](
     site: SiteBinding,
