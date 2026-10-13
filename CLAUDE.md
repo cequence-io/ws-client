@@ -360,7 +360,8 @@ val loggedService = log(service, "MyService")
 - Query-param encoding contract: the jdk/sttp/pekko-http/zio-http engines take raw values and
   percent-encode them; the Play engines pass values through verbatim (pre-existing behavior
   kept for backward compatibility - callers pre-encode reserved characters there)
-- `TransportSettings.proxyURL` ("host:port" or "scheme://host:port", port required) is
+- `TransportSettings.proxyURL` ("host:port" or "scheme://host:port", port required; only
+  host + port are used - always a plain HTTP proxy, scheme / credentials / path ignored) is
   honored by the Play/jdk/sttp/zio-http engines (zio-http tunnels via CONNECT but resolves the
   target host through local DNS); pekko-http warns and ignores it (CONNECT-only proxy
   support). A proxy is a property of the shared client - all engines bound to one transport
