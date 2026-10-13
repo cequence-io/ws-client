@@ -14,7 +14,13 @@ import io.cequence.wsclient.service.spi.{
   TransportSettings,
   WSClientEngineRegistry
 }
-import io.cequence.wsclient.testkit.TestServers.withEchoServer
+import io.cequence.wsclient.testkit.TestServers.{
+  selfSignedKeyStore,
+  tlsProtocol,
+  withDefaultTrustStore,
+  withEchoServer,
+  withTlsServer
+}
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 import play.api.libs.json.{JsString, Json}
@@ -144,6 +150,34 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         noException should be thrownBy engine.close()
       } finally
         server.stop(0)
+    }
+
+    "speak TLS 1.3 (TLS-1.3-only hosts) and TLS 1.2, preferring 1.3" in {
+      val keyStore = selfSignedKeyStore()
+
+      Seq(
+        Seq("TLSv1.3") -> "TLSv1.3",
+        Seq("TLSv1.2") -> "TLSv1.2",
+        Seq("TLSv1.3", "TLSv1.2") -> "TLSv1.3"
+      ).foreach { case (serverProtocols, expectedProtocol) =>
+        withTlsServer(keyStore, serverProtocols)("/" -> tlsProtocol) { port =>
+          // the engine's client captures the trust store when it is created (first request)
+          val protocol = withDefaultTrustStore(keyStore) {
+            val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+            try {
+              val response = Await.result(
+                engine
+                  .execGETRich(SiteBinding(s"https://localhost:$port"), "tls")
+                  .map(engine.getResponseOrError),
+                30.seconds
+              )
+              (response.json \ "protocol").as[String]
+            } finally
+              engine.close()
+          }
+          protocol shouldBe expectedProtocol
+        }
+      }
     }
 
     "POST repeated form keys in an in-memory multipart body, and a streamed one under the file's base name" in {

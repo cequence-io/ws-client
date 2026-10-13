@@ -15,7 +15,7 @@ The project includes:
 - Streaming support for large payloads
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 1.1.1
+Current version: 1.1.2
 
 ## Build Commands
 
@@ -75,6 +75,10 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
    - Supports multiple content types: JSON, multipart/form-data, URL-encoded, file uploads, streaming
    - Default timeouts (for unset `Timeouts` fields): 60 s request/read, 5 s connect, 60 s pooled-connection-idle
      (the jdk/sttp engines default the request timeout to 120 s)
+   - TLS: enables `TLSv1.3` + `TLSv1.2` explicitly (since 1.1.2) - the shaded AHC defaults to
+     TLSv1.2/1.1/1 (and the JDK disables 1.1/1), so TLS-1.3-only hosts used to fail the
+     handshake. Covered end-to-end by the Play specs (`TestServers.withTlsServer`); the Play
+     modules fork their tests because those point the JVM-global default trust store at a test cert
 
 4. **ws-client-play-akka-stream** - Streaming extensions (named `ws-client-play-stream` before 1.0.0)
    - Depends on `ws-client-core-akka` and `ws-client-play-akka`
@@ -136,9 +140,9 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      any survive.
 
 8. **ws-client-testkit** - test-only fixtures (never published): embedded echo / SSE / proxy-stub
-   servers (`TestServers`) and a generic `LatchedSubscriber` for `Flow` publishers; engine
-   modules depend on it `% Test`. Core's test classpath is NOT shared via `test->test` - its
-   dummy engine providers would leak into every engine's discovery tests.
+   / protocol-restricted TLS servers (`TestServers`) and a generic `LatchedSubscriber` for
+   `Flow` publishers; engine modules depend on it `% Test`. Core's test classpath is NOT shared
+   via `test->test` - its dummy engine providers would leak into every engine's discovery tests.
 
 ### Key Architectural Patterns
 

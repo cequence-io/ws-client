@@ -91,11 +91,14 @@ class PlayWSClientEngine(
       .setConnectTimeout(timeouts.connectTimeout.getOrElse(DefaultTimeouts.connectTimeout))
       .setReadTimeout(timeouts.readTimeout.getOrElse(DefaultTimeouts.readTimeout))
       .setPooledConnectionIdleTimeout(
-        timeouts.pooledConnectionIdleTimeout
-          .getOrElse(DefaultTimeouts.pooledConnectionIdleTimeout)
+        timeouts.pooledConnectionIdleTimeout.getOrElse(
+          DefaultTimeouts.pooledConnectionIdleTimeout
+        )
       )
       .setRequestTimeout(timeouts.requestTimeout.getOrElse(DefaultTimeouts.requestTimeout))
-//      .setEnabledProtocols(Array("TLSv1.2", "TLSv1.1", "TLSv1")
+      // the shaded AHC defaults to TLSv1.2/1.1/1 (and the JDK disables 1.1/1), so TLS-1.3-only
+      // hosts would fail the handshake
+      .setEnabledProtocols(Array("TLSv1.3", "TLSv1.2"))
       .build
     val asyncHttpClient = new DefaultAsyncHttpClient(asyncHttpClientConfig)
     val client = new StandaloneAhcWSClient(asyncHttpClient)

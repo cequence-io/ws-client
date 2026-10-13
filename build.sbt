@@ -9,7 +9,7 @@ ThisBuild / description := "Generic WebServices client library for Scala with pl
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala213
-ThisBuild / version := "1.1.1"
+ThisBuild / version := "1.1.2"
 ThisBuild / isSnapshot := false
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 
@@ -227,6 +227,9 @@ lazy val `ws-client-play-akka` =
       libraryDependencies ++= playWsDependencies.value,
       libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
       testLoggingSettings,
+      // the TLS spec points the JVM-global default trust store at a test certificate; fork so
+      // it cannot leak into the other modules' suites in the shared sbt JVM
+      Test / fork := true,
       publish / skip := false
     )
     .dependsOn(`ws-client-core-akka`, `ws-client-testkit` % Test)
@@ -266,6 +269,9 @@ lazy val `ws-client-play-pekko` =
       libraryDependencies ++= playWsPekkoDependencies.value,
       libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
       testLoggingSettings,
+      // the TLS spec points the JVM-global default trust store at a test certificate; fork so
+      // it cannot leak into the other modules' suites in the shared sbt JVM
+      Test / fork := true,
       PekkoGenerator.generatorSettings(`ws-client-play-akka`),
       publish / skip := false
     )
