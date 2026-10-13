@@ -241,7 +241,7 @@ The build manages different dependency versions for Scala 2.12, 2.13, and 3.2:
 - Play JSON: 2.8.2 (Scala 2.12/2.13), 2.10.0-RC6 (Scala 3.2)
 - Akka Stream: 2.6.1 (Scala 2.12), 2.6.20 (Scala 2.13/3.2)
 - Play WS (Akka): 2.1.11 (Scala 2.12/2.13), 2.2.0-M2 (Scala 3.2)
-- Play WS (Pekko, `org.playframework`): 3.0.7; Pekko Stream: 1.6.0; Pekko HTTP: 1.3.0 (Scala 2.13 only)
+- Play WS (Pekko, `org.playframework`): 3.0.14 (shaded AHC 2.16.1); Pekko Stream: 1.6.0; Pekko HTTP: 1.3.0 (Scala 2.13 only)
 
 Scala 3 requires manual cross-version suffix handling (e.g., `akka-stream_2.13` for Scala 3).
 

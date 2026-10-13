@@ -173,7 +173,7 @@ lazy val playWsDependencies = Def.setting {
 
 // Pekko-based Play WS (org.playframework); its play-json 3.x dep is excluded because its classes
 // share FQCNs with com.typesafe.play play-json coming from ws-client-core (different groupIds - no eviction)
-val playWs3Version = "3.0.7"
+val playWs3Version = "3.0.14"
 
 lazy val playWsPekkoDependencies = Def.setting {
   Seq(
