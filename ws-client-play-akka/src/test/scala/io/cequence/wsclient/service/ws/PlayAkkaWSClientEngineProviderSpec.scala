@@ -2,7 +2,7 @@ package io.cequence.wsclient.service.ws
 
 import akka.actor.ActorSystem
 import akka.stream.Materializer
-import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
+import com.sun.net.httpserver.HttpExchange
 import io.cequence.wsclient.domain.{
   CequenceWSException,
   CequenceWSTimeoutException,
@@ -15,17 +15,19 @@ import io.cequence.wsclient.service.spi.{
   WSClientEngineRegistry
 }
 import io.cequence.wsclient.testkit.TestServers.{
+  respond,
   selfSignedKeyStore,
   tlsProtocol,
   withDefaultTrustStore,
+  withDumbProxy,
   withEchoServer,
+  withServer,
   withTlsServer
 }
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
-import play.api.libs.json.{JsString, Json}
+import play.api.libs.json.JsString
 
-import java.net.InetSocketAddress
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration._
 
@@ -36,73 +38,11 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
   private val expectedEngineId = "play-akka"
 
-  // echoes the raw query string back as JSON
-  private def withQueryEchoServer(test: (Int) => Unit): Unit = {
-    val server = HttpServer.create(new InetSocketAddress(0), 0)
-    server.createContext(
-      "/",
-      new HttpHandler {
-        override def handle(exchange: HttpExchange): Unit = {
-          val query = Option(exchange.getRequestURI.getRawQuery).getOrElse("")
-          val auth = Option(exchange.getRequestHeaders.getFirst("Authorization")).getOrElse("")
-          val response =
-            Json.obj("query" -> query, "auth" -> auth).toString.getBytes("UTF-8")
-          exchange.getResponseHeaders.add("Content-Type", "application/json")
-          exchange.sendResponseHeaders(200, response.length)
-          val os = exchange.getResponseBody
-          os.write(response)
-          os.close()
-        }
-      }
-    )
-    server.start()
-    try
-      test(server.getAddress.getPort)
-    finally
-      server.stop(0)
-  }
+  private val ping: HttpExchange => Unit = respond(_, 200, """{"status":"ok"}""")
 
-  // a single-connection HTTP proxy stub: captures the request line (absolute-form for proxied
-  // plain-http requests) and answers with a fixed JSON response
-  private def withDumbProxy(test: (Int, () => String) => Unit): Unit = {
-    val server = new java.net.ServerSocket(0)
-    @volatile var requestLine = ""
-
-    val thread = new Thread(new Runnable {
-      override def run(): Unit =
-        try {
-          // serve until the test closes the server socket - some clients probe with an
-          // extra connection, so a single accept would be flaky
-          while (true) {
-            val socket = server.accept()
-            try {
-              val in = new java.io.BufferedReader(
-                new java.io.InputStreamReader(socket.getInputStream, "UTF-8")
-              )
-              val firstLine = in.readLine()
-              if (firstLine != null && requestLine.isEmpty) requestLine = firstLine
-              // drain the headers
-              var line = in.readLine()
-              while (line != null && line.nonEmpty) line = in.readLine()
-
-              val body = """{"status":"proxied"}"""
-              val response =
-                s"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n$body"
-              socket.getOutputStream.write(response.getBytes("UTF-8"))
-              socket.getOutputStream.flush()
-            } finally
-              socket.close()
-          }
-        } catch {
-          case _: Throwable => // server closed by the test - nothing to do
-        }
-    })
-    thread.start()
-
-    try
-      test(server.getLocalPort, () => requestLine)
-    finally
-      server.close()
+  private val slowPing: HttpExchange => Unit = exchange => {
+    Thread.sleep(2000)
+    respond(exchange, 200, """{"status":"ok"}""")
   }
 
   s"$expectedEngineId provider" should {
@@ -120,25 +60,9 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "create a working engine that can GET, and close idempotently" in {
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/ping",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            val response = """{"status":"ok"}""".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, response.length)
-            val os = exchange.getResponseBody
-            os.write(response)
-            os.close()
-          }
-        }
-      )
-      server.start()
-
-      try {
+      withServer("/ping" -> ping) { port =>
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
+        val site = SiteBinding(s"http://localhost:${port}")
 
         val response = Await.result(
           engine.execGETRich(site, "ping").map(engine.getResponseOrError),
@@ -148,8 +72,7 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
         engine.close()
         noException should be thrownBy engine.close()
-      } finally
-        server.stop(0)
+      }
     }
 
     "speak TLS 1.3 (TLS-1.3-only hosts) and TLS 1.2, preferring 1.3" in {
@@ -246,7 +169,7 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "merge query params with a query already embedded in the endpoint" in {
-      withQueryEchoServer { port =>
+      withEchoServer { port =>
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
         val site = SiteBinding(s"http://localhost:$port")
 
@@ -270,7 +193,7 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "re-evaluate a dynamic request context on every request" in {
-      withQueryEchoServer { port =>
+      withEchoServer { port =>
         // simulates a token refresh happening between two requests
         @volatile var token = "t1"
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
@@ -323,8 +246,8 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "serve two independent sites (auth, servers) from one engine" in {
-      withQueryEchoServer { portA =>
-        withQueryEchoServer { portB =>
+      withEchoServer { portA =>
+        withEchoServer { portB =>
           val system = ActorSystem("play-akka-engine-sharing-spec")
           implicit val materializer: Materializer = Materializer(system)
           implicit val ec: ExecutionContext = system.dispatcher
@@ -406,7 +329,7 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "copy() with reuseExecContext=true (default) shares this engine's actor system" in {
-      withQueryEchoServer { port =>
+      withEchoServer { port =>
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
           .asInstanceOf[PlayWSClientEngine]
         val site = SiteBinding(s"http://localhost:$port")
@@ -437,27 +360,10 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "copy(transportSettings) honors the new settings independent of the original" in {
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/ping",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            Thread.sleep(2000)
-            val response = """{"status":"ok"}""".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, response.length)
-            val os = exchange.getResponseBody
-            os.write(response)
-            os.close()
-          }
-        }
-      )
-      server.start()
-
-      try {
+      withServer("/ping" -> slowPing) { port =>
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
           .asInstanceOf[PlayWSClientEngine]
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
+        val site = SiteBinding(s"http://localhost:${port}")
 
         val tightTimeoutCopy = engine.copy(
           transportSettings = TransportSettings(Timeouts(requestTimeout = Some(300)))
@@ -477,12 +383,11 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
         tightTimeoutCopy.close()
         engine.close()
-      } finally
-        server.stop(0)
+      }
     }
 
     "copy(reuseExecContext = false) creates an independent, daemonic actor system" in {
-      withQueryEchoServer { port =>
+      withEchoServer { port =>
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
           .asInstanceOf[PlayWSClientEngine]
         val site = SiteBinding(s"http://localhost:$port")
