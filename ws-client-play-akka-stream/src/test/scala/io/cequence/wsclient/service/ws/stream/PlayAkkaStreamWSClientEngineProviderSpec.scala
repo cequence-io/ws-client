@@ -38,7 +38,7 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
   private val ping: HttpExchange => Unit = respond(_, 200, """{"status":"ok"}""")
 
   private val slowPing: HttpExchange => Unit = exchange => {
-    Thread.sleep(2000)
+    Thread.sleep(1000)
     respond(exchange, 200, """{"status":"ok"}""")
   }
 
@@ -326,7 +326,7 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
           10.seconds
         )
 
-        // the original engine's (much longer) default timeout tolerates the same 2s delay
+        // the original engine's (much longer) default timeout tolerates the same 1 s delay
         val response = Await.result(
           engine.execGETRich(site, "ping").map(engine.getResponseOrError),
           30.seconds

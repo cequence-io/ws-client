@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange
 import io.cequence.wsclient.domain.{
   CequenceWSException,
   CequenceWSTimeoutException,
+  CequenceWSUnknownHostException,
   SiteBinding,
   WsRequestContext
 }
@@ -259,6 +260,43 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       }
     }
 
+    "map a DNS resolution failure to CequenceWSUnknownHostException on a streamed call too" in {
+      // pekko-http reports it as a StreamTcpException CAUSED BY the UnknownHostException (the
+      // unary path classifies on the cause chain - the stream path must too). A host of its
+      // own: pekko-http's host pool keeps retrying a dead host for a while
+      val runSystem = org.apache.pekko.actor.ActorSystem("stream-dns-spec-runner")
+      try {
+        val engine = io.cequence.wsclient.service.spi.StreamedEngineRegistry.outputStreamed(
+          TransportSettings(),
+          Some(expectedEngineId)
+        )
+        val site = SiteBinding("http://nonexistent-host-ws-client-stream-test.invalid")
+
+        val failure = Await.result(
+          engine
+            .execJsonStream(site, "events", "GET")
+            .runWith(org.apache.pekko.stream.scaladsl.Sink.seq)(
+              org.apache.pekko.stream.Materializer(runSystem)
+            )
+            .failed,
+          30.seconds
+        )
+
+        failure shouldBe a[CequenceWSUnknownHostException]
+        // the backend's exception rides along as the cause
+        (ThrowableUtil.hasCause(failure, classOf[java.net.UnknownHostException]) ||
+          ThrowableUtil.hasCause(
+            failure,
+            classOf[java.nio.channels.UnresolvedAddressException]
+          )) shouldBe true
+
+        engine.close()
+      } finally {
+        runSystem.terminate()
+        ()
+      }
+    }
+
     "expose the neutral Flow.Publisher contract (cold, [DONE]-terminated)" in {
       val requestCount = new java.util.concurrent.atomic.AtomicInteger(0)
       withServer("/events" -> sse(sseBody, requestCount)) { port =>
@@ -382,7 +420,7 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "copy(transportSettings) honors the new settings independent of the original" in {
-      withServer("/" -> slowOk(2000)) { port =>
+      withServer("/" -> slowOk(1000)) { port =>
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
           .asInstanceOf[PekkoHttpWSClientEngine]
         val site = SiteBinding(s"http://localhost:$port")
@@ -396,7 +434,7 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
           10.seconds
         )
 
-        // the original engine's (much longer) default timeout tolerates the same 2s delay
+        // the original engine's (much longer) default timeout tolerates the same 1 s delay
         val response = Await.result(
           engine.execGETRich(site, "ping").map(engine.getResponseOrError),
           30.seconds

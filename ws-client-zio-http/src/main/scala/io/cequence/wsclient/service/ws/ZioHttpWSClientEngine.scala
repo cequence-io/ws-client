@@ -734,8 +734,11 @@ object ZioHttpWSClientEngine {
   /**
    * An engine on a caller-supplied `Client` and `Runtime` - e.g. the ones of a ZIO
    * application, sharing its connection pool. The engine never closes them. The client's own
-   * configuration (connect/idle timeouts, proxy) applies; of `transportSettings` only the
-   * per-call `requestTimeout` does.
+   * configuration (connect/idle timeouts, proxy, TLS) applies; of `transportSettings` only the
+   * per-call `requestTimeout` does. TLS: give the client
+   * `.ssl(ClientSSLConfig.FromSystemTrustStore)` (what discovery-created engines use) or a
+   * trust store of your own - zio-http's default `ClientSSLConfig.Default` is Netty's insecure
+   * trust manager, which accepts ANY certificate.
    */
   def apply(
     client: Client,
@@ -967,6 +970,10 @@ object ZioHttpWSClientEngine {
     def millis(value: Option[Int]) = zio.Duration.fromMillis(value.getOrElse(0).toLong)
 
     val base = ZClient.Config.default
+      // zio-http's own default (ClientSSLConfig.Default) is Netty's INSECURE trust manager - no
+      // certificate chain and no host name verification - so verify against the JVM's default
+      // trust store (javax.net.ssl.trustStore / cacerts) like every other engine
+      .ssl(zio.http.ClientSSLConfig.FromSystemTrustStore)
       .connectionTimeout(millis(timeouts.connectTimeout))
       .idleTimeout(millis(timeouts.readTimeout))
       // zio-http's default is a FIXED pool of 10 connections - too few for concurrent API use

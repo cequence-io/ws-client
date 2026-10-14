@@ -338,6 +338,9 @@ lazy val `ws-client-zio-http` =
       // ZStream -> org.reactivestreams Publisher (then FlowAdapters -> java.util.concurrent.Flow)
       libraryDependencies += "dev.zio" %% "zio-interop-reactivestreams" % "2.0.2",
       libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      // the TLS spec points the JVM-global default trust store at a test certificate; fork so
+      // that cannot leak into other modules' tests
+      Test / fork := true,
       testLoggingSettings,
       publish / skip := false
     )
