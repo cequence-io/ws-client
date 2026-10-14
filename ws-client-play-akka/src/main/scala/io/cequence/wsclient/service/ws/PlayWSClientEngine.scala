@@ -21,13 +21,17 @@ import play.api.libs.ws.{
   StandaloneWSRequest
 }
 import play.api.libs.ws.ahc.StandaloneAhcWSClient
+import play.shaded.ahc.org.asynchttpclient.config.AsyncHttpClientConfigDefaults
+import org.slf4j.LoggerFactory
 
 import java.io.File
 import java.net.UnknownHostException
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.net.ssl.SSLContext
 import scala.concurrent.{ExecutionContext, Future}
 import scala.sys.ShutdownHookThread
+import scala.util.{Failure, Success, Try}
 
 /**
  * The Play WS (Akka) flavor of the site-stateless [[WSClientEngine]] - owns the lazily-created
@@ -87,7 +91,7 @@ class PlayWSClientEngine(
 
     val timeouts = transportSettings.timeouts
 
-    val asyncHttpClientConfig = new DefaultAsyncHttpClientConfig.Builder()
+    val configBuilder = new DefaultAsyncHttpClientConfig.Builder()
       .setConnectTimeout(timeouts.connectTimeout.getOrElse(DefaultTimeouts.connectTimeout))
       .setReadTimeout(timeouts.readTimeout.getOrElse(DefaultTimeouts.readTimeout))
       .setPooledConnectionIdleTimeout(
@@ -96,11 +100,12 @@ class PlayWSClientEngine(
         )
       )
       .setRequestTimeout(timeouts.requestTimeout.getOrElse(DefaultTimeouts.requestTimeout))
-      // the shaded AHC defaults to TLSv1.2/1.1/1 (and the JDK disables 1.1/1), so TLS-1.3-only
-      // hosts would fail the handshake
-      .setEnabledProtocols(Array("TLSv1.3", "TLSv1.2"))
-      .build
-    val asyncHttpClient = new DefaultAsyncHttpClient(asyncHttpClientConfig)
+    // the shaded AHC's own default (TLSv1.2/1.1/1) fails the handshake with TLS-1.3-only hosts -
+    // offer the JDK's default client protocols instead, unless the operator configured AHC's list
+    PlayWSClientEngine.tlsProtocols.foreach(protocols =>
+      configBuilder.setEnabledProtocols(protocols)
+    )
+    val asyncHttpClient = new DefaultAsyncHttpClient(configBuilder.build)
     val client = new StandaloneAhcWSClient(asyncHttpClient)
 
     // a safety net for engines that are never closed explicitly; removed again in close() -
@@ -661,12 +666,52 @@ class PlayWSClientEngine(
 
 object PlayWSClientEngine {
 
+  private val logger = LoggerFactory.getLogger(classOf[PlayWSClientEngine])
+
+  // the list every shaded AHC so far (play-ws 2.1 - 3.0) ships in its ahc-default.properties
+  private val AhcShippedProtocols = Seq("TLSv1.2", "TLSv1.1", "TLSv1")
+  private val FallbackProtocols = Seq("TLSv1.3", "TLSv1.2")
+
   def apply(
     transportSettings: TransportSettings = TransportSettings()
   )(
     implicit materializer: Materializer,
     ec: ExecutionContext
   ): PlayWSClientEngine = new PlayWSClientEngine(transportSettings)
+
+  /**
+   * The TLS protocols the engine's client offers - or `None` to leave the shaded AHC's own
+   * list in force.
+   *
+   * The shaded AHC ships `TLSv1.2, TLSv1.1, TLSv1` as its default (and the JDK disables the
+   * last two), so TLS-1.3-only hosts failed the handshake. Exactly that shipped default is
+   * replaced with the JDK's default CLIENT protocols - the list `java.net.http.HttpClient` (so
+   * the jdk / sttp engines) offers: `TLSv1.3, TLSv1.2` on JDK 11+, honoring
+   * `jdk.tls.client.protocols` and `jdk.tls.disabledAlgorithms`, and never naming a protocol
+   * the JSSE lacks (which AHC would pass on verbatim, failing every HTTPS call). A list the
+   * operator configured explicitly
+   * (`-Dplay.shaded.ahc.org.asynchttpclient.enabledProtocols=...` or an `ahc.properties`
+   * resource - an empty one means "Netty's defaults") stays in force.
+   */
+  private[ws] def tlsProtocols: Option[Array[String]] = {
+    val ahcProtocols =
+      Option(AsyncHttpClientConfigDefaults.defaultEnabledProtocols()).map(_.toSeq)
+
+    if (ahcProtocols.contains(AhcShippedProtocols)) Some(jdkClientProtocols) else None
+  }
+
+  private def jdkClientProtocols: Array[String] = {
+    def fallBack(reason: String) = {
+      logger.warn(s"Offering ${FallbackProtocols.mkString(" and ")} - $reason.")
+      FallbackProtocols.toArray
+    }
+
+    Try(SSLContext.getDefault.getDefaultSSLParameters.getProtocols) match {
+      case Success(protocols) if protocols.nonEmpty => protocols
+      case Success(_) => fallBack("the JDK reports no default TLS client protocols")
+      case Failure(e) => fallBack(s"the JDK's default SSL context is unavailable: $e")
+    }
+  }
 
   private[ws] def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
     (serviceEndPointName: String) =>

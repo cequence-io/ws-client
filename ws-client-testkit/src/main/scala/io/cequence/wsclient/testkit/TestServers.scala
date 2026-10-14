@@ -164,6 +164,10 @@ object TestServers {
   def selfSignedKeyStore(): TestKeyStore = {
     val dir = Files.createTempDirectory("ws-client-tls-").toFile
     val file = new File(dir, "localhost.p12")
+    // deleteOnExit runs in REVERSE registration order: register the directory first so its file
+    // is gone by the time it is deleted (and both before keytool runs, in case keytool fails)
+    dir.deleteOnExit()
+    file.deleteOnExit()
     val password = "test-password"
     val keytool = new File(new File(System.getProperty("java.home"), "bin"), "keytool")
 
@@ -194,23 +198,22 @@ object TestServers {
     val output = new String(process.getInputStream.readAllBytes(), "UTF-8")
     require(process.waitFor() == 0, s"keytool failed: $output")
 
-    file.deleteOnExit()
-    dir.deleteOnExit()
     TestKeyStore(file, password)
   }
 
   /**
    * An HTTPS server (certificate from `keyStore`) that accepts ONLY the given TLS `protocols`
-   * (e.g. `Seq("TLSv1.3")`), with the given `path -> handler` contexts.
+   * (e.g. `Seq("TLSv1.3")`), with the given `path -> handler` contexts; returns the test's
+   * result.
    */
-  def withTlsServer(
+  def withTlsServer[T](
     keyStore: TestKeyStore,
     protocols: Seq[String]
   )(
     contexts: (String, HttpExchange => Unit)*
   )(
-    test: Int => Unit
-  ): Unit = {
+    test: Int => T
+  ): T = {
     val ks = KeyStore.getInstance("PKCS12")
     val in = new FileInputStream(keyStore.file)
     try ks.load(in, keyStore.password.toCharArray)

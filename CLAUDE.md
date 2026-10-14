@@ -75,10 +75,16 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
    - Supports multiple content types: JSON, multipart/form-data, URL-encoded, file uploads, streaming
    - Default timeouts (for unset `Timeouts` fields): 60 s request/read, 5 s connect, 60 s pooled-connection-idle
      (the jdk/sttp engines default the request timeout to 120 s)
-   - TLS: enables `TLSv1.3` + `TLSv1.2` explicitly (since 1.1.2) - the shaded AHC defaults to
-     TLSv1.2/1.1/1 (and the JDK disables 1.1/1), so TLS-1.3-only hosts used to fail the
-     handshake. Covered end-to-end by the Play specs (`TestServers.withTlsServer`); the Play
-     modules fork their tests because those point the JVM-global default trust store at a test cert
+   - TLS (since 1.1.2): offers the JDK's default CLIENT protocols (`TLSv1.3, TLSv1.2` on JDK
+     11+ - the list `java.net.http` / the jdk and sttp engines use; honors
+     `jdk.tls.client.protocols` / `jdk.tls.disabledAlgorithms`, never names a protocol the JSSE
+     lacks) in place of the shaded AHC's shipped default `TLSv1.2/1.1/1` (the JDK disables 1.1/1,
+     so TLS-1.3-only hosts failed the handshake). Exactly that shipped default is replaced
+     (`PlayWSClientEngine.tlsProtocols`); an explicitly configured AHC list
+     (`-Dplay.shaded.ahc.org.asynchttpclient.enabledProtocols=...` / `ahc.properties`) stays in
+     force. Covered end-to-end by the Play provider specs (`TestServers.withTlsServer`);
+     `ws-client-play-akka` / `-pekko` fork their tests because those point the JVM-global default
+     trust store at a test cert
 
 4. **ws-client-play-akka-stream** - Streaming extensions (named `ws-client-play-stream` before 1.0.0)
    - Depends on `ws-client-core-akka` and `ws-client-play-akka`

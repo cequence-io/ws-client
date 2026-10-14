@@ -9,6 +9,7 @@ import io.cequence.wsclient.domain.{
   SiteBinding,
   WsRequestContext
 }
+import io.cequence.wsclient.service.WSClientEngine
 import io.cequence.wsclient.service.spi.{
   EngineCapability,
   TransportSettings,
@@ -27,7 +28,9 @@ import io.cequence.wsclient.testkit.TestServers.{
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 import play.api.libs.json.JsString
+import play.shaded.ahc.org.asynchttpclient.config.AsyncHttpClientConfigHelper
 
+import javax.net.ssl.SSLContext
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration._
 
@@ -44,6 +47,50 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     Thread.sleep(2000)
     respond(exchange, 200, """{"status":"ok"}""")
   }
+
+  private lazy val keyStore = selfSignedKeyStore()
+
+  private val AhcEnabledProtocolsKey = "play.shaded.ahc.org.asynchttpclient.enabledProtocols"
+
+  // the shaded AHC caches its properties: reload after every change (and after the restore)
+  private def withAhcEnabledProtocols[T](value: Option[String])(body: => T): T = {
+    def set(value: Option[String]): Unit = {
+      value match {
+        case Some(protocols) => System.setProperty(AhcEnabledProtocolsKey, protocols)
+        case None            => System.clearProperty(AhcEnabledProtocolsKey)
+      }
+      AsyncHttpClientConfigHelper.reloadProperties()
+    }
+
+    val previous = Option(System.getProperty(AhcEnabledProtocolsKey))
+    set(value)
+    try body
+    finally set(previous)
+  }
+
+  // a fresh engine whose client trusts the test certificate - the client captures the trust
+  // store when it is created (on the first request), so that must happen inside `body`
+  private def withTrustingEngine[T](body: WSClientEngine => T): T =
+    withDefaultTrustStore(keyStore) {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try body(engine)
+      finally engine.close()
+    }
+
+  // the TLS protocol `engine` negotiates with a server that accepts only `serverProtocols`
+  private def negotiatedProtocol(
+    engine: WSClientEngine,
+    serverProtocols: Seq[String]
+  ): String =
+    withTlsServer(keyStore, serverProtocols)("/" -> tlsProtocol) { port =>
+      val response = Await.result(
+        engine
+          .execGETRich(SiteBinding(s"https://localhost:$port"), "tls")
+          .map(engine.getResponseOrError),
+        30.seconds
+      )
+      (response.json \ "protocol").as[String]
+    }
 
   s"$expectedEngineId provider" should {
 
@@ -76,30 +123,35 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "speak TLS 1.3 (TLS-1.3-only hosts) and TLS 1.2, preferring 1.3" in {
-      val keyStore = selfSignedKeyStore()
+      withTrustingEngine { engine =>
+        negotiatedProtocol(engine, Seq("TLSv1.3")) shouldBe "TLSv1.3"
+        negotiatedProtocol(engine, Seq("TLSv1.2")) shouldBe "TLSv1.2"
+        negotiatedProtocol(engine, Seq("TLSv1.3", "TLSv1.2")) shouldBe "TLSv1.3"
+      }
+    }
 
-      Seq(
-        Seq("TLSv1.3") -> "TLSv1.3",
-        Seq("TLSv1.2") -> "TLSv1.2",
-        Seq("TLSv1.3", "TLSv1.2") -> "TLSv1.3"
-      ).foreach { case (serverProtocols, expectedProtocol) =>
-        withTlsServer(keyStore, serverProtocols)("/" -> tlsProtocol) { port =>
-          // the engine's client captures the trust store when it is created (first request)
-          val protocol = withDefaultTrustStore(keyStore) {
-            val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
-            try {
-              val response = Await.result(
-                engine
-                  .execGETRich(SiteBinding(s"https://localhost:$port"), "tls")
-                  .map(engine.getResponseOrError),
-                30.seconds
-              )
-              (response.json \ "protocol").as[String]
-            } finally
-              engine.close()
-          }
-          protocol shouldBe expectedProtocol
+    "leave an explicitly configured AHC enabledProtocols list in force" in {
+      // the no-code way to pin the protocols (also what enables TLS 1.3 on ws-client <= 1.1.1)
+      withAhcEnabledProtocols(Some("TLSv1.2")) {
+        withTrustingEngine { engine =>
+          negotiatedProtocol(engine, Seq("TLSv1.3", "TLSv1.2")) shouldBe "TLSv1.2"
         }
+      }
+    }
+
+    "offer the JDK's default TLS client protocols unless AHC's enabledProtocols is configured" in {
+      val jdkClientProtocols = SSLContext.getDefault.getDefaultSSLParameters.getProtocols.toSeq
+
+      // AHC's shipped default is replaced (a changed shipped default would show up here)
+      withAhcEnabledProtocols(None) {
+        PlayWSClientEngine.tlsProtocols.map(_.toSeq) shouldBe Some(jdkClientProtocols)
+      }
+      // an explicit list stays in force - an empty one too (it means "Netty's defaults")
+      withAhcEnabledProtocols(Some("TLSv1.2")) {
+        PlayWSClientEngine.tlsProtocols shouldBe None
+      }
+      withAhcEnabledProtocols(Some("")) {
+        PlayWSClientEngine.tlsProtocols shouldBe None
       }
     }
 
