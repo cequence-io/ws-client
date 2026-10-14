@@ -16,11 +16,15 @@ import io.cequence.wsclient.service.spi.{
 }
 import io.cequence.wsclient.testkit.LatchedSubscriber
 import io.cequence.wsclient.testkit.TestServers.{
+  negotiatedProtocol,
   respond,
+  selfSignedKeyStore,
   sse,
+  tlsAttempt,
   withDumbProxy,
   withEchoServer,
-  withServer
+  withServer,
+  withTrustingEngine
 }
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
@@ -41,6 +45,8 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
   private def newEngine(settings: TransportSettings = TransportSettings()) =
     WSClientEngineRegistry(settings, Some(expectedEngineId))
+
+  private lazy val keyStore = selfSignedKeyStore()
 
   private def get(
     engine: io.cequence.wsclient.service.WSClientEngine,
@@ -341,6 +347,50 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
       failure shouldBe a[CequenceWSUnknownHostException]
       engine.close()
+    }
+
+    "reject a server certificate the JVM does not trust" in {
+      // zio-http's own client default (ClientSSLConfig.Default) is Netty's INSECURE trust
+      // manager, which accepts any certificate - the engine must verify the chain instead: the
+      // handshake fails (zio-http reports it as a premature channel closure, without the JSSE's
+      // SSLException) and the request never reaches the server
+      val engine = newEngine()
+      try {
+        val attempt = tlsAttempt(engine, keyStore, Seq("TLSv1.3", "TLSv1.2"))
+        attempt.result match {
+          case Left(failure) => failure should not be a[CequenceWSTimeoutException]
+          case Right(protocol) =>
+            fail(s"accepted an untrusted certificate (negotiated $protocol)")
+        }
+        attempt.served shouldBe 0
+      } finally
+        engine.close()
+    }
+
+    "reject a trusted certificate that does not name the host" in {
+      // a certificate for localhost only (no IP SAN): fine via localhost, rejected via 127.0.0.1
+      val localhostOnly = selfSignedKeyStore(Seq("dns:localhost"))
+
+      withTrustingEngine(localhostOnly, expectedEngineId) { engine =>
+        negotiatedProtocol(engine, localhostOnly, Seq("TLSv1.3")) shouldBe "TLSv1.3"
+
+        val attempt =
+          tlsAttempt(engine, localhostOnly, Seq("TLSv1.3", "TLSv1.2"), host = "127.0.0.1")
+        attempt.result match {
+          case Left(failure) => failure should not be a[CequenceWSTimeoutException]
+          case Right(protocol) =>
+            fail(s"accepted a certificate that does not name the host (negotiated $protocol)")
+        }
+        attempt.served shouldBe 0
+      }
+    }
+
+    "speak TLS 1.3 and TLS 1.2 (preferring 1.3) with a trusted certificate" in {
+      withTrustingEngine(keyStore, expectedEngineId) { engine =>
+        negotiatedProtocol(engine, keyStore, Seq("TLSv1.3")) shouldBe "TLSv1.3"
+        negotiatedProtocol(engine, keyStore, Seq("TLSv1.2")) shouldBe "TLSv1.2"
+        negotiatedProtocol(engine, keyStore, Seq("TLSv1.3", "TLSv1.2")) shouldBe "TLSv1.3"
+      }
     }
 
     "apply user recoverErrors to the normalized (Cequence) exception" in {

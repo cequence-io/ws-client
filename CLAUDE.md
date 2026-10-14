@@ -15,7 +15,7 @@ The project includes:
 - Streaming support for large payloads
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 1.1.1
+Current version: 1.1.2
 
 ## Build Commands
 
@@ -75,6 +75,21 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
    - Supports multiple content types: JSON, multipart/form-data, URL-encoded, file uploads, streaming
    - Default timeouts (for unset `Timeouts` fields): 60 s request/read, 5 s connect, 60 s pooled-connection-idle
      (the jdk/sttp engines default the request timeout to 120 s)
+   - TLS (since 1.1.2): offers the JDK's default CLIENT protocols (`TLSv1.3, TLSv1.2` on JDK
+     11+ - the list `java.net.http` / the jdk and sttp engines use; honors
+     `jdk.tls.client.protocols` / `jdk.tls.disabledAlgorithms`, never names a protocol the JSSE
+     lacks) in place of the shaded AHC's shipped default `TLSv1.2/1.1/1` (the JDK disables 1.1/1,
+     so TLS-1.3-only hosts failed the handshake). Exactly that shipped default is replaced
+     (`PlayWSClientEngine.tlsProtocols`); an explicitly configured AHC list stays in force -
+     `-Dplay.shaded.ahc.org.asynchttpclient.enabledProtocols=...` set to anything, or that key
+     in `play/shaded/ahc/org/asynchttpclient/config/ahc.properties` (the shaded AHC does NOT read
+     a classpath-root `ahc.properties`). The JDK list comes from a throwaway `SSLContext`, never
+     `SSLContext.getDefault` (that would initialize and freeze the JVM-wide default context);
+     if the JDK yields none, AHC's own list stays. Java 8: the Scala 2.12/2.13 Akka jars (shaded
+     Netty 4.1.45) have no TLS 1.3 cipher suites there, so they negotiate TLS 1.2 - TLS 1.3
+     needs JDK 11+. Covered end-to-end by the Play provider specs (`TestServers.withTlsServer`,
+     `withTrustingEngine`); `ws-client-play-akka` / `-pekko` / `-zio-http` fork their tests
+     because those point the JVM-global default trust store at a test cert
 
 4. **ws-client-play-akka-stream** - Streaming extensions (named `ws-client-play-stream` before 1.0.0)
    - Depends on `ws-client-core-akka` and `ws-client-play-akka`
@@ -112,7 +127,11 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      (a zio-http upgrade cannot break compilation) and falls back to the stock non-daemon driver
      with a warning if the lookup fails - re-check it on zio-http upgrades (the spec asserts the
      daemon driver is in use). With a proxy, zio-http still resolves the TARGET host via local
-     DNS.
+     DNS. TLS (since 1.1.2): `clientConfig` sets `ClientSSLConfig.FromSystemTrustStore` - never
+     drop it: zio-http's own default (`ClientSSLConfig.Default`) is Netty's INSECURE trust
+     manager (no certificate chain, no host name verification). Caller-owned clients
+     (`apply(client)` / `layer()`) bring their own `.ssl`. The spec covers both (untrusted cert
+     rejected; trusted cert negotiates TLS 1.3 / 1.2).
    - All four use `StringBackedResponse` / `SimpleRichResponse` from core (no streaming source
      on responses) and the shared `EngineSupport` scaffolding (core, `private[wsclient]`).
 
@@ -136,9 +155,9 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      any survive.
 
 8. **ws-client-testkit** - test-only fixtures (never published): embedded echo / SSE / proxy-stub
-   servers (`TestServers`) and a generic `LatchedSubscriber` for `Flow` publishers; engine
-   modules depend on it `% Test`. Core's test classpath is NOT shared via `test->test` - its
-   dummy engine providers would leak into every engine's discovery tests.
+   / protocol-restricted TLS servers (`TestServers`) and a generic `LatchedSubscriber` for
+   `Flow` publishers; engine modules depend on it `% Test`. Core's test classpath is NOT shared
+   via `test->test` - its dummy engine providers would leak into every engine's discovery tests.
 
 ### Key Architectural Patterns
 
@@ -237,7 +256,7 @@ The build manages different dependency versions for Scala 2.12, 2.13, and 3.2:
 - Play JSON: 2.8.2 (Scala 2.12/2.13), 2.10.0-RC6 (Scala 3.2)
 - Akka Stream: 2.6.1 (Scala 2.12), 2.6.20 (Scala 2.13/3.2)
 - Play WS (Akka): 2.1.11 (Scala 2.12/2.13), 2.2.0-M2 (Scala 3.2)
-- Play WS (Pekko, `org.playframework`): 3.0.7; Pekko Stream: 1.6.0; Pekko HTTP: 1.3.0 (Scala 2.13 only)
+- Play WS (Pekko, `org.playframework`): 3.0.14 (shaded AHC 2.16.1 / Netty 4.1.138 - stricter HTTP response parsing than 3.0.7's 4.1.118: bare-LF lines, CL + TE, control chars in headers are rejected); Pekko Stream: 1.6.0; Pekko HTTP: 1.3.0 (Scala 2.13 only)
 
 Scala 3 requires manual cross-version suffix handling (e.g., `akka-stream_2.13` for Scala 3).
 
@@ -356,7 +375,8 @@ val loggedService = log(service, "MyService")
 - Query-param encoding contract: the jdk/sttp/pekko-http/zio-http engines take raw values and
   percent-encode them; the Play engines pass values through verbatim (pre-existing behavior
   kept for backward compatibility - callers pre-encode reserved characters there)
-- `TransportSettings.proxyURL` ("host:port" or "scheme://host:port", port required) is
+- `TransportSettings.proxyURL` ("host:port" or "scheme://host:port", port required; only
+  host + port are used - always a plain HTTP proxy, scheme / credentials / path ignored) is
   honored by the Play/jdk/sttp/zio-http engines (zio-http tunnels via CONNECT but resolves the
   target host through local DNS); pekko-http warns and ignores it (CONNECT-only proxy
   support). A proxy is a property of the shared client - all engines bound to one transport
@@ -381,7 +401,8 @@ val loggedService = log(service, "MyService")
   `WSClientWithEngineOutputStreamingBase` (core-akka, generated to core-pekko), or with
   `.mapError(mapHttpStatusErrors)` on engine-level calls. The default `handleErrorCodes` of
   non-streamed calls throws the same structured exception. The akka/pekko `handleException`
-  passes Cequence exceptions through unwrapped
+  (shared core-akka `StreamFailures`, used by the Play stream and pekko-http engines) passes
+  Cequence exceptions through unwrapped
 - Form fields: repeated keys keep every value on every engine (`EngineSupport.groupValues`,
   never `.toMap`); multipart files go out under their BASE name (`FilePart.filenameAux`) unless
   a display name is given

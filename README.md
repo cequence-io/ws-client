@@ -1,5 +1,5 @@
 # WS Client (Cequence)
-[![version](https://img.shields.io/badge/version-1.1.1-green.svg)](https://cequence.io) [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](https://opensource.org/licenses/MIT) [![Twitter Follow](https://img.shields.io/twitter/follow/cequence_io?style=social)](https://twitter.com/0xbnd)
+[![version](https://img.shields.io/badge/version-1.1.2-green.svg)](https://cequence.io) [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](https://opensource.org/licenses/MIT) [![Twitter Follow](https://img.shields.io/twitter/follow/cequence_io?style=social)](https://twitter.com/0xbnd)
 
 This repository contains a simple and efficient Web Service client implemented in Scala. The client is designed to interact with RESTful web services, making it easy to send requests, handle responses, and manage errors.
 
@@ -16,13 +16,13 @@ The currently supported Scala versions are **2.12, 2.13**, and **3** for the Akk
 To install the library, add the following dependency to your *build.sbt*
 
 ```
-"io.cequence" %% "ws-client-play-akka" % "1.1.1"     // Akka-based (Play WS 2.x)
+"io.cequence" %% "ws-client-play-akka" % "1.1.2"     // Akka-based (Play WS 2.x)
 ```
 
 or, for the Pekko flavor:
 
 ```
-"io.cequence" %% "ws-client-play-pekko" % "1.1.1"    // Pekko-based (Play WS 3.x)
+"io.cequence" %% "ws-client-play-pekko" % "1.1.2"    // Pekko-based (Play WS 3.x)
 ```
 
 or to *pom.xml* (if you use maven)
@@ -31,19 +31,21 @@ or to *pom.xml* (if you use maven)
 <dependency>
     <groupId>io.cequence</groupId>
     <artifactId>ws-client-play-akka_2.12</artifactId>
-    <version>1.1.1</version>
+    <version>1.1.2</version>
 </dependency>
 ```
 
 If you only need the core abstractions without Akka/Pekko dependencies:
 
 ```
-"io.cequence" %% "ws-client-core" % "1.1.1"
+"io.cequence" %% "ws-client-core" % "1.1.2"
 ```
 
 > ⚠️ **The Akka and Pekko flavors are mutually exclusive on one classpath.** The Pekko modules are generated from the Akka ones and deliberately keep the same package and class names (the same trade-off Play made between 2.9 and 3.0), so downstream code compiles unchanged against either flavor - switch by swapping the artifact and your `Materializer` import. Never depend on both: which classes (implicits such as `asSafeSource` included) actually load then depends on jar order. `WSClientEngineRegistry` detects such duplicated classes at runtime and logs a warning naming the conflicting jars; set the config key `ws-client.strict-classpath = true` (or `-Dws-client.strict-classpath=true`) to fail engine resolution with an exception instead - recommended for CI.
 
 > ℹ️ **Logging:** the library logs through the SLF4J API only and ships no logging backend - bring your own (e.g. logback). Keep `play.shaded.ahc.org.asynchttpclient.netty.handler` at `INFO` or above: at `DEBUG` Play's shaded AsyncHttpClient logs complete request headers, including `Authorization`.
+
+> ℹ️ **1.1.2 - TLS 1.3 on the Play engines; Pekko flavor on play-ws 3.0.14.** The Play WS engines (`play-akka`, `play-pekko` and their `-stream` variants) now offer the JDK's default TLS client protocols - `TLSv1.3, TLSv1.2` on JDK 11+, the same list the `jdk` / `sttp` engines use (`jdk.tls.client.protocols` and `jdk.tls.disabledAlgorithms` apply). Before, they offered the shaded AsyncHttpClient's shipped default, `TLSv1.2, TLSv1.1, TLSv1` (current JDKs enable only 1.2 of those), so hosts that accept only TLS 1.3 failed the handshake (e.g. "close_notify during handshake"). An explicitly configured AHC list stays in force: `-Dplay.shaded.ahc.org.asynchttpclient.enabledProtocols=...` (also the no-code fix on 1.1.1: `...=TLSv1.3,TLSv1.2`), or that key in an `ahc.properties` resource under `play/shaded/ahc/org/asynchttpclient/config/` - the only place the shaded AHC reads it from (a classpath-root `ahc.properties` is ignored). TLS 1.3 needs JDK 11+: the Scala 2.12 / 2.13 Akka artifacts (play-ws 2.1.11, shaded Netty 4.1.45) enable TLS 1.3 cipher suites only on Java 11+, so on Java 8 they keep negotiating TLS 1.2 whatever the JDK offers; on a JSSE without TLS 1.3 the engines keep working with what it offers, and TLS 1.0/1.1 are offered only where the JDK itself enables them. The other engines already offered TLS 1.3 via the JDK / Netty defaults. Also: the Pekko flavor moves to play-ws 3.0.14, whose shaded AsyncHttpClient 2.16.1 fixes CVE-2026-40490 and CVE-2026-45300 (credentials / cookies re-sent on a cross-origin redirect). Neither was exploitable through ws-client, as no engine follows redirects, but dependency scanners flag the old shaded jar. Its shaded Netty (4.1.138, from 4.1.118) is also stricter: responses with bare-LF header lines, `Content-Length` together with `Transfer-Encoding: chunked`, or control characters in header values now fail instead of being tolerated. The Akka flavor stays on play-ws 2.1.11, the last release for Scala 2.12. And a security fix: the `zio-http` engine now verifies server certificates and host names against the JVM's default trust store - zio-http's own client default is Netty's insecure trust manager, which accepted any certificate. A ZIO application running the engine on its own `Client` (`ZioHttpWSClientEngine(client)` / `.layer()`) must configure that client's `.ssl(...)` itself.
 
 > ℹ️ **1.1.1 - classifying HTTP errors of streamed calls.** A streamed call's non-2xx failure is now a structured `CequenceWSHttpStatusException` carrying `statusCode` and `body` (its message is unchanged), and so is the default `handleErrorCodes` failure of non-streamed calls. To get your service's own classification (`handleErrorCodes`) for stream errors too - as the non-streamed calls always had it - either extend `WSClientWithEngineOutputStreamingBase` and use its service-level `execJsonStream` / `execRawStream`, or append `.mapError(mapHttpStatusErrors)` to engine-level `engine.execJsonStream(site, ...)` calls.
 
@@ -90,7 +92,7 @@ Other backends:
 - **ws-client-jdk** - backend on the JDK 11+ `java.net.http.HttpClient` (Scala 2.12, 2.13, 3); no Akka/Pekko/Play WS - it needs only `ws-client-core` (play-json, Jackson, Typesafe config, scala-logging)
 - **ws-client-sttp** - backend over [sttp client4](https://sttp.softwaremill.com) (Scala 2.12, 2.13), unlocking any sttp `Future` backend (OkHttp, Armeria, Pekko-HTTP, ...)
 - **ws-client-pekko-http** - direct pekko-http client backend (Scala 2.13), no Play WS / shaded AsyncHttpClient layer; supports input and output (SSE) streaming
-- **ws-client-zio-http** - backend on the [zio-http](https://zio.dev/zio-http) (Netty) client and the ZIO runtime (Scala 2.12, 2.13); output (SSE) streaming via `Flow.Publisher`. A ZIO application can run it on its own `Client` via `ZioHttpWSClientEngine.layer()`. With a proxy, target host names are still resolved through local DNS
+- **ws-client-zio-http** - backend on the [zio-http](https://zio.dev/zio-http) (Netty) client and the ZIO runtime (Scala 2.12, 2.13); output (SSE) streaming via `Flow.Publisher`. Server certificates are verified against the JVM's default trust store (`ClientSSLConfig.FromSystemTrustStore`). A ZIO application can run it on its own `Client` via `ZioHttpWSClientEngine.layer()` - then configure that client's `.ssl(...)` yourself, as zio-http's default trusts any certificate. With a proxy, target host names are still resolved through local DNS
 
 Independent:
 
@@ -190,7 +192,7 @@ val island = engine.copy(reuseExecContext = false)
 
 **Query-parameter encoding** differs between the engine families: the `jdk`, `sttp`, `pekko-http`, and `zio-http` engines expect **raw (unencoded) parameter values** and percent-encode them for you; the Play-based engines pass values through verbatim (long-standing behavior, kept for backward compatibility), so with those you must pre-encode values containing reserved characters yourself. Keep this in mind when swapping engines - a pre-encoded value like `a%20b` gets double-encoded on the non-Play engines.
 
-**Proxy support**: `TransportSettings.proxyURL` (accepted forms: `host:port` or `scheme://host:port`) is honored by the Play, `jdk`, `sttp`, and `zio-http` engines (`zio-http` tunnels via `CONNECT` and still resolves the target host through local DNS); the `pekko-http` engine logs a warning and ignores it (pekko-http only supports CONNECT-tunneling proxies).
+**Proxy support**: `TransportSettings.proxyURL` (accepted forms: `host:port` or `scheme://host:port`; only the host and port are used - the proxy is always a plain HTTP proxy, even with an `https://` scheme (`https` targets are still tunnelled through it), and credentials, path or query in the URL are ignored: proxy authentication is not supported) is honored by the Play, `jdk`, `sttp`, and `zio-http` engines (`zio-http` tunnels via `CONNECT` and still resolves the target host through local DNS); the `pekko-http` engine logs a warning and ignores it (pekko-http only supports CONNECT-tunneling proxies).
 
 **Custom error recovery** (`SiteBinding.recoverErrors`) composes with the engine's built-in transport-failure normalization: your partial function sees the Cequence exception taxonomy (`CequenceWSTimeoutException`, `CequenceWSUnknownHostException`, ...) for failures the backend recognizes, so the same recovery logic is portable across engines.
 

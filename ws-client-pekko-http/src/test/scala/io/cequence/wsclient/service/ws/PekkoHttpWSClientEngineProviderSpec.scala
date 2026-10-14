@@ -1,9 +1,10 @@
 package io.cequence.wsclient.service.ws
 
-import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
+import com.sun.net.httpserver.HttpExchange
 import io.cequence.wsclient.domain.{
   CequenceWSException,
   CequenceWSTimeoutException,
+  CequenceWSUnknownHostException,
   SiteBinding,
   WsRequestContext
 }
@@ -12,11 +13,12 @@ import io.cequence.wsclient.service.spi.{
   TransportSettings,
   WSClientEngineRegistry
 }
+import io.cequence.wsclient.testkit.LatchedSubscriber
+import io.cequence.wsclient.testkit.TestServers.{respond, sse, withEchoServer, withServer}
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 import play.api.libs.json.{JsString, Json}
 
-import java.net.InetSocketAddress
 import scala.concurrent.{Await, Future}
 import scala.concurrent.duration._
 
@@ -27,92 +29,12 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
   private val expectedEngineId = "pekko-http"
 
-  private def withEchoServer(test: (Int) => Unit): Unit = {
-    val server = HttpServer.create(new InetSocketAddress(0), 0)
-    server.createContext(
-      "/",
-      new HttpHandler {
-        override def handle(exchange: HttpExchange): Unit = {
-          val requestBody =
-            new String(exchange.getRequestBody.readAllBytes(), "UTF-8")
-          val response = Json
-            .obj(
-              "status" -> "ok",
-              "method" -> exchange.getRequestMethod,
-              "contentType" -> Option(exchange.getRequestHeaders.getFirst("Content-Type"))
-                .getOrElse[String](""),
-              "transferEncoding" -> Option(
-                exchange.getRequestHeaders.getFirst("Transfer-encoding")
-              ).getOrElse[String](""),
-              "contentLength" -> Option(exchange.getRequestHeaders.getFirst("Content-length"))
-                .getOrElse[String](""),
-              "query" -> Option(exchange.getRequestURI.getRawQuery).getOrElse[String](""),
-              "body" -> requestBody
-            )
-            .toString
-            .getBytes("UTF-8")
-          exchange.getResponseHeaders.add("Content-Type", "application/json")
-          exchange.sendResponseHeaders(200, response.length)
-          val os = exchange.getResponseBody
-          os.write(response)
-          os.close()
-        }
-      }
-    )
-    server.start()
-    try
-      test(server.getAddress.getPort)
-    finally
-      server.stop(0)
-  }
-
-  // echoes the Authorization header back as JSON - used to verify per-site auth isolation
-  // when several sites are served by one shared engine
-  private def withAuthEchoServer(test: (Int) => Unit): Unit = {
-    val server = HttpServer.create(new InetSocketAddress(0), 0)
-    server.createContext(
-      "/",
-      new HttpHandler {
-        override def handle(exchange: HttpExchange): Unit = {
-          val auth = Option(exchange.getRequestHeaders.getFirst("Authorization")).getOrElse("")
-          val response = Json.obj("auth" -> auth).toString.getBytes("UTF-8")
-          exchange.getResponseHeaders.add("Content-Type", "application/json")
-          exchange.sendResponseHeaders(200, response.length)
-          val os = exchange.getResponseBody
-          os.write(response)
-          os.close()
-        }
-      }
-    )
-    server.start()
-    try
-      test(server.getAddress.getPort)
-    finally
-      server.stop(0)
-  }
+  private val sseBody = "data: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
 
   // responds only after `delayMs` - used to exercise request-timeout behavior
-  private def withSlowEchoServer(delayMs: Long)(test: Int => Unit): Unit = {
-    val server = HttpServer.create(new InetSocketAddress(0), 0)
-    server.createContext(
-      "/",
-      new HttpHandler {
-        override def handle(exchange: HttpExchange): Unit = {
-          Thread.sleep(delayMs)
-          val response = Json.obj("status" -> "ok").toString.getBytes("UTF-8")
-          exchange.getResponseHeaders.add("Content-Type", "application/json")
-          exchange.sendResponseHeaders(200, response.length)
-          val os = exchange.getResponseBody
-          os.write(response)
-          os.close()
-        }
-      }
-    )
-    server.start()
-    try
-      test(server.getAddress.getPort)
-    finally
-      server.stop(0)
+  private def slowOk(delayMs: Long): HttpExchange => Unit = exchange => {
+    Thread.sleep(delayMs)
+    respond(exchange, 200, """{"status":"ok"}""")
   }
 
   s"$expectedEngineId provider" should {
@@ -274,54 +196,37 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "stream SSE JSON events via StreamedEngineRegistry" in {
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/events",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            val body =
-              "data: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "text/event-stream")
-            exchange.sendResponseHeaders(200, body.length)
-            val os = exchange.getResponseBody
-            os.write(body)
-            os.close()
-          }
+      withServer("/events" -> sse(sseBody)) { port =>
+        val runSystem = org.apache.pekko.actor.ActorSystem("stream-spec-runner")
+        try {
+          val engine = io.cequence.wsclient.service.spi.StreamedEngineRegistry.outputStreamed(
+            TransportSettings(),
+            Some(expectedEngineId)
+          )
+          val site = SiteBinding(s"http://localhost:${port}")
+
+          val events = Await.result(
+            engine
+              .execJsonStream(site, "events", "GET")
+              .runWith(org.apache.pekko.stream.scaladsl.Sink.seq)(
+                org.apache.pekko.stream.Materializer(runSystem)
+              ),
+            30.seconds
+          )
+
+          events shouldBe Seq(Json.obj("i" -> 1), Json.obj("i" -> 2))
+
+          engine.close()
+        } finally {
+          runSystem.terminate()
+          ()
         }
-      )
-      server.start()
-
-      val runSystem = org.apache.pekko.actor.ActorSystem("stream-spec-runner")
-      try {
-        val engine = io.cequence.wsclient.service.spi.StreamedEngineRegistry.outputStreamed(
-          TransportSettings(),
-          Some(expectedEngineId)
-        )
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
-
-        val events = Await.result(
-          engine
-            .execJsonStream(site, "events", "GET")
-            .runWith(org.apache.pekko.stream.scaladsl.Sink.seq)(
-              org.apache.pekko.stream.Materializer(runSystem)
-            ),
-          30.seconds
-        )
-
-        events shouldBe Seq(Json.obj("i" -> 1), Json.obj("i" -> 2))
-
-        engine.close()
-      } finally {
-        server.stop(0)
-        runSystem.terminate()
-        ()
       }
     }
 
     "fail a stream on a non-2xx status instead of parsing the error page" in {
-      io.cequence.wsclient.testkit.TestServers.withServer("/events" -> { exchange =>
-        io.cequence.wsclient.testkit.TestServers
-          .respond(exchange, 401, """{"error":"invalid api key"}""")
+      withServer("/events" -> { exchange =>
+        respond(exchange, 401, """{"error":"invalid api key"}""")
       }) { port =>
         val runSystem = org.apache.pekko.actor.ActorSystem("stream-error-spec-runner")
         try {
@@ -355,32 +260,51 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       }
     }
 
-    "expose the neutral Flow.Publisher contract (cold, [DONE]-terminated)" in {
-      val requestCount = new java.util.concurrent.atomic.AtomicInteger(0)
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/events",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            requestCount.incrementAndGet()
-            val body =
-              "data: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "text/event-stream")
-            exchange.sendResponseHeaders(200, body.length)
-            val os = exchange.getResponseBody
-            os.write(body)
-            os.close()
-          }
-        }
-      )
-      server.start()
-
+    "map a DNS resolution failure to CequenceWSUnknownHostException on a streamed call too" in {
+      // pekko-http reports it as a StreamTcpException CAUSED BY the UnknownHostException (the
+      // unary path classifies on the cause chain - the stream path must too). A host of its
+      // own: pekko-http's host pool keeps retrying a dead host for a while
+      val runSystem = org.apache.pekko.actor.ActorSystem("stream-dns-spec-runner")
       try {
         val engine = io.cequence.wsclient.service.spi.StreamedEngineRegistry.outputStreamed(
           TransportSettings(),
           Some(expectedEngineId)
         )
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
+        val site = SiteBinding("http://nonexistent-host-ws-client-stream-test.invalid")
+
+        val failure = Await.result(
+          engine
+            .execJsonStream(site, "events", "GET")
+            .runWith(org.apache.pekko.stream.scaladsl.Sink.seq)(
+              org.apache.pekko.stream.Materializer(runSystem)
+            )
+            .failed,
+          30.seconds
+        )
+
+        failure shouldBe a[CequenceWSUnknownHostException]
+        // the backend's exception rides along as the cause
+        (ThrowableUtil.hasCause(failure, classOf[java.net.UnknownHostException]) ||
+          ThrowableUtil.hasCause(
+            failure,
+            classOf[java.nio.channels.UnresolvedAddressException]
+          )) shouldBe true
+
+        engine.close()
+      } finally {
+        runSystem.terminate()
+        ()
+      }
+    }
+
+    "expose the neutral Flow.Publisher contract (cold, [DONE]-terminated)" in {
+      val requestCount = new java.util.concurrent.atomic.AtomicInteger(0)
+      withServer("/events" -> sse(sseBody, requestCount)) { port =>
+        val engine = io.cequence.wsclient.service.spi.StreamedEngineRegistry.outputStreamed(
+          TransportSettings(),
+          Some(expectedEngineId)
+        )
+        val site = SiteBinding(s"http://localhost:${port}")
 
         // the same flavored engine also carries the backend-agnostic publisher contract
         val publisher = engine.execJsonStreamPublisher(site, "events", "GET")
@@ -388,46 +312,22 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         Thread.sleep(200)
         requestCount.get() shouldBe 0 // COLD: no request until the first subscribe
 
-        val received =
-          new java.util.concurrent.CopyOnWriteArrayList[play.api.libs.json.JsValue]()
-        val done = new java.util.concurrent.CountDownLatch(1)
-        @volatile var completed = false
+        // a plain Flow.Subscriber - no akka/pekko types involved on the consumer side
+        val subscriber = new LatchedSubscriber[play.api.libs.json.JsValue]
+        publisher.subscribe(subscriber)
 
-        // a hand-rolled subscriber - no akka/pekko types involved on the consumer side
-        publisher.subscribe(
-          new java.util.concurrent.Flow.Subscriber[play.api.libs.json.JsValue] {
-            private var s: java.util.concurrent.Flow.Subscription = _
-            override def onSubscribe(sub: java.util.concurrent.Flow.Subscription): Unit = {
-              s = sub
-              sub.request(1)
-            }
-            override def onNext(item: play.api.libs.json.JsValue): Unit = {
-              received.add(item)
-              s.request(1)
-            }
-            override def onError(t: Throwable): Unit = done.countDown()
-            override def onComplete(): Unit = {
-              completed = true
-              done.countDown()
-            }
-          }
-        )
-
-        done.await(30, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+        subscriber.awaitDone(30) shouldBe true
         requestCount.get() shouldBe 1
-        completed shouldBe true
-        received.size shouldBe 2
-        received.get(0) shouldBe Json.obj("i" -> 1)
-        received.get(1) shouldBe Json.obj("i" -> 2)
+        subscriber.completed shouldBe true
+        subscriber.received shouldBe List(Json.obj("i" -> 1), Json.obj("i" -> 2))
 
         engine.close()
-      } finally
-        server.stop(0)
+      }
     }
 
     "serve two sites through one engine, with correctly isolated auth headers" in {
-      withAuthEchoServer { portA =>
-        withAuthEchoServer { portB =>
+      withEchoServer { portA =>
+        withEchoServer { portB =>
           val testSystem = org.apache.pekko.actor.ActorSystem("pekko-http-engine-spec-sites")
           try {
             val engine = PekkoHttpWSClientEngine()(testSystem, testSystem.dispatcher)
@@ -520,7 +420,7 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "copy(transportSettings) honors the new settings independent of the original" in {
-      withSlowEchoServer(2000) { port =>
+      withServer("/" -> slowOk(1000)) { port =>
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
           .asInstanceOf[PekkoHttpWSClientEngine]
         val site = SiteBinding(s"http://localhost:$port")
@@ -534,7 +434,7 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
           10.seconds
         )
 
-        // the original engine's (much longer) default timeout tolerates the same 2s delay
+        // the original engine's (much longer) default timeout tolerates the same 1 s delay
         val response = Await.result(
           engine.execGETRich(site, "ping").map(engine.getResponseOrError),
           30.seconds
@@ -597,24 +497,7 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "a copy still streams SSE, with a static return type of PekkoHttpWSClientEngine" in {
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/events",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            val body =
-              "data: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "text/event-stream")
-            exchange.sendResponseHeaders(200, body.length)
-            val os = exchange.getResponseBody
-            os.write(body)
-            os.close()
-          }
-        }
-      )
-      server.start()
-
-      try {
+      withServer("/events" -> sse(sseBody)) { port =>
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
           .asInstanceOf[PekkoHttpWSClientEngine]
 
@@ -622,7 +505,7 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         // its streaming methods (mixed in via WSClientOutputStreamExtraPekko) are available
         // directly
         val copy: PekkoHttpWSClientEngine = engine.copy()
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
+        val site = SiteBinding(s"http://localhost:${port}")
 
         val events = Await.result(
           copy
@@ -637,8 +520,7 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
         copy.close()
         engine.close()
-      } finally
-        server.stop(0)
+      }
     }
   }
 }

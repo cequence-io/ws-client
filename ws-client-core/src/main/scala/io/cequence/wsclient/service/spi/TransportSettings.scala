@@ -29,9 +29,12 @@ import io.cequence.wsclient.service.ws.Timeouts
  * @param timeouts
  *   connect/read/request/pooled-idle timeouts baked into the client/backend (see above)
  * @param proxyURL
- *   proxy to route requests through - accepted forms are "host:port" and
- *   "http(s)://host:port". Honored by the Play, jdk, sttp and zio-http backends (zio-http
- *   tunnels via `CONNECT` and still resolves the TARGET host through local DNS); the
+ *   proxy to route requests through - accepted forms are "host:port" and "scheme://host:port".
+ *   Only the host and port are used: the proxy is always spoken to as a plain HTTP proxy (an
+ *   `https://` scheme does NOT make the connection to the proxy TLS - `https` targets are
+ *   still tunnelled through it), and credentials, path or query in the URL are ignored (proxy
+ *   authentication is not supported). Honored by the Play, jdk, sttp and zio-http backends
+ *   (zio-http tunnels via `CONNECT` and still resolves the TARGET host through local DNS); the
  *   pekko-http backend ignores it with a warning. A proxy is a property of the client: all
  *   sites served through one engine go through the same proxy.
  */

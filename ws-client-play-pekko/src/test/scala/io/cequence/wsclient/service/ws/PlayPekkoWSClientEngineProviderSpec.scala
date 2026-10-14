@@ -1,18 +1,34 @@
 package io.cequence.wsclient.service.ws
 
-import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
-import io.cequence.wsclient.domain.{SiteBinding, WsRequestContext}
+import com.sun.net.httpserver.HttpExchange
+import io.cequence.wsclient.domain.{CequenceWSTimeoutException, SiteBinding, WsRequestContext}
 import io.cequence.wsclient.service.spi.{
   EngineCapability,
   TransportSettings,
   WSClientEngineRegistry
 }
-import io.cequence.wsclient.testkit.TestServers.withEchoServer
+import io.cequence.wsclient.testkit.TestServers.{
+  negotiatedProtocol,
+  respond,
+  selfSignedKeyStore,
+  tlsAttempt,
+  tlsProtocol,
+  withDefaultTrustStore,
+  withDumbProxy,
+  withEchoServer,
+  withServer,
+  withSystemProperties,
+  withTlsServer,
+  withTrustingEngine
+}
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
-import play.api.libs.json.{JsString, Json}
+import play.api.libs.json.JsString
+import play.shaded.ahc.org.asynchttpclient.config.AsyncHttpClientConfigHelper
 
-import java.net.InetSocketAddress
+import java.net.URI
+import java.net.http.{HttpClient, HttpRequest, HttpResponse}
+import javax.net.ssl.SSLContext
 import scala.concurrent.Await
 import scala.concurrent.duration._
 
@@ -23,74 +39,18 @@ class PlayPekkoWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
   private val expectedEngineId = "play-pekko"
 
-  // echoes the raw query string back as JSON
-  private def withQueryEchoServer(test: (Int) => Unit): Unit = {
-    val server = HttpServer.create(new InetSocketAddress(0), 0)
-    server.createContext(
-      "/",
-      new HttpHandler {
-        override def handle(exchange: HttpExchange): Unit = {
-          val query = Option(exchange.getRequestURI.getRawQuery).getOrElse("")
-          val auth = Option(exchange.getRequestHeaders.getFirst("Authorization")).getOrElse("")
-          val response =
-            Json.obj("query" -> query, "auth" -> auth).toString.getBytes("UTF-8")
-          exchange.getResponseHeaders.add("Content-Type", "application/json")
-          exchange.sendResponseHeaders(200, response.length)
-          val os = exchange.getResponseBody
-          os.write(response)
-          os.close()
-        }
-      }
-    )
-    server.start()
-    try
-      test(server.getAddress.getPort)
-    finally
-      server.stop(0)
-  }
+  private val ping: HttpExchange => Unit = respond(_, 200, """{"status":"ok"}""")
 
-  // a single-connection HTTP proxy stub: captures the request line (absolute-form for proxied
-  // plain-http requests) and answers with a fixed JSON response
-  private def withDumbProxy(test: (Int, () => String) => Unit): Unit = {
-    val server = new java.net.ServerSocket(0)
-    @volatile var requestLine = ""
+  private lazy val keyStore = selfSignedKeyStore()
 
-    val thread = new Thread(new Runnable {
-      override def run(): Unit =
-        try {
-          // serve until the test closes the server socket - some clients probe with an
-          // extra connection, so a single accept would be flaky
-          while (true) {
-            val socket = server.accept()
-            try {
-              val in = new java.io.BufferedReader(
-                new java.io.InputStreamReader(socket.getInputStream, "UTF-8")
-              )
-              val firstLine = in.readLine()
-              if (firstLine != null && requestLine.isEmpty) requestLine = firstLine
-              // drain the headers
-              var line = in.readLine()
-              while (line != null && line.nonEmpty) line = in.readLine()
+  private val AhcEnabledProtocolsKey = "play.shaded.ahc.org.asynchttpclient.enabledProtocols"
 
-              val body = """{"status":"proxied"}"""
-              val response =
-                s"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n$body"
-              socket.getOutputStream.write(response.getBytes("UTF-8"))
-              socket.getOutputStream.flush()
-            } finally
-              socket.close()
-          }
-        } catch {
-          case _: Throwable => // server closed by the test - nothing to do
-        }
-    })
-    thread.start()
-
-    try
-      test(server.getLocalPort, () => requestLine)
-    finally
-      server.close()
-  }
+  // the shaded AHC caches its properties: reload after every change (and after the restore)
+  private def withAhcEnabledProtocols[T](value: Option[String])(body: => T): T =
+    withSystemProperties(
+      Seq(AhcEnabledProtocolsKey -> value),
+      AsyncHttpClientConfigHelper.reloadProperties()
+    )(body)
 
   s"$expectedEngineId provider" should {
 
@@ -107,25 +67,9 @@ class PlayPekkoWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "create a working engine that can GET, and close idempotently" in {
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/ping",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            val response = """{"status":"ok"}""".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, response.length)
-            val os = exchange.getResponseBody
-            os.write(response)
-            os.close()
-          }
-        }
-      )
-      server.start()
-
-      try {
+      withServer("/ping" -> ping) { port =>
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
+        val site = SiteBinding(s"http://localhost:${port}")
 
         val response = Await.result(
           engine.execGETRich(site, "ping").map(engine.getResponseOrError),
@@ -135,8 +79,131 @@ class PlayPekkoWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
         engine.close()
         noException should be thrownBy engine.close()
+      }
+    }
+
+    "create its client without initializing the JVM default SSLContext" in {
+      // a client on SSLContext.getDefault (java.net.http, HttpsURLConnection - the jdk / sttp
+      // engines) must still pick up a trust store configured AFTER this engine's first request:
+      // the engine reads the JDK's protocol list from a throwaway context, never getDefault
+      withServer("/ping" -> ping) { port =>
+        val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+        try
+          Await.result(
+            engine
+              .execGETRich(SiteBinding(s"http://localhost:$port"), "ping")
+              .map(engine.getResponseOrError),
+            30.seconds
+          )
+        finally
+          engine.close()
+      }
+
+      withTlsServer(keyStore, Seq("TLSv1.3", "TLSv1.2"))("/" -> tlsProtocol) { port =>
+        withDefaultTrustStore(keyStore) {
+          val response = HttpClient
+            .newHttpClient()
+            .send(
+              HttpRequest.newBuilder(URI.create(s"https://localhost:$port/tls")).build(),
+              HttpResponse.BodyHandlers.ofString()
+            )
+          response.statusCode shouldBe 200
+        }
+      }
+    }
+
+    "speak TLS 1.3 (TLS-1.3-only hosts) and TLS 1.2, preferring 1.3" in {
+      withTrustingEngine(keyStore, expectedEngineId) { engine =>
+        negotiatedProtocol(engine, keyStore, Seq("TLSv1.3")) shouldBe "TLSv1.3"
+        negotiatedProtocol(engine, keyStore, Seq("TLSv1.2")) shouldBe "TLSv1.2"
+        negotiatedProtocol(engine, keyStore, Seq("TLSv1.3", "TLSv1.2")) shouldBe "TLSv1.3"
+      }
+    }
+
+    "leave an explicitly configured AHC enabledProtocols list in force" in {
+      // the no-code way to pin the protocols (also what enables TLS 1.3 on ws-client <= 1.1.1)
+      withAhcEnabledProtocols(Some("TLSv1.2")) {
+        withTrustingEngine(keyStore, expectedEngineId) { engine =>
+          negotiatedProtocol(engine, keyStore, Seq("TLSv1.3", "TLSv1.2")) shouldBe "TLSv1.2"
+        }
+      }
+    }
+
+    "offer the JDK's default TLS client protocols unless AHC's enabledProtocols is configured" in {
+      val jdkClientProtocols = SSLContext.getDefault.getDefaultSSLParameters.getProtocols.toSeq
+
+      // AHC's shipped default is replaced (a changed shipped default would show up here)
+      withAhcEnabledProtocols(None) {
+        PlayWSClientEngine.tlsProtocols.map(_.toSeq) shouldBe Some(jdkClientProtocols)
+      }
+      // an explicit list stays in force: an empty one too (it means "Netty's defaults"), and
+      // one that merely repeats AHC's shipped default
+      Seq("TLSv1.2", "", "TLSv1.2, TLSv1.1, TLSv1").foreach { configured =>
+        withAhcEnabledProtocols(Some(configured)) {
+          PlayWSClientEngine.tlsProtocols shouldBe None
+        }
+      }
+    }
+
+    "treat an enabledProtocols key in the custom ahc.properties as configured, whatever its value" in {
+      // the shaded AHC reads that resource relative to its config package - the lookup the
+      // engine uses too, proven by finding AHC's own shipped defaults there
+      PlayWSClientEngine
+        .ahcConfigResource("ahc-default.properties")
+        .map(_.getProperty(AhcEnabledProtocolsKey).replace(" ", "")) shouldBe
+        Some("TLSv1.2,TLSv1.1,TLSv1")
+      PlayWSClientEngine.customAhcProperties shouldBe None // none on this test classpath
+
+      def properties(entries: (String, String)*) = {
+        val result = new java.util.Properties
+        entries.foreach { case (key, value) => result.setProperty(key, value) }
+        result
+      }
+
+      withAhcEnabledProtocols(None) {
+        // the key set to exactly the shipped list is still an explicit choice
+        PlayWSClientEngine.tlsProtocols(
+          Some(properties(AhcEnabledProtocolsKey -> "TLSv1.2,TLSv1.1,TLSv1"))
+        ) shouldBe None
+        // an unrelated ahc.properties is not
+        PlayWSClientEngine
+          .tlsProtocols(
+            Some(properties("play.shaded.ahc.org.asynchttpclient.maxConnections" -> "5"))
+          )
+          .isDefined shouldBe true
+      }
+    }
+
+    "reject a server certificate the JVM does not trust" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try {
+        val attempt = tlsAttempt(engine, keyStore, Seq("TLSv1.3", "TLSv1.2"))
+        attempt.result match {
+          case Left(failure) => failure should not be a[CequenceWSTimeoutException]
+          case Right(protocol) =>
+            fail(s"accepted an untrusted certificate (negotiated $protocol)")
+        }
+        attempt.served shouldBe 0
       } finally
-        server.stop(0)
+        engine.close()
+    }
+
+    "reject a trusted certificate that does not name the host" in {
+      // a certificate for localhost only (no IP SAN): fine via localhost, rejected via 127.0.0.1
+      val localhostOnly = selfSignedKeyStore(Seq("dns:localhost"))
+
+      withTrustingEngine(localhostOnly, expectedEngineId) { engine =>
+        negotiatedProtocol(engine, localhostOnly, Seq("TLSv1.3")) shouldBe "TLSv1.3"
+
+        val attempt =
+          tlsAttempt(engine, localhostOnly, Seq("TLSv1.3", "TLSv1.2"), host = "127.0.0.1")
+        attempt.result match {
+          case Left(failure) => failure should not be a[CequenceWSTimeoutException]
+          case Right(protocol) =>
+            fail(s"accepted a certificate that does not name the host (negotiated $protocol)")
+        }
+        attempt.served shouldBe 0
+      }
     }
 
     "POST repeated form keys in an in-memory multipart body, and a streamed one under the file's base name" in {
@@ -205,7 +272,7 @@ class PlayPekkoWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "merge query params with a query already embedded in the endpoint" in {
-      withQueryEchoServer { port =>
+      withEchoServer { port =>
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
         val site = SiteBinding(s"http://localhost:$port")
 
@@ -229,7 +296,7 @@ class PlayPekkoWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     }
 
     "re-evaluate a dynamic request context on every request" in {
-      withQueryEchoServer { port =>
+      withEchoServer { port =>
         // simulates a token refresh happening between two requests
         @volatile var token = "t1"
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))

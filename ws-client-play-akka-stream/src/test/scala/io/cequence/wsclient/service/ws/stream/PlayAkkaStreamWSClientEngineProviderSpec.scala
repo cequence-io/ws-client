@@ -3,7 +3,7 @@ package io.cequence.wsclient.service.ws.stream
 import akka.actor.ActorSystem
 import akka.stream.Materializer
 import akka.stream.scaladsl.Sink
-import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
+import com.sun.net.httpserver.HttpExchange
 import io.cequence.wsclient.domain.{
   CequenceWSException,
   CequenceWSTimeoutException,
@@ -16,11 +16,12 @@ import io.cequence.wsclient.service.spi.{
   WSClientEngineRegistry
 }
 import io.cequence.wsclient.service.ws.Timeouts
+import io.cequence.wsclient.testkit.LatchedSubscriber
+import io.cequence.wsclient.testkit.TestServers.{echo, respond, sse, withServer}
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 import play.api.libs.json.{JsString, Json}
 
-import java.net.InetSocketAddress
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration._
 
@@ -31,6 +32,15 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
 
   private val expectedEngineId = "play-akka-stream"
   private val expectedBaseEngineId = "play-akka"
+
+  private val sseBody = "data: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
+
+  private val ping: HttpExchange => Unit = respond(_, 200, """{"status":"ok"}""")
+
+  private val slowPing: HttpExchange => Unit = exchange => {
+    Thread.sleep(1000)
+    respond(exchange, 200, """{"status":"ok"}""")
+  }
 
   s"$expectedEngineId provider" should {
 
@@ -48,48 +58,32 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
     }
 
     "stream SSE JSON events via StreamedEngineRegistry and close idempotently" in {
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/events",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            val body =
-              "data: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "text/event-stream")
-            exchange.sendResponseHeaders(200, body.length)
-            val os = exchange.getResponseBody
-            os.write(body)
-            os.close()
-          }
+      withServer("/events" -> sse(sseBody)) { port =>
+        val runSystem = ActorSystem("stream-spec-runner")
+        try {
+          val engine = StreamedEngineRegistry.outputStreamed(
+            TransportSettings(),
+            Some(expectedEngineId)
+          )
+          val site = SiteBinding(s"http://localhost:${port}")
+
+          val events = Await.result(
+            engine
+              .execJsonStream(site, "events", "GET")
+              .runWith(Sink.seq)(
+                akka.stream.Materializer(runSystem)
+              ),
+            30.seconds
+          )
+
+          events shouldBe Seq(Json.obj("i" -> 1), Json.obj("i" -> 2))
+
+          engine.close()
+          noException should be thrownBy engine.close()
+        } finally {
+          runSystem.terminate()
+          ()
         }
-      )
-      server.start()
-
-      val runSystem = ActorSystem("stream-spec-runner")
-      try {
-        val engine = StreamedEngineRegistry.outputStreamed(
-          TransportSettings(),
-          Some(expectedEngineId)
-        )
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
-
-        val events = Await.result(
-          engine
-            .execJsonStream(site, "events", "GET")
-            .runWith(Sink.seq)(
-              akka.stream.Materializer(runSystem)
-            ),
-          30.seconds
-        )
-
-        events shouldBe Seq(Json.obj("i" -> 1), Json.obj("i" -> 2))
-
-        engine.close()
-        noException should be thrownBy engine.close()
-      } finally {
-        server.stop(0)
-        runSystem.terminate()
-        ()
       }
     }
 
@@ -128,9 +122,8 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
     }
 
     "classify a stream's non-2xx status through the service's handleErrorCodes" in {
-      io.cequence.wsclient.testkit.TestServers.withServer("/events" -> { exchange =>
-        io.cequence.wsclient.testkit.TestServers
-          .respond(exchange, 429, """{"error":"slow down"}""")
+      withServer("/events" -> { exchange =>
+        respond(exchange, 429, """{"error":"slow down"}""")
       }) { port =>
         val runSystem = akka.actor.ActorSystem("stream-classify-spec-runner")
         try {
@@ -164,9 +157,8 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
     }
 
     "fail a stream on a non-2xx status instead of parsing the error page" in {
-      io.cequence.wsclient.testkit.TestServers.withServer("/events" -> { exchange =>
-        io.cequence.wsclient.testkit.TestServers
-          .respond(exchange, 401, """{"error":"invalid api key"}""")
+      withServer("/events" -> { exchange =>
+        respond(exchange, 401, """{"error":"invalid api key"}""")
       }) { port =>
         val runSystem = akka.actor.ActorSystem("stream-error-spec-runner")
         try {
@@ -202,30 +194,12 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
 
     "expose the neutral Flow.Publisher contract (cold, [DONE]-terminated)" in {
       val requestCount = new java.util.concurrent.atomic.AtomicInteger(0)
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/events",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            requestCount.incrementAndGet()
-            val body =
-              "data: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "text/event-stream")
-            exchange.sendResponseHeaders(200, body.length)
-            val os = exchange.getResponseBody
-            os.write(body)
-            os.close()
-          }
-        }
-      )
-      server.start()
-
-      try {
+      withServer("/events" -> sse(sseBody, requestCount)) { port =>
         val engine = StreamedEngineRegistry.outputStreamed(
           TransportSettings(),
           Some(expectedEngineId)
         )
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
+        val site = SiteBinding(s"http://localhost:${port}")
 
         // the same flavored engine also carries the backend-agnostic publisher contract
         val publisher = engine.execJsonStreamPublisher(site, "events", "GET")
@@ -233,67 +207,26 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
         Thread.sleep(200)
         requestCount.get() shouldBe 0 // COLD: no request until the first subscribe
 
-        val received =
-          new java.util.concurrent.CopyOnWriteArrayList[play.api.libs.json.JsValue]()
-        val done = new java.util.concurrent.CountDownLatch(1)
-        @volatile var completed = false
+        // a plain Flow.Subscriber - no akka/pekko types involved on the consumer side
+        val subscriber = new LatchedSubscriber[play.api.libs.json.JsValue]
+        publisher.subscribe(subscriber)
 
-        // a hand-rolled subscriber - no akka/pekko types involved on the consumer side
-        publisher.subscribe(
-          new java.util.concurrent.Flow.Subscriber[play.api.libs.json.JsValue] {
-            private var s: java.util.concurrent.Flow.Subscription = _
-            override def onSubscribe(sub: java.util.concurrent.Flow.Subscription): Unit = {
-              s = sub
-              sub.request(1)
-            }
-            override def onNext(item: play.api.libs.json.JsValue): Unit = {
-              received.add(item)
-              s.request(1)
-            }
-            override def onError(t: Throwable): Unit = done.countDown()
-            override def onComplete(): Unit = {
-              completed = true
-              done.countDown()
-            }
-          }
-        )
-
-        done.await(30, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+        subscriber.awaitDone(30) shouldBe true
         requestCount.get() shouldBe 1
-        completed shouldBe true
-        received.size shouldBe 2
-        received.get(0) shouldBe Json.obj("i" -> 1)
-        received.get(1) shouldBe Json.obj("i" -> 2)
+        subscriber.completed shouldBe true
+        subscriber.received shouldBe List(Json.obj("i" -> 1), Json.obj("i" -> 2))
 
         engine.close()
-      } finally
-        server.stop(0)
+      }
     }
 
     "stream a request body via StreamedEngineRegistry.inputStreamed" in {
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            val requestBody = new String(exchange.getRequestBody.readAllBytes(), "UTF-8")
-            val response = Json.obj("body" -> requestBody).toString.getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, response.length)
-            val os = exchange.getResponseBody
-            os.write(response)
-            os.close()
-          }
-        }
-      )
-      server.start()
-
-      try {
+      withServer("/" -> echo) { port =>
         val engine = StreamedEngineRegistry.inputStreamed(
           TransportSettings(),
           Some(expectedEngineId)
         )
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
+        val site = SiteBinding(s"http://localhost:${port}")
 
         val source = akka.stream.scaladsl.Source(
           List(akka.util.ByteString("hello-"), akka.util.ByteString("stream"))
@@ -308,97 +241,49 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
         (response.json \ "body").get shouldBe JsString("hello-stream")
 
         engine.close()
-      } finally
-        server.stop(0)
+      }
     }
 
     "share one engine across a plain-GET site and an SSE-streaming site" in {
-      val pingServer = HttpServer.create(new InetSocketAddress(0), 0)
-      pingServer.createContext(
-        "/ping",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            val response = """{"status":"ok"}""".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, response.length)
-            val os = exchange.getResponseBody
-            os.write(response)
-            os.close()
+      withServer("/ping" -> ping) { pingPort =>
+        withServer("/events" -> sse(sseBody)) { eventsPort =>
+          val system = ActorSystem("play-akka-stream-engine-sharing-spec")
+          implicit val materializer: Materializer = Materializer(system)
+          implicit val ec: ExecutionContext = system.dispatcher
+
+          val engine = new PlayWSStreamClientEngine()
+          try {
+            // a plain (unary) site - shares the engine's client with the streaming site
+            val pingSite = SiteBinding(s"http://localhost:${pingPort}")
+            // a DIFFERENT site for the Source-typed streaming call, same shared engine
+            val eventsSite = SiteBinding(s"http://localhost:${eventsPort}")
+
+            val pingResponse = Await.result(
+              engine.execGETRich(pingSite, "ping").map(engine.getResponseOrError),
+              30.seconds
+            )
+            (pingResponse.json \ "status").get shouldBe JsString("ok")
+
+            val events = Await.result(
+              engine.execJsonStream(eventsSite, "events", "GET").runWith(Sink.seq),
+              30.seconds
+            )
+            events shouldBe Seq(Json.obj("i" -> 1), Json.obj("i" -> 2))
+          } finally {
+            engine.close()
+            system.terminate()
+            ()
           }
         }
-      )
-      pingServer.start()
-
-      val eventsServer = HttpServer.create(new InetSocketAddress(0), 0)
-      eventsServer.createContext(
-        "/events",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            val body =
-              "data: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "text/event-stream")
-            exchange.sendResponseHeaders(200, body.length)
-            val os = exchange.getResponseBody
-            os.write(body)
-            os.close()
-          }
-        }
-      )
-      eventsServer.start()
-
-      val system = ActorSystem("play-akka-stream-engine-sharing-spec")
-      implicit val materializer: Materializer = Materializer(system)
-      implicit val ec: ExecutionContext = system.dispatcher
-
-      val engine = new PlayWSStreamClientEngine()
-      try {
-        // a plain (unary) site - shares the engine's client with the streaming site
-        val pingSite = SiteBinding(s"http://localhost:${pingServer.getAddress.getPort}")
-        // a DIFFERENT site for the Source-typed streaming call, same shared engine
-        val eventsSite = SiteBinding(s"http://localhost:${eventsServer.getAddress.getPort}")
-
-        val pingResponse = Await.result(
-          engine.execGETRich(pingSite, "ping").map(engine.getResponseOrError),
-          30.seconds
-        )
-        (pingResponse.json \ "status").get shouldBe JsString("ok")
-
-        val events = Await.result(
-          engine.execJsonStream(eventsSite, "events", "GET").runWith(Sink.seq),
-          30.seconds
-        )
-        events shouldBe Seq(Json.obj("i" -> 1), Json.obj("i" -> 2))
-      } finally {
-        engine.close()
-        system.terminate()
-        pingServer.stop(0)
-        eventsServer.stop(0)
-        ()
       }
     }
 
     "copy() with reuseExecContext=true (default) shares this engine's actor system" in {
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/ping",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            val response = """{"status":"ok"}""".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, response.length)
-            val os = exchange.getResponseBody
-            os.write(response)
-            os.close()
-          }
-        }
-      )
-      server.start()
-
-      try {
+      withServer("/ping" -> ping) { port =>
         val engine = StreamedEngineRegistry
           .outputStreamed(TransportSettings(), Some(expectedEngineId))
           .asInstanceOf[PlayWSStreamClientEngine]
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
+        val site = SiteBinding(s"http://localhost:${port}")
 
         val copy = engine.copy()
 
@@ -422,33 +307,15 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
         val system = engine.materializer.system
         engine.close()
         Await.result(system.whenTerminated, 10.seconds)
-      } finally
-        server.stop(0)
+      }
     }
 
     "copy(transportSettings) honors the new settings independent of the original" in {
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/ping",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            Thread.sleep(2000)
-            val response = """{"status":"ok"}""".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, response.length)
-            val os = exchange.getResponseBody
-            os.write(response)
-            os.close()
-          }
-        }
-      )
-      server.start()
-
-      try {
+      withServer("/ping" -> slowPing) { port =>
         val engine = StreamedEngineRegistry
           .outputStreamed(TransportSettings(), Some(expectedEngineId))
           .asInstanceOf[PlayWSStreamClientEngine]
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
+        val site = SiteBinding(s"http://localhost:${port}")
 
         val tightTimeoutCopy = engine.copy(
           transportSettings = TransportSettings(Timeouts(requestTimeout = Some(300)))
@@ -459,7 +326,7 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
           10.seconds
         )
 
-        // the original engine's (much longer) default timeout tolerates the same 2s delay
+        // the original engine's (much longer) default timeout tolerates the same 1 s delay
         val response = Await.result(
           engine.execGETRich(site, "ping").map(engine.getResponseOrError),
           30.seconds
@@ -468,32 +335,15 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
 
         tightTimeoutCopy.close()
         engine.close()
-      } finally
-        server.stop(0)
+      }
     }
 
     "copy(reuseExecContext = false) creates an independent, daemonic actor system" in {
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/ping",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            val response = """{"status":"ok"}""".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, response.length)
-            val os = exchange.getResponseBody
-            os.write(response)
-            os.close()
-          }
-        }
-      )
-      server.start()
-
-      try {
+      withServer("/ping" -> ping) { port =>
         val engine = StreamedEngineRegistry
           .outputStreamed(TransportSettings(), Some(expectedEngineId))
           .asInstanceOf[PlayWSStreamClientEngine]
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
+        val site = SiteBinding(s"http://localhost:${port}")
 
         val independentCopy = engine.copy(reuseExecContext = false)
 
@@ -523,8 +373,7 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
         )
 
         engine.close()
-      } finally
-        server.stop(0)
+      }
     }
 
     "copy(reuseExecContext = false) on a caller-supplied (apply-created) engine throws" in {
@@ -543,24 +392,7 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
     }
 
     "a copy still streams SSE, with a static return type of PlayWSStreamClientEngine" in {
-      val server = HttpServer.create(new InetSocketAddress(0), 0)
-      server.createContext(
-        "/events",
-        new HttpHandler {
-          override def handle(exchange: HttpExchange): Unit = {
-            val body =
-              "data: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n".getBytes("UTF-8")
-            exchange.getResponseHeaders.add("Content-Type", "text/event-stream")
-            exchange.sendResponseHeaders(200, body.length)
-            val os = exchange.getResponseBody
-            os.write(body)
-            os.close()
-          }
-        }
-      )
-      server.start()
-
-      try {
+      withServer("/events" -> sse(sseBody)) { port =>
         val engine = StreamedEngineRegistry
           .outputStreamed(TransportSettings(), Some(expectedEngineId))
           .asInstanceOf[PlayWSStreamClientEngine]
@@ -569,7 +401,7 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
         // its streaming methods (mixed in via WSClientOutputStreamExtraAkka) are available
         // directly
         val copy: PlayWSStreamClientEngine = engine.copy()
-        val site = SiteBinding(s"http://localhost:${server.getAddress.getPort}")
+        val site = SiteBinding(s"http://localhost:${port}")
 
         val events = Await.result(
           copy.execJsonStream(site, "events", "GET").runWith(Sink.seq)(copy.materializer),
@@ -579,8 +411,7 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
 
         copy.close()
         engine.close()
-      } finally
-        server.stop(0)
+      }
     }
   }
 }
