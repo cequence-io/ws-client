@@ -19,6 +19,7 @@ import org.scalatest.wordspec.AnyWordSpec
 import io.cequence.wsclient.testkit.LatchedSubscriber
 import io.cequence.wsclient.testkit.TestServers.{
   respond,
+  sse,
   withDumbProxy,
   withEchoServer,
   withServer
@@ -398,6 +399,52 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     // anywhere (this module cannot even reference akka/pekko - enforced at compile
     // time by its dependency set)
     // ---------------------------------------------------------------------------
+
+    "ignore SSE comment frames (keep-alives such as OpenRouter's ': OPENROUTER PROCESSING')" in {
+      // OpenRouter-style keep-alive comments while a slow model works, before and between events
+      val body =
+        ": OPENROUTER PROCESSING\n\n: OPENROUTER PROCESSING\n\ndata: {\"i\":1}\n\n: OPENROUTER PROCESSING\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
+      withServer("/events" -> sse(body)) { port =>
+        val engine =
+          WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+        val subscriber = new LatchedSubscriber[JsValue]
+        engine
+          .execJsonStreamPublisher(SiteBinding(s"http://localhost:$port"), "events", "GET")
+          .subscribe(subscriber)
+        subscriber.awaitDone(30) shouldBe true
+
+        subscriber.received shouldBe List(Json.obj("i" -> 1), Json.obj("i" -> 2))
+        subscriber.completed shouldBe true
+        subscriber.error shouldBe None
+
+        engine.close()
+      }
+    }
+
+    "stream CRLF-terminated SSE with comment frames and data: without a space (framingDelimiter)" in {
+      val body =
+        ": OPENROUTER PROCESSING\r\n\r\ndata: {\"i\":1}\r\n\r\ndata:{\"i\":2}\r\n\r\ndata: [DONE]\r\n\r\n"
+      withServer("/events" -> sse(body)) { port =>
+        val engine =
+          WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+        val subscriber = new LatchedSubscriber[JsValue]
+        engine
+          .execJsonStreamPublisher(
+            SiteBinding(s"http://localhost:$port"),
+            "events",
+            "GET",
+            framingDelimiter = "\r\n\r\n"
+          )
+          .subscribe(subscriber)
+        subscriber.awaitDone(30) shouldBe true
+
+        subscriber.received shouldBe List(Json.obj("i" -> 1), Json.obj("i" -> 2))
+        subscriber.completed shouldBe true
+        subscriber.error shouldBe None
+
+        engine.close()
+      }
+    }
 
     "stream SSE JSON events through WSClientEngineRegistry.outputStreamed, lazily, up to [DONE]" in {
       val requestCount = new java.util.concurrent.atomic.AtomicInteger(0)

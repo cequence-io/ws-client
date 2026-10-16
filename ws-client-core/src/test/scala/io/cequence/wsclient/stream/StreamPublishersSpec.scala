@@ -199,6 +199,17 @@ class StreamPublishersSpec extends AnyWordSpec with Matchers {
       s.error shouldBe None
     }
 
+    "ignore SSE comment frames (keep-alives) and blank frames" in {
+      val s = jsonStream(
+        chunks(
+          "data: {\"i\":1}\n\n: OPENROUTER PROCESSING\n\n\n\n: ping\r\n\r\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
+        )
+      )
+      s.received.toList shouldBe List(Json.obj("i" -> 1), Json.obj("i" -> 2))
+      s.completed shouldBe true
+      s.error shouldBe None
+    }
+
     "strip a prefix and suffix (Gemini array style)" in {
       val s = jsonStream(
         chunks("[{\"i\":1}\n,\r\n{\"i\":2}]\n,\r\n"),

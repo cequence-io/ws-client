@@ -35,6 +35,10 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
 
   private val sseBody = "data: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
 
+  // OpenRouter-style keep-alive comments while a slow model works, before and between events
+  private val sseBodyWithComments =
+    ": OPENROUTER PROCESSING\n\n: OPENROUTER PROCESSING\n\ndata: {\"i\":1}\n\n: OPENROUTER PROCESSING\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
+
   private val ping: HttpExchange => Unit = respond(_, 200, """{"status":"ok"}""")
 
   private val slowPing: HttpExchange => Unit = exchange => {
@@ -55,6 +59,62 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
       )
 
       WSClientEngineRegistry.provider().engineId shouldBe expectedEngineId
+    }
+
+    "ignore SSE comment frames (keep-alives such as OpenRouter's ': OPENROUTER PROCESSING')" in {
+      withServer("/events" -> sse(sseBodyWithComments)) { port =>
+        val runSystem = ActorSystem("stream-spec-runner")
+        try {
+          val engine = StreamedEngineRegistry.outputStreamed(
+            TransportSettings(),
+            Some(expectedEngineId)
+          )
+          val site = SiteBinding(s"http://localhost:${port}")
+
+          val events = Await.result(
+            engine
+              .execJsonStream(site, "events", "GET")
+              .runWith(Sink.seq)(akka.stream.Materializer(runSystem)),
+            30.seconds
+          )
+
+          events shouldBe Seq(Json.obj("i" -> 1), Json.obj("i" -> 2))
+
+          engine.close()
+        } finally {
+          runSystem.terminate()
+          ()
+        }
+      }
+    }
+
+    "stream CRLF-terminated SSE with comment frames and data: without a space (framingDelimiter)" in {
+      val body =
+        ": OPENROUTER PROCESSING\r\n\r\ndata: {\"i\":1}\r\n\r\ndata:{\"i\":2}\r\n\r\ndata: [DONE]\r\n\r\n"
+      withServer("/events" -> sse(body)) { port =>
+        val runSystem = ActorSystem("stream-spec-runner")
+        try {
+          val engine = StreamedEngineRegistry.outputStreamed(
+            TransportSettings(),
+            Some(expectedEngineId)
+          )
+          val site = SiteBinding(s"http://localhost:${port}")
+
+          val events = Await.result(
+            engine
+              .execJsonStream(site, "events", "GET", framingDelimiter = "\r\n\r\n")
+              .runWith(Sink.seq)(akka.stream.Materializer(runSystem)),
+            30.seconds
+          )
+
+          events shouldBe Seq(Json.obj("i" -> 1), Json.obj("i" -> 2))
+
+          engine.close()
+        } finally {
+          runSystem.terminate()
+          ()
+        }
+      }
     }
 
     "stream SSE JSON events via StreamedEngineRegistry and close idempotently" in {

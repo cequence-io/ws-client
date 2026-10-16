@@ -94,7 +94,7 @@ private[wsclient] object StreamTransformers {
 
   /**
    * Parses delimited frames into JSON events with the shared [[JsonStreamFrames]] semantics;
-   * terminates the stream early at the `[DONE]` sentinel.
+   * ignores comment / blank frames and terminates the stream early at the `[DONE]` sentinel.
    */
   final class JsonFrameParser(
     stripPrefix: Option[String],
@@ -108,6 +108,7 @@ private[wsclient] object StreamTransformers {
 
       JsonStreamFrames.parseFrame(frame, stripPrefix, stripSuffix) match {
         case JsonStreamFrames.EndOfStream     => StreamTransformer.Output(Nil, done = true)
+        case JsonStreamFrames.Skip            => StreamTransformer.Output(Nil)
         case JsonStreamFrames.JsonFrame(json) => StreamTransformer.Output(Seq(json))
       }
     }
