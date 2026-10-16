@@ -28,6 +28,10 @@ class PlayPekkoStreamWSClientEngineProviderSpec extends AnyWordSpec with Matcher
 
   private val sseBody = "data: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
 
+  // OpenRouter-style keep-alive comments while a slow model works, before and between events
+  private val sseBodyWithComments =
+    ": OPENROUTER PROCESSING\n\n: OPENROUTER PROCESSING\n\ndata: {\"i\":1}\n\n: OPENROUTER PROCESSING\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
+
   s"$expectedEngineId provider" should {
 
     "be discovered alongside the base engine and win auto-selection" in {
@@ -41,6 +45,33 @@ class PlayPekkoStreamWSClientEngineProviderSpec extends AnyWordSpec with Matcher
       )
 
       WSClientEngineRegistry.provider().engineId shouldBe expectedEngineId
+    }
+
+    "ignore SSE comment frames (keep-alives such as OpenRouter's ': OPENROUTER PROCESSING')" in {
+      withServer("/events" -> sse(sseBodyWithComments)) { port =>
+        val runSystem = ActorSystem("stream-spec-runner")
+        try {
+          val engine = StreamedEngineRegistry.outputStreamed(
+            TransportSettings(),
+            Some(expectedEngineId)
+          )
+          val site = SiteBinding(s"http://localhost:${port}")
+
+          val events = Await.result(
+            engine
+              .execJsonStream(site, "events", "GET")
+              .runWith(Sink.seq)(org.apache.pekko.stream.Materializer(runSystem)),
+            30.seconds
+          )
+
+          events shouldBe Seq(Json.obj("i" -> 1), Json.obj("i" -> 2))
+
+          engine.close()
+        } finally {
+          runSystem.terminate()
+          ()
+        }
+      }
     }
 
     "stream SSE JSON events via StreamedEngineRegistry and close idempotently" in {

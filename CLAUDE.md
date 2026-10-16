@@ -15,7 +15,7 @@ The project includes:
 - Streaming support for large payloads
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 1.1.2
+Current version: 1.1.3
 
 ## Build Commands
 
@@ -402,7 +402,11 @@ val loggedService = log(service, "MyService")
   `.mapError(mapHttpStatusErrors)` on engine-level calls. The default `handleErrorCodes` of
   non-streamed calls throws the same structured exception. The akka/pekko `handleException`
   (shared core-akka `StreamFailures`, used by the Play stream and pekko-http engines) passes
-  Cequence exceptions through unwrapped
+  Cequence exceptions through unwrapped. SSE comment lines (`:`-prefixed keep-alives such as
+  OpenRouter's `: OPENROUTER PROCESSING` or OpenAI's bare `:`) and blank frames are ignored by the
+  shared `JsonStreamFrames.parseFrame` (result `Skip`, since 1.1.3 - a comment-only frame used to
+  fail the stream as non-JSON) on every engine; comment lines inside a `data:` frame are dropped
+  and `[DONE]` is recognized with surrounding whitespace (CRLF)
 - Form fields: repeated keys keep every value on every engine (`EngineSupport.groupValues`,
   never `.toMap`); multipart files go out under their BASE name (`FilePart.filenameAux`) unless
   a display name is given
