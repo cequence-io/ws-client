@@ -402,11 +402,17 @@ val loggedService = log(service, "MyService")
   `.mapError(mapHttpStatusErrors)` on engine-level calls. The default `handleErrorCodes` of
   non-streamed calls throws the same structured exception. The akka/pekko `handleException`
   (shared core-akka `StreamFailures`, used by the Play stream and pekko-http engines) passes
-  Cequence exceptions through unwrapped. SSE comment lines (`:`-prefixed keep-alives such as
+  Cequence exceptions through unwrapped. SSE comment lines (`:`-first keep-alives such as
   OpenRouter's `: OPENROUTER PROCESSING` or OpenAI's bare `:`) and blank frames are ignored by the
   shared `JsonStreamFrames.parseFrame` (result `Skip`, since 1.1.3 - a comment-only frame used to
-  fail the stream as non-JSON) on every engine; comment lines inside a `data:` frame are dropped
-  and `[DONE]` is recognized with surrounding whitespace (CRLF)
+  fail the stream as non-JSON) on every engine. An SSE event is a frame with a line STARTING with
+  `data:` (with or without the space after the colon; never matched mid-line): its comment lines
+  are dropped, CR / CRLF line breaks are normalized, the payload is everything after the prefix;
+  a frame without such a line is a raw payload (Gemini array framing) parsed as is after its
+  leading comment lines; `[DONE]` is matched after trim. Still
+  frame-level, not a full SSE parser: multi-line `data:` events are not joined, field lines after
+  the data line are not dropped, and the frame delimiter stays `\n\n` by default (servers that
+  terminate events with `\r\n\r\n` need `framingDelimiter = "\r\n\r\n"`)
 - Form fields: repeated keys keep every value on every engine (`EngineSupport.groupValues`,
   never `.toMap`); multipart files go out under their BASE name (`FilePart.filenameAux`) unless
   a display name is given
