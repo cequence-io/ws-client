@@ -699,6 +699,23 @@ class JsonRepairSpec extends AnyFlatSpec with Matchers {
     } finally file.delete()
   }
 
+  // a value that consumed no input (parseString stepping back from a quote it took for the start
+  // of the next key, misled by an object context the {""} left behind) was parsed again from the
+  // same state, forever - the array growing until the heap ran out
+  it should "return, not loop forever, on an array value that consumes no input" in {
+    implicit val ec: ExecutionContext = ExecutionContext.global
+    def repaired(input: String) = Await.result(Future(JsonRepair.repair(input)), 30.seconds)
+
+    repaired("""[{"a": {""}}, b"c": 1]""") shouldBe """[{"a":{}},"b","c",1]"""
+    repaired("""[{"a": {""}, "b": 1}, c"d": 2]""") shouldBe """[{"a":{},"b":1},"c","d",2]"""
+    repaired("""[{"a": {""}}, "x", y"z": 1]""") shouldBe """[{"a":{}},"x","y","z",1]"""
+    repaired("[false{\"\n:{\"\"}l\",}a\"\":") shouldBe """[false,{"":{},"l":""},"a",":"]"""
+    Await.result(
+      Future(JsonRepair.repairJsonAsValue("""[{"a": {""}}, b"c": 1]""")),
+      30.seconds
+    ) shouldBe List(Map("a" -> Map()), "b", "c", 1L)
+  }
+
   // the right-trim (Python's rstrip) was the regex \s+$, retried from every position inside a
   // whitespace run - quadratic: 40,000 spaces before a letter took 2 s, 200,000 about a minute
   it should "trim trailing whitespace in linear time" in {
@@ -715,5 +732,41 @@ class JsonRepairSpec extends AnyFlatSpec with Matchers {
 
     // linear: milliseconds (the bound is CI headroom); quadratic: minutes
     seconds should be < 20.0
+  }
+
+  // the repair path kept every escape's backslash AND appended the decoded character ("x\ny"
+  // came back as x, backslash, line break, y; a trailing \n as a stray backslash), and left
+  // backslash-u, \/ and \f undecoded - valid nested JSON takes the repair path, so it came back
+  // altered
+  it should "decode escape sequences on the repair path like a JSON parser" in {
+    // a backslash-u escape (none in literals: Scala 2.12 decodes them anywhere in the source)
+    val u = "\\u"
+    val nested = """{"a": {"b": "x\ny\tz\r\b\f\/ \\ \"q\" """ + u + "00e9 " + u + "d83d" + u +
+      "de00 " + u + "005c" + u + "0041" + u + """000a", "c": ["line\n", "C:\\Users\\", "\"quoted\""]}}"""
+
+    JsonRepair.loads(nested) shouldBe Json.parse(nested)
+    JsonRepair.loads(nested, skipJsonParse = true) shouldBe Json.parse(nested)
+    Json.parse(JsonRepair.repairJson(nested)) shouldBe Json.parse(nested)
+    Json.parse(JsonRepair.repairJson(nested, ensureAscii = false)) shouldBe Json.parse(nested)
+    JsonRepair.repairJsonAsValue("""[{"a": "x\ny """ + u + "00e9\"}]") shouldBe
+      List(Map("a" -> "x\ny é"))
+
+    // broken JSON: the same characters, the usual repairs
+    JsonRepair.repair("""{"text": "Hello\nWorld""") shouldBe """{"text":"Hello\nWorld"}"""
+    JsonRepair.repair("""{"text": "Hello\n"""") shouldBe """{"text":"Hello\n"}"""
+    // an unclosed string is right-trimmed, as before (and as in Python)
+    JsonRepair.repair("""{"text": "Hello\n""") shouldBe """{"text":"Hello"}"""
+    JsonRepair.repair("""{"key": 'it\'s'}""") shouldBe """{"key":"it's"}"""
+    // Python's own form of the "handle escaping correctly" case: a \t escape, not a raw tab
+    JsonRepair.repair(
+      """{"real_content": "Some string: Some other string \t Some string <a href=\"https://domain.com\">Some link</a>""""
+    ) shouldBe """{"real_content":"Some string: Some other string \t Some string <a href=\"https://domain.com\">Some link</a>"}"""
+
+    // unchanged: a raw line break before the closing quote is trimmed, \" stays a quote,
+    // invalid escapes keep their backslash
+    JsonRepair.repair("[\"line\n\"]") shouldBe """["line"]"""
+    JsonRepair.repair("""{"a": {"b": "\"quoted\""}}""") shouldBe """{"a":{"b":"\"quoted\""}}"""
+    JsonRepair.repair("[\"\\l \\x41 " + u + "12 " + u + "ZZZZ\"]") shouldBe
+      "[\"\\\\l \\\\x41 \\\\u12 \\\\uZZZZ\"]"
   }
 }

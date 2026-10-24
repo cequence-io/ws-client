@@ -1,5 +1,6 @@
 package io.cequence.jsonrepair
 
+import java.util.regex.Pattern
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.util.control.Breaks.break
@@ -363,6 +364,7 @@ class JsonParser(
       skipWhitespacesAt()
 
       // 2) Parse next JSON value
+      val valueStart = index
       val value = parseJson() // could be "", "...", or a valid JsonValue
 
       // 3) Check for corner cases
@@ -388,6 +390,14 @@ class JsonParser(
         case parsedValue: JsonValue =>
           // If parseJson() returned a valid value (including possibly an empty string-literal)
           arr = parsedValue :: arr
+      }
+
+      // A value that consumed no input would be parsed again from the same state - forever,
+      // the array growing until the heap is exhausted (parseString steps back from a quote it
+      // takes for the next key's, e.g. under a stale object context: [{"a": {""}}, b"c": 1]).
+      // Move past it, as parse() does at the top level
+      if (index == valueStart) {
+        index += 1
       }
 
       // 4) After reading a value, skip over any whitespace or commas before the next item
@@ -558,6 +568,8 @@ class JsonParser(
 
     char = getCharAt().getOrElse(CHAR_NONE)
     var unmatched_delimiter = false
+    // sb's length right after the last character decoded from an escape sequence
+    var escapedEnd = -1
 
     scala.util.control.Breaks.breakable {
       while (char != CHAR_NONE && char != rstring_delimiter) {
@@ -698,19 +710,39 @@ class JsonParser(
         if (char != CHAR_NONE && sb.nonEmpty && sb.last == '\\') {
           // This is a special case, if people use real strings this might happen
           log("Found a stray escape sequence, normalizing it")
-          if (Set(rstring_delimiter, 't', 'n', 'r', 'b', '\\').contains(char)) {
-            val escMap = Map(
-              't' -> '\t',
-              'n' -> '\n',
-              'r' -> '\r',
-              'b' -> '\b',
-              '\\' -> '\\'
-            )
+          val escMap = Map(
+            't' -> '\t',
+            'n' -> '\n',
+            'r' -> '\r',
+            'b' -> '\b',
+            'f' -> '\f',
+            '\\' -> '\\'
+          )
 
-            // sb.deleteCharAt(sb.length - 1)
-            sb.append(escMap.getOrElse(char, char))
-            index += 1
-            char = getCharAt().getOrElse(CHAR_NONE)
+          // the escaped character, and how many characters after the backslash encode it
+          val escape =
+            if (Set(rstring_delimiter, 't', 'n', 'r', 'b', 'f', '/', '\\').contains(char))
+              Some((escMap.getOrElse(char, char), 1))
+            else if (
+              char == 'u' && (1 to 4).forall(i => getCharAt(i).exists(JsonParser.isHex))
+            )
+              Some((Integer.parseInt(substring(index + 1, index + 5), 16).toChar, 5))
+            else None
+
+          escape match {
+            case Some((escaped, encodedLength)) =>
+              // The character replaces its backslash (Python: string_acc[:-1]) - except a double
+              // quote, which keeps it: convertToJsValue unescapes \" itself, and it strips the
+              // quotes around a value, so a decoded \"quoted\" would lose them
+              if (escaped != '"') {
+                sb.deleteCharAt(sb.length - 1)
+                escapedEnd = sb.length + 1
+              }
+              sb.append(escaped)
+              index += encodedLength
+              char = getCharAt().getOrElse(CHAR_NONE)
+
+            case None =>
           }
         }
 
@@ -940,16 +972,17 @@ class JsonParser(
     if (char != rstring_delimiter) {
       log("While parsing a string, we missed the closing quote, ignoring")
       // Equivalent to Python's rstrip()
-      val trimmed = sb.toString().replaceAll("\\s+$", "")
+      val trimmed = JsonParser.TrailingWhitespace.matcher(sb.toString()).replaceAll("")
       sb.clear()
       sb.append(trimmed)
     } else {
       index += 1
     }
 
-    // Clean the whitespaces for some corner cases
-    if (missing_quotes || (sb.nonEmpty && sb.last == '\n')) {
-      val trimmed = sb.toString().replaceAll("\\s+$", "")
+    // Clean the whitespaces for some corner cases - a raw line break before the closing quote,
+    // not an escaped one: "x\n" is content (valid JSON nested in a repaired one keeps it)
+    if (missing_quotes || (sb.nonEmpty && sb.last == '\n' && sb.length != escapedEnd)) {
+      val trimmed = JsonParser.TrailingWhitespace.matcher(sb.toString()).replaceAll("")
       sb.clear()
       sb.append(trimmed)
     }
@@ -1265,4 +1298,15 @@ class JsonParser(
       return ""
     }
   }
+}
+
+object JsonParser {
+
+  // Python's rstrip() - the matches of "\\s+$", but a match may start only where a whitespace
+  // run starts: "\\s+$" retried from every position inside a run, re-scanning the rest of it
+  // each time (quadratic - 40,000 spaces before a letter took 2 s)
+  private val TrailingWhitespace = Pattern.compile("(?<!\\s)\\s+$")
+
+  private def isHex(c: Char): Boolean =
+    (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }

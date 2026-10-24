@@ -493,4 +493,21 @@ val loggedService = log(service, "MyService")
   points parse: `StringFileWrapper` decodes the whole file once (platform charset), by character
   (it used to index byte chunks by byte offset - multibyte files crashed); a differential check
   of `fromFile(skipJsonParse = true)` against `loads(content, skipJsonParse = true)` must match
-  100%.
+  100%. Every parser loop must consume input per iteration: `parseArray` steps past a value that
+  consumed none (as `parse()` does at the top level) - the context stack is known to leak (a
+  `{""}` key without a value, the duplicate-key break leave `ObjectKey` behind; deliberately
+  left so, the leak shapes many repairs), and under it `parseString` can return without
+  consuming, which used to loop forever while the array grew. The right-trim (Python's
+  `rstrip`) is the precompiled `(?<!\s)\s+$` - never `replaceAll("\\s+$")`, quadratic on a long
+  interior whitespace run. Escape sequences decode like a JSON parser's (the decoded character
+  replaces the backslash, `\uXXXX` included) EXCEPT `\"`, which keeps its backslash for
+  `convertToJsValue` to unescape (it strips the quotes around a value, so a decoded
+  `\"quoted\"` would lose them); a newline that came from an escape is content, not trimmed.
+  Valid nested JSON whose strings are non-empty letters / spaces / escapes repairs exactly like
+  Jackson parses it - a differential oracle that must stay at 100% (empty strings and strings
+  holding JSON punctuation still diverge, pre-existing). In test sources, no backslash-u in any
+  literal or comment: Scala 2.12's lexer decodes (or rejects) it everywhere, even in
+  triple-quoted strings - build it as `"\\u" + hex`. Tips for the differential check: run it as a
+  standalone JVM (sbt's 1 GB heap OOMs on a looping input), with a per-call timeout and
+  `-XX:-OmitStackTraceInFastThrow` (hot NPEs otherwise lose their message), and compare
+  exception classes, not messages
