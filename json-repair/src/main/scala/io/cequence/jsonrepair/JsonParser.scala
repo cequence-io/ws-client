@@ -131,7 +131,9 @@ class JsonParser(
 
       while (index < length) {
         val j = parseJson()
-        if (j.toString.nonEmpty) {
+        // a later top-level null literal (e.g. with handleLiterals) is a value like true /
+        // false - j.toString threw a NullPointerException on it
+        if (j == null || j.toString.nonEmpty) {
           jsonArray = j :: jsonArray
         }
         if (index == lastIndex) {

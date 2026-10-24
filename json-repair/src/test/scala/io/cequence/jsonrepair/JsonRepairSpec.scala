@@ -638,6 +638,67 @@ class JsonRepairSpec extends AnyFlatSpec with Matchers {
     seconds should be < 20.0
   }
 
+  // with handleLiterals, a top-level null after the first value threw a NullPointerException
+  // (j.toString) - it is a value like true / false
+  it should "keep a later top-level null literal as a value (handleLiterals)" in {
+    def repaired(input: String) =
+      JsonRepair.repairJson(input, skipJsonParse = true, handleLiterals = true)
+
+    repaired("""{"a": 1} null""") shouldBe """[{"a":1},null]"""
+    repaired("""{"a": 1} true""") shouldBe """[{"a":1},true]"""
+    repaired("""[1] null [2]""") shouldBe """[[1],null,[2]]"""
+    repaired("""null {"a": 1}""") shouldBe """[null,{"a":1}]""" // a FIRST null always worked
+    JsonRepair.loads("[1] null", skipJsonParse = true, handleLiterals = true) shouldBe
+      Json.arr(Json.arr(1), JsNull)
+    JsonRepair.repairJsonAsValue("[1] NULL", handleLiterals = true) shouldBe
+      List(List(1L), null)
+  }
+
+  // the file wrapper indexed its 1 MB byte chunks by byte offset: any multibyte character made
+  // fromFile throw a StringIndexOutOfBoundsException (and one split across two chunks became two
+  // replacement characters)
+  it should "repair a file with multibyte characters exactly like the same string" in {
+    assume(
+      java.nio.charset.Charset.defaultCharset() == java.nio.charset.StandardCharsets.UTF_8,
+      "fromFile decodes in the platform charset"
+    )
+    val file = File.createTempFile("json-repair-utf8-", ".json")
+    file.deleteOnExit()
+
+    def fromFileMatchesString(content: String) = {
+      Files.write(file.toPath, content.getBytes("UTF-8"))
+      val expected = JsonRepair.loads(content, skipJsonParse = true)
+      for (chunkLength <- Seq(0, 2, 3, 7)) {
+        withClue(s"chunkLength = $chunkLength: ") {
+          JsonRepair.fromFile(file.getPath, chunkLength = chunkLength) shouldBe expected
+          JsonRepair.fromFile(
+            file.getPath,
+            skipJsonParse = true,
+            chunkLength = chunkLength
+          ) shouldBe
+            expected
+        }
+      }
+      expected
+    }
+
+    try {
+      fromFileMatchesString(
+        """{"name": "Zoë", "city": "Zürich", "note": "日本語 😀", "list": [1, 2,"""
+      ) shouldBe Json.obj(
+        "name" -> "Zoë",
+        "city" -> "Zürich",
+        "note" -> "日本語 😀",
+        "list" -> Json.arr(1, 2)
+      )
+
+      // past the old 1 MB chunk boundary, with characters straddling it
+      val n = 120000
+      fromFileMatchesString("[" + Seq.fill(n)("\"é😀\"").mkString(",")) shouldBe
+        JsArray(Seq.fill(n)(JsString("é😀")))
+    } finally file.delete()
+  }
+
   // the right-trim (Python's rstrip) was the regex \s+$, retried from every position inside a
   // whitespace run - quadratic: 40,000 spaces before a letter took 2 s, 200,000 about a minute
   it should "trim trailing whitespace in linear time" in {

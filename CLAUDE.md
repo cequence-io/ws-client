@@ -489,4 +489,8 @@ val loggedService = log(service, "MyService")
   nested deeper than the thread's stack fails with an ordinary `IllegalArgumentException`
   instead of a `StackOverflowError` (which escapes `NonFatal` and leaves a `Future`
   incomplete). No depth limit by design - a limit would change results for deep input that
-  repairs today on a large stack.
+  repairs today on a large stack. `fromFile` parses exactly the characters the string entry
+  points parse: `StringFileWrapper` decodes the whole file once (platform charset), by character
+  (it used to index byte chunks by byte offset - multibyte files crashed); a differential check
+  of `fromFile(skipJsonParse = true)` against `loads(content, skipJsonParse = true)` must match
+  100%.

@@ -229,7 +229,7 @@ object JsonRepair {
    * @param logging
    *   If true, return a tuple with the repaired JSON and a log of repair actions
    * @param chunkLength
-   *   The length of each chunk to read from the file
+   *   No longer used (the file is decoded at once); kept for source compatibility
    * @return
    *   The repaired JSON object
    */
@@ -351,7 +351,7 @@ object JsonRepair {
    * @param logging
    *   If true, return a tuple with the repaired JSON and a log of repair actions
    * @param chunkLength
-   *   The length of each chunk to read from the file
+   *   No longer used (the file is decoded at once); kept for source compatibility
    * @return
    *   The repaired JSON object
    */
@@ -403,7 +403,7 @@ object JsonRepair {
    * @param logging
    *   If true, return a tuple with the repaired JSON and a log of repair actions
    * @param chunkLength
-   *   The length of each chunk to read from the file
+   *   No longer used (the file is decoded at once); kept for source compatibility
    * @return
    *   The repaired JSON object
    */
