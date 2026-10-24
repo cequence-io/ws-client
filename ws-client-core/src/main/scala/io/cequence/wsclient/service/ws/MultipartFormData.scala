@@ -20,7 +20,9 @@ case class FilePart(
   }
   def filenamePart = MultipartParams.quoted(filenameAux)
 
-  def extension: String = filenameAux.split('.').last
+  // empty for a name of only dots ("...", or a "." / ".." path): split drops trailing empty
+  // strings, so it yields no element at all there - .last threw NoSuchElementException
+  def extension: String = filenameAux.split('.').lastOption.getOrElse("")
 }
 
 /**

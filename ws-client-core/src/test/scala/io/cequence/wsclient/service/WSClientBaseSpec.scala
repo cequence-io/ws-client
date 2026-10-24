@@ -5,6 +5,7 @@ import io.cequence.wsclient.domain.{
   SimpleRichResponse,
   StatusData
 }
+import io.cequence.wsclient.service.ws.FilePart
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 
@@ -16,6 +17,7 @@ class WSClientBaseSpec extends AnyWordSpec with Matchers {
     override protected implicit val ec: ExecutionContext = ExecutionContext.global
     override def close(): Unit = ()
     def mapped(e: Throwable): Option[Throwable] = mapHttpStatusErrors.lift(e)
+    def contentType(file: FilePart): String = contentTypeByExtension(file)
   }
 
   private final class ClassifiedException(message: String) extends RuntimeException(message)
@@ -29,6 +31,23 @@ class WSClientBaseSpec extends AnyWordSpec with Matchers {
   }
 
   private val rateLimited = SimpleRichResponse(None, StatusData(429, "slow down"), Map.empty)
+
+  "WSClientBase.contentTypeByExtension (default)" should {
+
+    "give the extension's content type, and none for a name of only dots" in {
+      val client = new DefaultClient()
+      client.contentType(FilePart("file", "/tmp/report.pdf")) shouldBe
+        "content-type: application/pdf\r\n"
+      client.contentType(FilePart("file", "/tmp/data.bin", Some("notes.txt"))) shouldBe
+        "content-type: text/plain\r\n"
+      client.contentType(FilePart("file", "/tmp/data.bin")) shouldBe ""
+      client.contentType(
+        FilePart("file", "/tmp/data.bin", contentType = Some("image/webp"))
+      ) shouldBe "content-type: image/webp\r\n"
+      // threw NoSuchElementException (FilePart.extension), failing the whole request
+      client.contentType(FilePart("file", "/tmp/report.pdf", Some("..."))) shouldBe ""
+    }
+  }
 
   "WSClientBase.handleErrorCodes (default)" should {
 

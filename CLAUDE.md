@@ -442,7 +442,8 @@ val loggedService = log(service, "MyService")
   sttp / zio-http / pekko-http renderers get `MultipartParams.escape`d names (none of them
   escapes CR / LF; pekko-http drops the header instead, and encodes FILE names itself). A
   data-part name that is a token stays unquoted (bytes as before). Covered on every engine by
-  `TestServers.multipartInjection`
+  `TestServers.multipartInjection`. `FilePart.extension` (the default content-type lookup) is
+  empty for a name of only dots - `split('.')` yields no element there, `.last` threw
 - No engine follows redirects (sttp disables its follow-by-default per request, the Play engines
   set `setFollowRedirect(false)` - the shaded AHC's default is a JVM-wide property) - a 3xx comes
   back as a non-acceptable status. Following redirects would re-send bodies and custom secret
