@@ -55,7 +55,7 @@ object JsonRepair {
     logging: Boolean = false,
     ensureAscii: Boolean = true,
     handleLiterals: Boolean = false
-  ): String = {
+  ): String = withStackGuard {
     val jsValue = loads(jsonStr, skipJsonParse, logging, ensureAscii, handleLiterals)
     if (ensureAscii)
       Json.asciiStringify(jsValue)
@@ -97,7 +97,7 @@ object JsonRepair {
     ensureAscii: Boolean = true,
     handleLiterals: Boolean = false,
     convertNumbers: Boolean = false
-  ): JsValue = {
+  ): JsValue = withStackGuard {
     // Improved check for potential concatenated JSON
     val isConcatenatedJson = isConcatenatedJsonString(jsonStr)
 
@@ -147,11 +147,25 @@ object JsonRepair {
     jsonStr: String,
     logging: Boolean = false,
     handleLiterals: Boolean = false
-  ): Any = {
+  ): Any = withStackGuard {
     val parser = new JsonParser(Left(jsonStr), logging, handleLiterals)
     val result = parser.parse()
     logAndReturn(result)
   }
+
+  // The repair parser and convertToJsValue recurse once per nesting level, so input nested
+  // deeper than the calling thread's stack overflows it. A StackOverflowError is fatal-class
+  // (NonFatal does not match it): it would escape the caller's Try / Future recovery and leave
+  // a Future running the repair incomplete forever - surface it as an ordinary failure instead.
+  // No depth limit is imposed: input the stack can hold is repaired exactly as before
+  private def withStackGuard[T](body: => T): T =
+    try body
+    catch {
+      case _: StackOverflowError =>
+        throw new IllegalArgumentException(
+          "JSON nesting too deep to repair: the repair overflowed the thread's stack."
+        )
+    }
 
   /**
    * Checks if a string appears to contain concatenated JSON objects or arrays.
@@ -398,7 +412,7 @@ object JsonRepair {
     skipJsonParse: Boolean = false,
     logging: Boolean = false,
     chunkLength: Int = 0
-  ): JsValue = {
+  ): JsValue = withStackGuard {
     val (value, logs) = load(new File(filePath), skipJsonParse, logging, chunkLength)
     value
   }

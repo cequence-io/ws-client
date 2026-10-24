@@ -125,13 +125,14 @@ class JsonParser(
     if (index < length) {
       log("The parser returned early, checking if there's more json elements")
 
+      // newest first, reversed once below: List :+ copies the whole list per element (quadratic)
       var jsonArray = List(json)
       var lastIndex = index
 
       while (index < length) {
         val j = parseJson()
         if (j.toString.nonEmpty) {
-          jsonArray = jsonArray :+ j
+          jsonArray = j :: jsonArray
         }
         if (index == lastIndex) {
           index += 1
@@ -139,7 +140,7 @@ class JsonParser(
         lastIndex = index
       }
 
-      val nonEmptyElements = jsonArray.filterNot(elem => elem == "")
+      val nonEmptyElements = jsonArray.reverse.filterNot(elem => elem == "")
 
       // If nothing extra was found, don't return an array
       val result = if (nonEmptyElements.size == 1) {
@@ -344,6 +345,8 @@ class JsonParser(
   }
 
   def parseArray(): List[JsonValue] = {
+    // newest first, reversed once at the end: List :+ copies the whole list per element
+    // (quadratic). A plain List also keeps this recursive frame as small as it was
     var arr = List.empty[JsonValue]
 
     // Enter ARRAY context (if your context logic requires it)
@@ -364,7 +367,7 @@ class JsonParser(
       value match {
         case null =>
           // index += 1
-          arr = arr :+ null
+          arr = null :: arr
 
         case "" =>
           // "It is possible that parse_json() returns nothing valid, so we increase by 1"
@@ -377,12 +380,12 @@ class JsonParser(
             log("While parsing an array, found a stray '...'; ignoring it")
           } else {
             // If the last character isn't '.', treat "..." as a legitimate string
-            arr = arr :+ s
+            arr = s :: arr
           }
 
         case parsedValue: JsonValue =>
           // If parseJson() returned a valid value (including possibly an empty string-literal)
-          arr = arr :+ parsedValue
+          arr = parsedValue :: arr
       }
 
       // 4) After reading a value, skip over any whitespace or commas before the next item
@@ -405,7 +408,7 @@ class JsonParser(
     // Reset context after finishing
     context.reset()
 
-    arr
+    arr.reverse
   }
 
   /**

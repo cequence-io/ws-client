@@ -482,4 +482,11 @@ val loggedService = log(service, "MyService")
   changes there minimal (prefer fixes in `JsonRepair.convertToJsValue`), and verify any change
   differentially against the previous version - thousands of generated valid + mutated inputs
   through every entry point (`repairJson`, `loads` flag variants, `repairJsonAsValue`,
-  `fromFile`) on 2.12 and 2.13, every output difference explained
+  `fromFile`) on 2.12 and 2.13, every output difference explained. Arrays and concatenated
+  top-level values accumulate with `::` plus one `reverse` (never `:+` - it copies the list per
+  element, quadratic; `::` also keeps the recursive `parseArray` frame as small as before,
+  which a `ListBuffer` did not). The public entry points run inside `withStackGuard`: input
+  nested deeper than the thread's stack fails with an ordinary `IllegalArgumentException`
+  instead of a `StackOverflowError` (which escapes `NonFatal` and leaves a `Future`
+  incomplete). No depth limit by design - a limit would change results for deep input that
+  repairs today on a large stack.

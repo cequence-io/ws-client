@@ -4,6 +4,13 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import play.api.libs.json._
 
+import java.io.File
+import java.nio.file.Files
+import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.duration._
+import scala.util.control.NonFatal
+import scala.util.{Failure, Try}
+
 class JsonRepairSpec extends AnyFlatSpec with Matchers {
 
   "JsonRepair" should "handle basic valid types correctly" in {
@@ -554,5 +561,98 @@ class JsonRepairSpec extends AnyFlatSpec with Matchers {
         |}""".stripMargin
     ) shouldBe
       """{"key":{"value":"Name","reference":"value value value value"}}""".stripMargin
+  }
+
+  // the repair parser (and the conversion to JsValue) recurse once per nesting level: input
+  // nested deeper than the thread's stack must fail like other bad input - a StackOverflowError
+  // escapes Try / NonFatal recovery and leaves a Future running the repair incomplete forever
+  it should "fail input nested deeper than the stack with an ordinary exception" in {
+    val file = File.createTempFile("json-repair-deep-", ".json")
+    file.deleteOnExit()
+
+    val entryPoints: Seq[(String, String => Any)] = Seq(
+      "repair" -> (input => JsonRepair.repair(input)),
+      "repairJson" -> (input => JsonRepair.repairJson(input, skipJsonParse = true)),
+      "loads" -> (input => JsonRepair.loads(input, convertNumbers = true)),
+      "repairJsonAsValue" -> (input => JsonRepair.repairJsonAsValue(input)),
+      "fromFile" -> { input =>
+        Files.write(file.toPath, input.getBytes("UTF-8"))
+        JsonRepair.fromFile(file.getPath, skipJsonParse = true)
+      }
+    )
+
+    for {
+      input <- Seq("[" * 100000, "{\"a\":" * 100000, "[" * 100000 + "]" * 100000)
+      (name, entryPoint) <- entryPoints
+    } {
+      // a small, fixed stack - the input overflows it whatever the JVM's default thread stack
+      var outcome: Option[Try[Any]] = None
+      val thread = new Thread(
+        null,
+        new Runnable {
+          override def run(): Unit = outcome = Some(Try(entryPoint(input)))
+        },
+        "json-repair-deep",
+        512L * 1024
+      )
+      thread.start()
+      thread.join()
+
+      withClue(s"$name on ${input.take(10)}...: ") {
+        outcome match {
+          case Some(Failure(e)) =>
+            e shouldBe an[IllegalArgumentException]
+            e.getMessage should include("too deep")
+          case other => fail(s"expected an ordinary failure, got $other")
+        }
+      }
+    }
+  }
+
+  it should "fail, not hang, a Future repairing input nested deeper than the stack" in {
+    implicit val ec: ExecutionContext = ExecutionContext.global
+    val repaired = Future(JsonRepair.repair("[" * 1000000))
+
+    Await.ready(repaired, 30.seconds).value match {
+      case Some(Failure(e)) => NonFatal(e) shouldBe true
+      case other            => fail(s"expected a failed Future, got $other")
+    }
+  }
+
+  // arrays used to be built with List :+ (a full copy per element - quadratic): 200k elements
+  // took over a minute - and so did 200k concatenated top-level values
+  it should "repair large arrays and many top-level values in linear time" in {
+    val n = 200000
+    // valid JSON, but routed to the repair parser by the bracket heuristic
+    val nested = "[[" + "1," * n + "1]]"
+    val unterminated = "[" + "1," * n + "1"
+    val concatenated = "[]" * n
+
+    val start = System.nanoTime()
+    JsonRepair.repair(nested) shouldBe nested
+    JsonRepair.repair(unterminated) shouldBe unterminated + "]"
+    JsonRepair.repair(concatenated) shouldBe Seq.fill(n)("[]").mkString("[", ",", "]")
+    val seconds = (System.nanoTime() - start) / 1e9
+
+    // linear: well under a second (the bound is CI headroom); quadratic: minutes
+    seconds should be < 20.0
+  }
+
+  // the right-trim (Python's rstrip) was the regex \s+$, retried from every position inside a
+  // whitespace run - quadratic: 40,000 spaces before a letter took 2 s, 200,000 about a minute
+  it should "trim trailing whitespace in linear time" in {
+    val spaces = " " * 200000
+
+    val start = System.nanoTime()
+    // an unterminated string, an unquoted value, a raw line break before the closing quote
+    JsonRepair.repair("[\"x" + spaces + "y") shouldBe "[\"x" + spaces + "y\"]"
+    JsonRepair.repair("{\"a\": x" + spaces + "y}") shouldBe "{\"a\":\"x" + spaces + "y\"}"
+    JsonRepair.repair("[\"x" + spaces + "y\n\"]") shouldBe "[\"x" + spaces + "y\"]"
+    JsonRepair.repair("{\"a\": {\"b\": \"x" + spaces + "y\n\"}}") shouldBe
+      "{\"a\":{\"b\":\"x" + spaces + "y\"}}"
+    val seconds = (System.nanoTime() - start) / 1e9
+
+    // linear: milliseconds (the bound is CI headroom); quadratic: minutes
+    seconds should be < 20.0
   }
 }
