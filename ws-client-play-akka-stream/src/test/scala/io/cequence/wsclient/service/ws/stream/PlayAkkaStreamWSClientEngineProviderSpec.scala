@@ -126,6 +126,63 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
       }
     }
 
+    // Scala 3: Play WS 2.2.0-M2's own stream() buffers the whole body and cannot be cancelled
+    "deliver a streamed body incrementally and abort the request when the stream is cancelled" in {
+      val writes = new java.util.concurrent.atomic.AtomicInteger(0)
+      val clientGone = new java.util.concurrent.CountDownLatch(1)
+
+      // 30 events 100 ms apart; a failing write means the client closed the connection
+      val slowEvents: HttpExchange => Unit = exchange => {
+        exchange.getRequestBody.readAllBytes()
+        exchange.getResponseHeaders.add("Content-Type", "text/event-stream")
+        exchange.sendResponseHeaders(200, 0)
+        val out = exchange.getResponseBody
+        try {
+          (1 to 30).foreach { i =>
+            out.write(s"""data: {"i":$i}\n\n""".getBytes("UTF-8"))
+            out.flush()
+            writes.incrementAndGet()
+            Thread.sleep(100)
+          }
+          out.close()
+        } catch {
+          case _: java.io.IOException => clientGone.countDown()
+        }
+      }
+
+      withServer("/events" -> slowEvents) { port =>
+        val runSystem = ActorSystem("stream-spec-incremental")
+        try {
+          val engine = StreamedEngineRegistry.outputStreamed(
+            TransportSettings(),
+            Some(expectedEngineId)
+          )
+          val site = SiteBinding(s"http://localhost:${port}")
+          val started = System.nanoTime()
+
+          val first = Await.result(
+            engine
+              .execRawStream(site, "events", "GET", None, Nil, Nil, Nil)
+              .take(1)
+              .runWith(Sink.head)(akka.stream.Materializer(runSystem)),
+            30.seconds
+          )
+          val elapsedMs = (System.nanoTime() - started) / 1000000
+
+          first.utf8String should startWith("""data: {"i":1}""")
+          // the whole body takes 3 s; a buffering transport hands it over only then
+          elapsedMs should be < 2000L
+          clientGone.await(10, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+          writes.get() should be < 30
+
+          engine.close()
+        } finally {
+          runSystem.terminate()
+          ()
+        }
+      }
+    }
+
     "stream SSE JSON events via StreamedEngineRegistry and close idempotently" in {
       withServer("/events" -> sse(sseBody)) { port =>
         val runSystem = ActorSystem("stream-spec-runner")

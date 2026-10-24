@@ -220,7 +220,7 @@ class PlayWSStreamClientEngine(
     // never expose an error page as stream data: a non-2xx status fails the stream with a
     // bounded diagnostic
     val source =
-      requestWithBody.withMethod(method).stream().flatMap { response =>
+      PlayWSStreaming.stream(requestWithBody.withMethod(method)).flatMap { response =>
         if (response.status / 100 == 2)
           Future.successful(response.bodyAsSource)
         else

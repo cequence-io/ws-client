@@ -111,6 +111,13 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
    - Adds `PlayWSStreamClientEngine` for Server-Sent Events (SSE)
    - Uses Akka HTTP for JSON streaming over WebSockets
    - Streaming frame limit: 20,000 bytes (defaultMaxFrameLength)
+   - Scala 3: Play WS 2.2.0-M2 implements `stream()` as the buffered `execute()` (the whole body
+     as one element once the response ended; cancelling cannot abort the request), so
+     `PlayWSStreaming` (in `src/main/scala-3`) calls the client's package-private streaming path
+     instead, through `play.api.libs.ws.ahc.StreamedExecution` - what `stream()` does in Play WS
+     2.1.x / 3.x (minus request filters, which the engine never sets). The `scala-2` twin calls
+     `stream()`. Covered by the stream spec (first event before the body ends; the cancelled
+     stream aborts the request)
 
 5. **json-repair** - JSON repair utility
    - Independent module for fixing malformed JSON
