@@ -90,6 +90,21 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      needs JDK 11+. Covered end-to-end by the Play provider specs (`TestServers.withTlsServer`,
      `withTrustingEngine`); `ws-client-play-akka` / `-pekko` / `-zio-http` fork their tests
      because those point the JVM-global default trust store at a test cert
+   - Redirects are off explicitly (`.setFollowRedirect(false)`): the AHC builder's default comes
+     from the JVM-wide property `play.shaded.ahc.org.asynchttpclient.followRedirect`. Response
+     decompression: AHC < 2.16.1 (play-ws 2.1.11 / 2.2.0-M2 - the Akka flavor) inflates gzip /
+     deflate bodies without any limit (CVE-2026-85721), so `PlayWSClientEngine.boundedInflater`
+     replaces AHC's `inflater` handler with AHC 2.16.1's own design (`maxDecompressedResponseSize`
+     property, default 256 MiB, `DecompressionException`, rest of the body dropped). It is
+     installed only when the shaded AHC lacks the limit (no `getMaxDecompressedResponseSize` on
+     `AsyncHttpClientConfig`), so the Pekko flavor keeps AHC's own. The provider specs cover both
+     (redirect with the property set; a gzip bomb under a lowered limit)
+   - Known CVEs (reachability checked 2026-10-24): the Akka flavor's shaded Netty 4.1.45 / 4.1.60
+     and AHC 2.10.5 / 2.12.3 carry dozens; reachable were only the cookie store (now off),
+     redirects (only with the property) and decompression - all three now closed in code.
+     The rest (HTTP/2, SPDY, SNI, CORS, server decoders, Realm / NTLM, WebSocket) is unused by
+     the engine. play-ws 2.2.18 (still Akka 2.6.21; AHC 2.16.1, Netty 4.1.138) is the Scala 2.13
+     upgrade path; 2.12 has none (2.1.11 is the last), Scala 3 needs 3.3+
 
 4. **ws-client-play-akka-stream** - Streaming extensions (named `ws-client-play-stream` before 1.0.0)
    - Depends on `ws-client-core-akka` and `ws-client-play-akka`
@@ -417,7 +432,8 @@ val loggedService = log(service, "MyService")
 - Form fields: repeated keys keep every value on every engine (`EngineSupport.groupValues`,
   never `.toMap`); multipart files go out under their BASE name (`FilePart.filenameAux`) unless
   a display name is given
-- No engine follows redirects (sttp disables its follow-by-default per request) - a 3xx comes
+- No engine follows redirects (sttp disables its follow-by-default per request, the Play engines
+  set `setFollowRedirect(false)` - the shaded AHC's default is a JVM-wide property) - a 3xx comes
   back as a non-acceptable status. Following redirects would re-send bodies and custom secret
   headers (e.g. `X-Api-Key`) to whatever origin the `Location` names
 - No engine keeps a cookie jar (since 1.1.4): `Set-Cookie` is surfaced in `RichResponse.headers`

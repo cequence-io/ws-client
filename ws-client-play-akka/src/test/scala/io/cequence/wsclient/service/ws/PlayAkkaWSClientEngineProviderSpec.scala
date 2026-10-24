@@ -9,6 +9,7 @@ import io.cequence.wsclient.domain.{
   SiteBinding,
   WsRequestContext
 }
+import io.cequence.wsclient.service.WSClientEngine
 import io.cequence.wsclient.service.spi.{
   EngineCapability,
   TransportSettings,
@@ -32,11 +33,15 @@ import io.cequence.wsclient.testkit.TestServers.{
 }
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
-import play.api.libs.json.JsString
+import play.api.libs.json.{JsString, Json}
+import play.shaded.ahc.io.netty.handler.codec.compression.DecompressionException
 import play.shaded.ahc.org.asynchttpclient.config.AsyncHttpClientConfigHelper
 
+import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.GZIPOutputStream
 import javax.net.ssl.SSLContext
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration._
@@ -59,12 +64,25 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
   private val AhcEnabledProtocolsKey = "play.shaded.ahc.org.asynchttpclient.enabledProtocols"
 
+  private val AhcFollowRedirectKey = "play.shaded.ahc.org.asynchttpclient.followRedirect"
+
+  private val AhcMaxDecompressedResponseSizeKey =
+    "play.shaded.ahc.org.asynchttpclient.maxDecompressedResponseSize"
+
   // the shaded AHC caches its properties: reload after every change (and after the restore)
-  private def withAhcEnabledProtocols[T](value: Option[String])(body: => T): T =
+  private def withAhcProperty[T](
+    key: String,
+    value: Option[String]
+  )(
+    body: => T
+  ): T =
     withSystemProperties(
-      Seq(AhcEnabledProtocolsKey -> value),
+      Seq(key -> value),
       AsyncHttpClientConfigHelper.reloadProperties()
     )(body)
+
+  private def withAhcEnabledProtocols[T](value: Option[String])(body: => T): T =
+    withAhcProperty(AhcEnabledProtocolsKey, value)(body)
 
   s"$expectedEngineId provider" should {
 
@@ -109,6 +127,112 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         try cookieIsolation(copy) shouldBe CookieIsolation.expected(streaming = false)
         finally copy.close()
       } finally engine.close()
+    }
+
+    "never follow a redirect - not even with the shaded AHC's followRedirect property set" in {
+      // the AHC builder's default comes from that JVM-wide property; following re-sent bodies
+      // and custom secret headers (X-Api-Key; on AHC < 2.14.5 Authorization and Cookie too) to
+      // whatever origin the Location named
+      val stolen = new AtomicInteger(0)
+      val steal: HttpExchange => Unit = { exchange =>
+        stolen.incrementAndGet()
+        respond(exchange, 200, "{}")
+      }
+      withServer("/" -> steal) { otherPort =>
+        // 307 preserves the method and the body - the most dangerous redirect to follow
+        val redirect: HttpExchange => Unit = { exchange =>
+          exchange.getRequestBody.readAllBytes()
+          exchange.getResponseHeaders.add("Location", s"http://localhost:$otherPort/steal")
+          exchange.sendResponseHeaders(307, -1)
+          exchange.close()
+        }
+        withServer("/" -> redirect) { port =>
+          val site = SiteBinding(
+            s"http://localhost:$port",
+            WsRequestContext(authHeaders = Seq("X-Api-Key" -> "secret"))
+          )
+          Seq(None, Some("true")).foreach { followRedirect =>
+            withAhcProperty(AhcFollowRedirectKey, followRedirect) {
+              val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+              try {
+                val response = Await.result(
+                  engine
+                    .execPOSTBodyRich(site, "upload", body = Json.obj("data" -> "private")),
+                  30.seconds
+                )
+                withClue(s"followRedirect property = $followRedirect: ") {
+                  response.status.code shouldBe 307
+                  response.response shouldBe None
+                  stolen.get() shouldBe 0
+                }
+              } finally engine.close()
+            }
+          }
+        }
+      }
+    }
+
+    "fail a response whose decompressed body exceeds the shaded AHC's limit" in {
+      // AHC < 2.16.1 inflated gzip / deflate bodies without any limit - ~500 KB on the wire
+      // exhausted a 768 MB heap (CVE-2026-85721)
+      def gzip(bytes: Array[Byte]): Array[Byte] = {
+        val out = new ByteArrayOutputStream()
+        val gzipOut = new GZIPOutputStream(out)
+        gzipOut.write(bytes)
+        gzipOut.close()
+        out.toByteArray
+      }
+      def serve(
+        body: Array[Byte],
+        gzipped: Boolean
+      ): HttpExchange => Unit = {
+        val bytes = if (gzipped) gzip(body) else body
+        exchange => {
+          if (gzipped) exchange.getResponseHeaders.add("Content-Encoding", "gzip")
+          exchange.getResponseHeaders.add("Content-Type", "text/plain")
+          exchange.sendResponseHeaders(200, bytes.length.toLong)
+          exchange.getResponseBody.write(bytes)
+          exchange.close()
+        }
+      }
+      val mebibyte = 1024 * 1024
+
+      withServer(
+        "/bomb" -> serve(new Array[Byte](4 * mebibyte), gzipped = true),
+        "/compressed" -> serve(Array.fill(mebibyte / 2)('x'.toByte), gzipped = true),
+        "/plain" -> serve(Array.fill(2 * mebibyte)('x'.toByte), gzipped = false)
+      ) { port =>
+        val site = SiteBinding(s"http://localhost:$port")
+        def withEngine[T](maxDecompressedSize: Option[Int])(test: WSClientEngine => T): T =
+          withAhcProperty(
+            AhcMaxDecompressedResponseSizeKey,
+            maxDecompressedSize.map(_.toString)
+          ) {
+            val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+            try test(engine)
+            finally engine.close()
+          }
+        def bodyLength(
+          engine: WSClientEngine,
+          endPoint: String
+        ) =
+          Await
+            .result(engine.execGETRich(site, endPoint), 30.seconds)
+            .response
+            .map(_.string.length)
+
+        withEngine(Some(mebibyte)) { engine =>
+          val failure = the[DecompressionException] thrownBy bodyLength(engine, "bomb")
+          failure.getMessage should startWith(
+            s"Decompressed response body exceeds the maximum of $mebibyte bytes"
+          )
+          // within the limit a compressed body is decompressed; an uncompressed one never counts
+          bodyLength(engine, "compressed") shouldBe Some(mebibyte / 2)
+          bodyLength(engine, "plain") shouldBe Some(2 * mebibyte)
+        }
+        // the default limit: 256 MiB
+        withEngine(None)(bodyLength(_, "bomb")) shouldBe Some(4 * mebibyte)
+      }
     }
 
     "create its client without initializing the JVM default SSLContext" in {
