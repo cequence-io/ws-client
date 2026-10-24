@@ -449,6 +449,9 @@ val loggedService = log(service, "MyService")
   describes a failure by the transport cause below the sttp wrapper and maps every remaining
   sttp failure to `CequenceWSException` - never put `e.getMessage` of a request-describing
   exception into a message
+- `StreamTransformers.DelimiterFramer` (jdk / zio-http SSE framing) tracks frames by offset and
+  compacts its buffer once per chunk - keep it linear per chunk (`DelimiterFramerSpec` diffs it
+  against the 1.1.2 implementation)
 - No engine follows redirects (sttp disables its follow-by-default per request, the Play engines
   set `setFollowRedirect(false)` - the shaded AHC's default is a JVM-wide property) - a 3xx comes
   back as a non-acceptable status. Following redirects would re-send bodies and custom secret

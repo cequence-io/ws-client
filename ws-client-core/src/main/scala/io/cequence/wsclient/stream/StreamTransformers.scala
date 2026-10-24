@@ -48,20 +48,27 @@ private[wsclient] object StreamTransformers {
       buffer = buffer ++ incoming
 
       val frames = Seq.newBuilder[ByteBuffer]
-      var delimiterIndex = indexOfDelimiter()
+      // frames are tracked by offset and the remainder compacted ONCE per chunk - compacting
+      // per frame copied the whole remainder each time, quadratic in the frames per chunk
+      var start = 0
+      var delimiterIndex = indexOfDelimiter(start)
       while (delimiterIndex >= 0) {
+        val frameLength = delimiterIndex - start
         // bound EVERY frame, not just the unterminated remainder below - akka's
         // Framing.delimiter fails an oversized frame even when its delimiter arrives
-        if (delimiterIndex > maxFrameLength)
+        if (frameLength > maxFrameLength)
           throw new CequenceWSException(
-            s"Stream framing problem occurred. A frame of $delimiterIndex bytes " +
+            s"Stream framing problem occurred. A frame of $frameLength bytes " +
               s"exceeds the maximum frame length of $maxFrameLength."
           )
-        frames += ByteBuffer.wrap(java.util.Arrays.copyOfRange(buffer, 0, delimiterIndex))
-        buffer = java.util.Arrays
-          .copyOfRange(buffer, delimiterIndex + delimiter.length, buffer.length)
-        scanFrom = 0
-        delimiterIndex = indexOfDelimiter()
+        frames += ByteBuffer.wrap(java.util.Arrays.copyOfRange(buffer, start, delimiterIndex))
+        start = delimiterIndex + delimiter.length
+        delimiterIndex = indexOfDelimiter(start)
+      }
+
+      if (start > 0) {
+        buffer = java.util.Arrays.copyOfRange(buffer, start, buffer.length)
+        scanFrom = math.max(0, scanFrom - start)
       }
 
       if (buffer.length > maxFrameLength)
@@ -77,8 +84,8 @@ private[wsclient] object StreamTransformers {
     override def onUpstreamComplete(): Seq[ByteBuffer] =
       if (buffer.nonEmpty) Seq(ByteBuffer.wrap(buffer)) else Nil
 
-    private def indexOfDelimiter(): Int = {
-      var i = math.max(scanFrom, 0)
+    private def indexOfDelimiter(from: Int): Int = {
+      var i = math.max(from, scanFrom)
       val limit = buffer.length - delimiter.length
       while (i <= limit) {
         var j = 0
