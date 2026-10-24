@@ -17,6 +17,8 @@ import org.scalatest.wordspec.AnyWordSpec
 import io.cequence.wsclient.testkit.TestServers.{
   CookieIsolation,
   cookieIsolation,
+  MultipartInjection,
+  multipartInjection,
   withDumbProxy,
   withEchoServer
 }
@@ -63,6 +65,19 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     "keep no cookie jar: never send a cookie the site did not supply (site-stateless)" in {
       val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
       try cookieIsolation(engine) shouldBe CookieIsolation.expected(streaming = false)
+      finally engine.close()
+    }
+
+    "keep caller-supplied multipart names inside their Content-Disposition parameter" in {
+      // a quote or CR/LF in a display file name, file key or data-part name used to add
+      // parameters, part headers and a content prefix to the part
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        Seq(false, true).foreach { useInMemoryBody =>
+          withClue(s"useInMemoryBody = $useInMemoryBody: ") {
+            multipartInjection(engine, useInMemoryBody) shouldBe MultipartInjection.expected
+          }
+        }
       finally engine.close()
     }
 

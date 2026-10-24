@@ -410,13 +410,16 @@ final class SttpWSClientEngine private[ws] (
   )(
     implicit filePartToContent: FilePart => String
   ) = {
+    // sttp escapes '"' but not CR / LF in Content-Disposition parameters - hand it the
+    // encoded names (MultipartParams) so a name can never add part headers
     val dataParts = bodyParams.collect { case (key, Some(value)) =>
-      multipart(key, value.toString)
+      multipart(MultipartParams.escape(key), value.toString)
     }
 
     val fileParts = fileParams.map { case (key, file, headerFileName) =>
       val filePart = FilePart(key, file.getPath, headerFileName)
-      val base = multipartFile(key, file).fileName(filePart.filenameAux)
+      val base = multipartFile(MultipartParams.escape(key), file)
+        .fileName(MultipartParams.escape(filePart.filenameAux))
 
       parseContentType(filePartToContent(filePart)).map(base.contentType).getOrElse(base)
     }

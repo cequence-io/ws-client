@@ -103,8 +103,9 @@ object PlayWSMultipartWritable {
     encode: String => ByteString
   ): ByteString = {
     val dataParts = data.flatMap { case (name, values) =>
+      val partName = MultipartParams.dataPartName(name)
       values.map { value =>
-        s"--$boundary\r\n${HttpHeaderNames.CONTENT_DISPOSITION}: form-data; name=$name\r\n\r\n$value\r\n"
+        s"--$boundary\r\n${HttpHeaderNames.CONTENT_DISPOSITION}: form-data; name=$partName\r\n\r\n$value\r\n"
       }
     }.mkString("")
 

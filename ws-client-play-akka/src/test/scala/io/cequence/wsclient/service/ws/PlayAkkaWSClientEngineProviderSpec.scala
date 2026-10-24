@@ -18,6 +18,8 @@ import io.cequence.wsclient.service.spi.{
 import io.cequence.wsclient.testkit.TestServers.{
   CookieIsolation,
   cookieIsolation,
+  MultipartInjection,
+  multipartInjection,
   negotiatedProtocol,
   respond,
   selfSignedKeyStore,
@@ -127,6 +129,19 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         try cookieIsolation(copy) shouldBe CookieIsolation.expected(streaming = false)
         finally copy.close()
       } finally engine.close()
+    }
+
+    "keep caller-supplied multipart names inside their Content-Disposition parameter" in {
+      // a quote or CR/LF in a display file name, file key or data-part name used to add
+      // parameters, part headers and a content prefix to the part
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        Seq(false, true).foreach { useInMemoryBody =>
+          withClue(s"useInMemoryBody = $useInMemoryBody: ") {
+            multipartInjection(engine, useInMemoryBody) shouldBe MultipartInjection.expected
+          }
+        }
+      finally engine.close()
     }
 
     "never follow a redirect - not even with the shaded AHC's followRedirect property set" in {

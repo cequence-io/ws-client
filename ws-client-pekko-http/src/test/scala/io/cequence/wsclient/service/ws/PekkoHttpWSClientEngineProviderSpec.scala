@@ -17,6 +17,9 @@ import io.cequence.wsclient.testkit.LatchedSubscriber
 import io.cequence.wsclient.testkit.TestServers.{
   CookieIsolation,
   cookieIsolation,
+  MultipartInjection,
+  multipartInjection,
+  ReceivedPart,
   respond,
   sse,
   withEchoServer,
@@ -97,6 +100,33 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     "keep no cookie jar: never send a cookie the site did not supply (site-stateless)" in {
       val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
       try cookieIsolation(engine) shouldBe CookieIsolation.expected(streaming = true)
+      finally engine.close()
+    }
+
+    "keep caller-supplied multipart names inside their Content-Disposition parameter" in {
+      // a quote or CR/LF in a file key or data-part name used to drop the part's
+      // Content-Disposition (no name at all). pekko-http renders FILE names itself, safely:
+      // unsafe characters become '?', the original travels RFC 5987-encoded in filename*
+      val expected = MultipartInjection.expected.updated(
+        1,
+        ReceivedPart(
+          1,
+          Nil,
+          Seq(
+            "filename" -> "a?; name=?x??X-Injected: 1????P",
+            "filename*" -> "UTF-8''a%22%3B%20name%3D%22x%0D%0AX-Injected%3A%201%0D%0A%0D%0AP",
+            "name" -> "file"
+          ),
+          MultipartInjection.FileContent
+        )
+      )
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        Seq(false, true).foreach { useInMemoryBody =>
+          withClue(s"useInMemoryBody = $useInMemoryBody: ") {
+            multipartInjection(engine, useInMemoryBody) shouldBe expected
+          }
+        }
       finally engine.close()
     }
 

@@ -682,16 +682,20 @@ final class ZioHttpWSClientEngine private[ws] (
           .contentType(MediaType.multipart.`form-data`, Boundary(boundary))
       }
     else {
-      val fields = dataParts.map { case (key, value) => FormField.simpleField(key, value) } ++
+      // zio-http writes Content-Disposition parameters unescaped - hand it the encoded names
+      // (MultipartParams) so a name can never add parameters or part headers
+      val fields = dataParts.map { case (key, value) =>
+        FormField.simpleField(MultipartParams.escape(key), value)
+      } ++
         fileParts.map { case (filePart, file) =>
           FormField.streamingBinaryField(
-            filePart.key,
+            MultipartParams.escape(filePart.key),
             ZStream.fromFile(file).orDie,
             EngineSupport
               .contentTypeOfHeaderLine(filePartToContent(filePart))
               .flatMap(MediaType.forContentType)
               .getOrElse(MediaType.application.`octet-stream`),
-            filename = Some(filePart.filenameAux)
+            filename = Some(MultipartParams.escape(filePart.filenameAux))
           )
         }
 

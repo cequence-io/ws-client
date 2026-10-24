@@ -626,8 +626,13 @@ class PekkoHttpWSClientEngine(
   )(
     implicit filePartToContent: FilePart => String
   ): RequestEntity = {
+    // pekko-http DROPS a Content-Disposition header whose name carries CR / LF (the part then
+    // has no name) - hand it the encoded names (MultipartParams). File names need no encoding:
+    // pekko-http renders them safely itself (unsafe characters replaced, plus an RFC 5987
+    // filename*)
     val dataParts = bodyParams.collect { case (key, Some(value)) =>
-      Multipart.FormData.BodyPart.Strict(key, HttpEntity(value.toString))
+      Multipart.FormData.BodyPart
+        .Strict(MultipartParams.escape(key), HttpEntity(value.toString))
     }
 
     if (useInMemoryBody) {
@@ -639,7 +644,7 @@ class PekkoHttpWSClientEngine(
           .getOrElse(ContentTypes.`application/octet-stream`)
 
         Multipart.FormData.BodyPart.Strict(
-          key,
+          MultipartParams.escape(key),
           HttpEntity.Strict(
             contentType,
             ByteString(java.nio.file.Files.readAllBytes(file.toPath))
@@ -656,7 +661,7 @@ class PekkoHttpWSClientEngine(
           .getOrElse(ContentTypes.`application/octet-stream`)
 
         Multipart.FormData.BodyPart(
-          key,
+          MultipartParams.escape(key),
           HttpEntity.fromPath(contentType, file.toPath),
           Map("filename" -> filePart.filenameAux)
         )

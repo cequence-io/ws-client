@@ -522,4 +522,169 @@ object TestServers {
       }
     }
   }
+
+  /**
+   * One part of a multipart body as a receiver parses it: the number of `Content-Disposition`
+   * headers, the names of any other part headers than `Content-Disposition` / `Content-Type`
+   * (lower-cased), the `Content-Disposition` parameters (quoted-strings unquoted, sorted by
+   * name - their order carries no meaning; a duplicate stays visible) and the content.
+   */
+  final case class ReceivedPart(
+    dispositions: Int,
+    otherHeaders: Seq[String],
+    dispositionParams: Seq[(String, String)],
+    content: String
+  )
+
+  object MultipartInjection {
+
+    // caller-supplied names that try to leave their quoted-string: an extra parameter, extra
+    // part headers and (via the blank line) a content prefix
+    val DataName = "k\"\r\nY-Injected: 2"
+    val FileKey = "f\"; filename=\"evil.sh\r\nZ-Injected: 3"
+    val DisplayName = "a\"; name=\"x\r\nX-Injected: 1\r\n\r\nP"
+    val DataValue = "data-value"
+    val FileContent = "file-content"
+    val FileName = "upload.txt"
+
+    // the WHATWG / RFC 7578 4.2 encoding of a Content-Disposition parameter value
+    def html5Escaped(value: String): String =
+      value.replace("\"", "%22").replace("\r", "%0D").replace("\n", "%0A")
+
+    /**
+     * The parts the scenario posts (one data part, a file under a display name, a file under
+     * its base name), each staying ONE part with one `Content-Disposition` header and its own
+     * content - the names HTML5-encoded (the Play, jdk, sttp and zio-http engines).
+     */
+    val expected: Seq[ReceivedPart] = Seq(
+      ReceivedPart(1, Nil, Seq("name" -> html5Escaped(DataName)), DataValue),
+      ReceivedPart(
+        1,
+        Nil,
+        Seq("filename" -> html5Escaped(DisplayName), "name" -> "file"),
+        FileContent
+      ),
+      ReceivedPart(
+        1,
+        Nil,
+        Seq("filename" -> FileName, "name" -> html5Escaped(FileKey)),
+        FileContent
+      )
+    )
+  }
+
+  /**
+   * Posts a multipart body whose data-part name, file key and display file name (see
+   * [[MultipartInjection]]) carry quotes and CR/LF, and returns its parts as the server
+   * received them.
+   */
+  def multipartInjection(
+    engine: WSClientEngine,
+    useInMemoryBody: Boolean
+  ): Seq[ReceivedPart] = {
+    import MultipartInjection._
+
+    val dir = Files.createTempDirectory("ws-client-multipart")
+    val file = dir.resolve(FileName).toFile
+    Files.write(file.toPath, FileContent.getBytes("UTF-8"))
+
+    try
+      withEchoServer { port =>
+        val response = engine.getResponseOrError(
+          Await.result(
+            engine.execPOSTMultipartRich(
+              SiteBinding(s"http://localhost:$port"),
+              "upload",
+              fileParams = Seq(("file", file, Some(DisplayName)), (FileKey, file, None)),
+              bodyParams = Seq(DataName -> Some(DataValue)),
+              useInMemoryBody = useInMemoryBody
+            ),
+            30.seconds
+          )
+        )
+        val contentType = (response.json \ "contentType").as[String]
+        val boundary = contentType
+          .split(";")
+          .map(_.trim)
+          .collectFirst {
+            case param if param.startsWith("boundary=") =>
+              param.stripPrefix("boundary=").stripPrefix("\"").stripSuffix("\"")
+          }
+          .getOrElse(throw new IllegalStateException(s"No boundary in: $contentType"))
+
+        parseMultipart((response.json \ "body").as[String], boundary)
+      }
+    finally {
+      Files.deleteIfExists(file.toPath)
+      Files.deleteIfExists(dir)
+    }
+  }
+
+  private def parseMultipart(
+    body: String,
+    boundary: String
+  ): Seq[ReceivedPart] =
+    body
+      .split(java.util.regex.Pattern.quote("--" + boundary), -1)
+      .toSeq
+      .drop(1) // the (empty) preamble
+      .takeWhile(!_.startsWith("--")) // the close delimiter and epilogue
+      .map { part =>
+        val withoutCrlf = part.stripPrefix("\r\n").stripSuffix("\r\n")
+        val headerEnd = withoutCrlf.indexOf("\r\n\r\n")
+        val (headerBlock, content) =
+          if (headerEnd < 0) (withoutCrlf, "")
+          else (withoutCrlf.substring(0, headerEnd), withoutCrlf.substring(headerEnd + 4))
+        val headers = headerBlock.split("\r\n").toSeq.filter(_.nonEmpty).map { line =>
+          val colon = line.indexOf(':')
+          if (colon < 0) (line.toLowerCase, "")
+          else (line.substring(0, colon).trim.toLowerCase, line.substring(colon + 1).trim)
+        }
+        val dispositions = headers.filter(_._1 == "content-disposition")
+        ReceivedPart(
+          dispositions = dispositions.size,
+          otherHeaders = headers
+            .map(_._1)
+            .filterNot(
+              Set("content-disposition", "content-type")
+            ),
+          dispositionParams = dispositions.headOption
+            .map(header => dispositionParams(header._2).sortBy(_._1))
+            .getOrElse(Nil),
+          content = content
+        )
+      }
+
+  // `form-data; key=token; key="quoted \" string"` -> the (key, value) pairs
+  private def dispositionParams(value: String): Seq[(String, String)] = {
+    val params = Seq.newBuilder[(String, String)]
+    var i = value.indexOf(';')
+    while (i >= 0 && i < value.length) {
+      i += 1
+      while (i < value.length && value.charAt(i) == ' ') i += 1
+      val eq = value.indexOf('=', i)
+      if (eq < 0) i = -1
+      else {
+        val key = value.substring(i, eq).trim.toLowerCase
+        val result = new StringBuilder
+        i = eq + 1
+        if (i < value.length && value.charAt(i) == '"') {
+          i += 1
+          while (i < value.length && value.charAt(i) != '"') {
+            if (value.charAt(i) == '\\' && i + 1 < value.length) i += 1
+            result += value.charAt(i)
+            i += 1
+          }
+          i += 1 // the closing quote
+        } else
+          while (i < value.length && value.charAt(i) != ';') {
+            result += value.charAt(i)
+            i += 1
+          }
+        params += key -> result.toString.trim
+        i = value.indexOf(';', i)
+      }
+    }
+    params.result()
+  }
 }

@@ -170,10 +170,10 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      any survive.
 
 8. **ws-client-testkit** - test-only fixtures (never published): embedded echo / SSE / proxy-stub
-   / protocol-restricted TLS servers (`TestServers`), the shared `cookieIsolation` engine
-   scenario, and a generic `LatchedSubscriber` for `Flow` publishers; engine modules depend on
-   it `% Test`. Core's test classpath is NOT shared via `test->test` - its dummy engine
-   providers would leak into every engine's discovery tests.
+   / protocol-restricted TLS servers (`TestServers`), the shared `cookieIsolation` and
+   `multipartInjection` engine scenarios, and a generic `LatchedSubscriber` for `Flow`
+   publishers; engine modules depend on it `% Test`. Core's test classpath is NOT shared via
+   `test->test` - its dummy engine providers would leak into every engine's discovery tests.
 
 ### Key Architectural Patterns
 
@@ -435,7 +435,14 @@ val loggedService = log(service, "MyService")
   terminate events with `\r\n\r\n` need `framingDelimiter = "\r\n\r\n"`)
 - Form fields: repeated keys keep every value on every engine (`EngineSupport.groupValues`,
   never `.toMap`); multipart files go out under their BASE name (`FilePart.filenameAux`) unless
-  a display name is given
+  a display name is given. Caller-supplied `Content-Disposition` values (data-part names, file
+  keys, file names) are encoded by core `MultipartParams` (`"` / CR / LF -> `%22` / `%0D` /
+  `%0A`, since 1.1.4) on every engine: the hand-built bodies (`MultipartBodyBuilder`,
+  `PlayWSMultipartWritable`) via `FilePart.name` / `filenamePart` / `dataPartName`; the native
+  sttp / zio-http / pekko-http renderers get `MultipartParams.escape`d names (none of them
+  escapes CR / LF; pekko-http drops the header instead, and encodes FILE names itself). A
+  data-part name that is a token stays unquoted (bytes as before). Covered on every engine by
+  `TestServers.multipartInjection`
 - No engine follows redirects (sttp disables its follow-by-default per request, the Play engines
   set `setFollowRedirect(false)` - the shaded AHC's default is a JVM-wide property) - a 3xx comes
   back as a non-acceptable status. Following redirects would re-send bodies and custom secret
