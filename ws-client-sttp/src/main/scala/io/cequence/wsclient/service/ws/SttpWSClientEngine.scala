@@ -494,6 +494,22 @@ object SttpWSClientEngine {
     HttpClientFutureBackend(options)
   }
 
+  // sttp's SttpClientException message is "Exception when sending request: <method> <uri>" -
+  // the FULL request URI, query string (API keys passed as query params) included - so neither
+  // its text nor the wrapper itself may reach a Cequence exception: a failure is described by
+  // the transport cause below the (deepest) wrapper - bounded walk, like hasCause
+  private def transportCause(e: Throwable): Option[Throwable] =
+    Iterator
+      .iterate(e)(_.getCause)
+      .takeWhile(_ != null)
+      .take(10)
+      .find(t => !hasCause(t, classOf[SttpClientException]))
+
+  private def describe(e: Throwable): String =
+    transportCause(e)
+      .map(cause => Option(cause.getMessage).getOrElse(cause.getClass.getName))
+      .getOrElse(e.getClass.getName)
+
   private[ws] def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
     (serviceEndPointName: String) =>
       {
@@ -502,7 +518,8 @@ object SttpWSClientEngine {
             if hasCause(e, classOf[TimeoutException]) ||
               hasCause(e, classOf[java.net.http.HttpTimeoutException]) =>
           throw new CequenceWSTimeoutException(
-            s"${serviceEndPointName} timed out: ${e.getMessage}."
+            s"${serviceEndPointName} timed out: ${describe(e)}.",
+            transportCause(e).orNull
           )
         // the default (JDK HttpClient) backend reports a DNS failure as ConnectException
         // caused by UnresolvedAddressException, never as UnknownHostException
@@ -510,7 +527,15 @@ object SttpWSClientEngine {
             if hasCause(e, classOf[UnknownHostException]) ||
               hasCause(e, classOf[UnresolvedAddressException]) =>
           throw new CequenceWSUnknownHostException(
-            s"${serviceEndPointName} cannot resolve a host name: ${e.getMessage}."
+            s"${serviceEndPointName} cannot resolve a host name: ${describe(e)}.",
+            transportCause(e).orNull
+          )
+        // every other sttp failure (connection refused / reset, read errors, ...): the
+        // URI-bearing sttp wrapper must never escape
+        case e: Exception if hasCause(e, classOf[SttpClientException]) =>
+          throw new CequenceWSException(
+            s"${serviceEndPointName} failed: ${describe(e)}.",
+            transportCause(e).orNull
           )
       }
   }

@@ -444,6 +444,11 @@ val loggedService = log(service, "MyService")
   data-part name that is a token stays unquoted (bytes as before). Covered on every engine by
   `TestServers.multipartInjection`. `FilePart.extension` (the default content-type lookup) is
   empty for a name of only dots - `split('.')` yields no element there, `.last` threw
+- Failure messages never carry the request URL (query params may hold API keys). sttp's
+  `SttpClientException` text includes the full URI, so `SttpWSClientEngine.defaultRecoverErrors`
+  describes a failure by the transport cause below the sttp wrapper and maps every remaining
+  sttp failure to `CequenceWSException` - never put `e.getMessage` of a request-describing
+  exception into a message
 - No engine follows redirects (sttp disables its follow-by-default per request, the Play engines
   set `setFollowRedirect(false)` - the shaded AHC's default is a JVM-wide property) - a 3xx comes
   back as a non-acceptable status. Following redirects would re-send bodies and custom secret
