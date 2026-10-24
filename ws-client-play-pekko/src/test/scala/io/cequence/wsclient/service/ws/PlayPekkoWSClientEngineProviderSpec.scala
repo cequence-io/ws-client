@@ -8,6 +8,8 @@ import io.cequence.wsclient.service.spi.{
   WSClientEngineRegistry
 }
 import io.cequence.wsclient.testkit.TestServers.{
+  CookieIsolation,
+  cookieIsolation,
   negotiatedProtocol,
   respond,
   selfSignedKeyStore,
@@ -80,6 +82,21 @@ class PlayPekkoWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         engine.close()
         noException should be thrownBy engine.close()
       }
+    }
+
+    "keep no cookie jar: never send a cookie the site did not supply (site-stateless)" in {
+      // the shaded AHC builder's default is ONE engine-wide cookie jar (Play's own
+      // AhcConfigBuilder disables it) - it replayed a cookie one SiteBinding received on every
+      // other SiteBinding's requests
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try {
+        cookieIsolation(engine) shouldBe CookieIsolation.expected(streaming = false)
+
+        // a copy builds its own client - from the same configuration
+        val copy = engine.copy()
+        try cookieIsolation(copy) shouldBe CookieIsolation.expected(streaming = false)
+        finally copy.close()
+      } finally engine.close()
     }
 
     "create its client without initializing the JVM default SSLContext" in {

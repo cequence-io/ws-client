@@ -9,16 +9,16 @@ import com.sun.net.httpserver.{
   HttpsParameters,
   HttpsServer
 }
-import io.cequence.wsclient.domain.SiteBinding
-import io.cequence.wsclient.service.WSClientEngine
+import io.cequence.wsclient.domain.{SiteBinding, WsRequestContext}
+import io.cequence.wsclient.service.{WSClientEngine, WSClientOutputStreamCore}
 import io.cequence.wsclient.service.spi.{TransportSettings, WSClientEngineRegistry}
-import play.api.libs.json.Json
+import play.api.libs.json.{JsValue, Json}
 
 import java.io.File
 import java.net.{InetSocketAddress, ServerSocket}
 import java.nio.file.Files
 import java.security.KeyStore
-import java.util.concurrent.{Executors, ThreadFactory}
+import java.util.concurrent.{Executors, ThreadFactory, TimeoutException}
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.{KeyManagerFactory, SSLContext}
 import scala.concurrent.{Await, ExecutionContext}
@@ -388,4 +388,138 @@ object TestServers {
     implicit ec: ExecutionContext
   ): String =
     tlsAttempt(engine, keyStore, serverProtocols).result.fold(throw _, identity)
+
+  /**
+   * What the requests of the [[cookieIsolation]] scenario carried in their `Cookie` header (""
+   * for none), and whether the caller still saw the `Set-Cookie` header of the cookie-setting
+   * response.
+   */
+  final case class CookieIsolation(
+    setCookieSurfaced: Boolean,
+    sameSite: String,
+    otherTenant: String,
+    otherPort: String,
+    domainPlanted: String,
+    siteSupplied: String,
+    streamed: Option[String]
+  )
+
+  object CookieIsolation {
+
+    /**
+     * A site-stateless engine keeps NO cookie jar: it surfaces `Set-Cookie` to the caller, but
+     * only ever sends the cookies a site supplies itself. `streamed` is checked (`Some`) on
+     * streaming engines only.
+     */
+    def expected(streaming: Boolean): CookieIsolation =
+      CookieIsolation(
+        setCookieSurfaced = true,
+        sameSite = "",
+        otherTenant = "",
+        otherPort = "",
+        domainPlanted = "",
+        siteSupplied = "site=supplied",
+        streamed = if (streaming) Some("") else None
+      )
+  }
+
+  /**
+   * The cookie-isolation scenario on `engine`. Tenant A (`Bearer tenant-a`) logs in at
+   * `http://127.0.0.1:A`, whose server answers with a session `Set-Cookie`. Then each of these
+   * sends a request that records the `Cookie` header it carried: tenant A again; tenant B (own
+   * credentials, same host and port); a site on another port of the same host; a `localhost`
+   * site, after that other-port server set a cookie with `Domain=localhost`; a site supplying
+   * its own `Cookie` header; and, on streaming engines, tenant B's SSE request. A request that
+   * does not complete within 30 s fails the caller with a `TimeoutException`.
+   */
+  def cookieIsolation(engine: WSClientEngine): CookieIsolation = {
+    def cookieOf(exchange: HttpExchange) =
+      Option(exchange.getRequestHeaders.getFirst("Cookie")).getOrElse[String]("")
+
+    def setCookie(value: String): HttpExchange => Unit = { exchange =>
+      exchange.getRequestBody.readAllBytes()
+      exchange.getResponseHeaders.add("Set-Cookie", value)
+      respond(exchange, 200, """{"status":"ok"}""")
+    }
+
+    val cookieEcho: HttpExchange => Unit = { exchange =>
+      exchange.getRequestBody.readAllBytes()
+      respond(exchange, 200, Json.obj("cookie" -> cookieOf(exchange)).toString)
+    }
+
+    val cookieEchoEvents: HttpExchange => Unit = { exchange =>
+      exchange.getRequestBody.readAllBytes()
+      val event = Json.obj("cookie" -> cookieOf(exchange))
+      respond(exchange, 200, s"data: $event\n\ndata: [DONE]\n\n", "text/event-stream")
+    }
+
+    withServer(
+      "/login" -> setCookie("session=tenant-a-session; Path=/"),
+      "/data" -> cookieEcho,
+      "/events" -> cookieEchoEvents
+    ) { portA =>
+      withServer(
+        "/plant" -> setCookie("planted=other-port-cookie; Domain=localhost; Path=/"),
+        "/data" -> cookieEcho
+      ) { portB =>
+        def binding(
+          coreUrl: String,
+          headers: (String, String)*
+        ) =
+          SiteBinding(coreUrl, WsRequestContext(authHeaders = headers))
+
+        val tenantA = binding(s"http://127.0.0.1:$portA", "Authorization" -> "Bearer tenant-a")
+        val tenantB = binding(s"http://127.0.0.1:$portA", "Authorization" -> "Bearer tenant-b")
+        val otherPortSite = binding(s"http://127.0.0.1:$portB")
+        val localhostSite = binding(s"http://localhost:$portA")
+        val supplyingSite = binding(s"http://127.0.0.1:$portA", "Cookie" -> "site=supplied")
+
+        def get(
+          site: SiteBinding,
+          endPoint: String
+        ) =
+          Await.result(engine.execGETRich(site, endPoint), 30.seconds)
+
+        def cookieSentBy(site: SiteBinding) =
+          (engine.getResponseOrError(get(site, "data")).json \ "cookie").as[String]
+
+        val login = get(tenantA, "login")
+        val setCookieSurfaced = login.headers.exists { case (name, values) =>
+          name.equalsIgnoreCase("Set-Cookie") && values.exists(_.contains("tenant-a-session"))
+        }
+        val sameSite = cookieSentBy(tenantA)
+        val otherTenant = cookieSentBy(tenantB)
+        val otherPort = cookieSentBy(otherPortSite)
+        get(otherPortSite, "plant")
+        val domainPlanted = cookieSentBy(localhostSite)
+        val siteSupplied = cookieSentBy(supplyingSite)
+
+        val streamed = engine match {
+          case streaming: WSClientOutputStreamCore =>
+            val subscriber = new LatchedSubscriber[JsValue]
+            streaming.execJsonStreamPublisher(tenantB, "events", "GET").subscribe(subscriber)
+            if (!subscriber.awaitDone(30))
+              throw new TimeoutException("The SSE request did not complete within 30 s.")
+            subscriber.error.foreach(error => throw error)
+            subscriber.received match {
+              case Seq(event) => Some((event \ "cookie").as[String])
+              case events =>
+                throw new IllegalStateException(s"Expected one SSE event, got: $events")
+            }
+
+          case _ => None
+        }
+
+        CookieIsolation(
+          setCookieSurfaced = setCookieSurfaced,
+          sameSite = sameSite,
+          otherTenant = otherTenant,
+          otherPort = otherPort,
+          domainPlanted = domainPlanted,
+          siteSupplied = siteSupplied,
+          streamed = streamed
+        )
+      }
+    }
+  }
 }

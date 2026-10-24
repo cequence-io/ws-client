@@ -14,7 +14,12 @@ import io.cequence.wsclient.service.spi.{
 }
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
-import io.cequence.wsclient.testkit.TestServers.{withDumbProxy, withEchoServer}
+import io.cequence.wsclient.testkit.TestServers.{
+  CookieIsolation,
+  cookieIsolation,
+  withDumbProxy,
+  withEchoServer
+}
 import play.api.libs.json.{JsString, Json}
 
 import java.io.{File, PrintWriter}
@@ -53,6 +58,12 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         engine.close()
         noException should be thrownBy engine.close()
       }
+    }
+
+    "keep no cookie jar: never send a cookie the site did not supply (site-stateless)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try cookieIsolation(engine) shouldBe CookieIsolation.expected(streaming = false)
+      finally engine.close()
     }
 
     "POST a JSON body" in {

@@ -16,6 +16,8 @@ import io.cequence.wsclient.service.spi.{
 }
 import io.cequence.wsclient.testkit.LatchedSubscriber
 import io.cequence.wsclient.testkit.TestServers.{
+  CookieIsolation,
+  cookieIsolation,
   negotiatedProtocol,
   respond,
   selfSignedKeyStore,
@@ -92,6 +94,12 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         engine.close()
         noException should be thrownBy engine.close()
       }
+    }
+
+    "keep no cookie jar: never send a cookie the site did not supply (site-stateless)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try cookieIsolation(engine) shouldBe CookieIsolation.expected(streaming = true)
+      finally engine.close()
     }
 
     "own only daemon threads (a leaked engine must not block JVM exit)" in {

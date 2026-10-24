@@ -17,7 +17,14 @@ import io.cequence.wsclient.service.spi.{
 }
 import io.cequence.wsclient.service.ws.Timeouts
 import io.cequence.wsclient.testkit.LatchedSubscriber
-import io.cequence.wsclient.testkit.TestServers.{echo, respond, sse, withServer}
+import io.cequence.wsclient.testkit.TestServers.{
+  CookieIsolation,
+  cookieIsolation,
+  echo,
+  respond,
+  sse,
+  withServer
+}
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 import play.api.libs.json.{JsString, Json}
@@ -336,6 +343,12 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
           }
         }
       }
+    }
+
+    "keep no cookie jar: never send a cookie the site did not supply (site-stateless)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try cookieIsolation(engine) shouldBe CookieIsolation.expected(streaming = true)
+      finally engine.close()
     }
 
     "copy() with reuseExecContext=true (default) shares this engine's actor system" in {

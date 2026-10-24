@@ -155,9 +155,10 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      any survive.
 
 8. **ws-client-testkit** - test-only fixtures (never published): embedded echo / SSE / proxy-stub
-   / protocol-restricted TLS servers (`TestServers`) and a generic `LatchedSubscriber` for
-   `Flow` publishers; engine modules depend on it `% Test`. Core's test classpath is NOT shared
-   via `test->test` - its dummy engine providers would leak into every engine's discovery tests.
+   / protocol-restricted TLS servers (`TestServers`), the shared `cookieIsolation` engine
+   scenario, and a generic `LatchedSubscriber` for `Flow` publishers; engine modules depend on
+   it `% Test`. Core's test classpath is NOT shared via `test->test` - its dummy engine
+   providers would leak into every engine's discovery tests.
 
 ### Key Architectural Patterns
 
@@ -419,6 +420,13 @@ val loggedService = log(service, "MyService")
 - No engine follows redirects (sttp disables its follow-by-default per request) - a 3xx comes
   back as a non-acceptable status. Following redirects would re-send bodies and custom secret
   headers (e.g. `X-Api-Key`) to whatever origin the `Location` names
+- No engine keeps a cookie jar (since 1.1.4): `Set-Cookie` is surfaced in `RichResponse.headers`
+  but never stored or replayed - a jar is per-engine state shared by every `SiteBinding`. Keep
+  `.setCookieStore(null)` in `PlayWSClientEngine.client`: the shaded AHC builder defaults to ONE
+  engine-wide `ThreadSafeCookieStore` (Play's own `AhcConfigBuilder` disables it, but the engine
+  builds its AHC config directly), which replayed one site's / tenant's cookies on every other
+  `SiteBinding` (AHC 2.1.11 even honored a foreign `Domain` attribute). Covered on every engine by
+  the shared testkit scenario `TestServers.cookieIsolation`
 - `DirectWSClient` defaults a scheme-less URL to `https://` and rejects schemes other than
   http/https; plain HTTP needs an explicit `http://`
 - Artifact rename hazard: the pre-1.0 `ws-client-play` / `ws-client-play-stream` artifacts and

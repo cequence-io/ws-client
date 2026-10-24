@@ -99,6 +99,11 @@ class PlayWSClientEngine(
         )
       )
       .setRequestTimeout(timeouts.requestTimeout.getOrElse(DefaultTimeouts.requestTimeout))
+      // engines are site-stateless: no cookie jar. The builder's default is ONE engine-wide
+      // cookie store (Play's own AhcConfigBuilder disables it too), which replayed a cookie one
+      // SiteBinding received on every other SiteBinding's requests - and over a site's own
+      // Cookie header
+      .setCookieStore(null)
     // the shaded AHC's own default (TLSv1.2/1.1/1) fails the handshake with TLS-1.3-only hosts -
     // offer the JDK's default client protocols instead, unless the operator configured AHC's list
     PlayWSClientEngine.tlsProtocols.foreach(protocols =>
