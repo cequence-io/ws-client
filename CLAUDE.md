@@ -517,4 +517,14 @@ val loggedService = log(service, "MyService")
   triple-quoted strings - build it as `"\\u" + hex`. Tips for the differential check: run it as a
   standalone JVM (sbt's 1 GB heap OOMs on a looping input), with a per-call timeout and
   `-XX:-OmitStackTraceInFastThrow` (hot NPEs otherwise lose their message), and compare
-  exception classes, not messages
+  exception classes, not messages. Numbers are a `Double` / `Long` only where that holds the literal exactly, else
+  a `BigDecimal` of play-json's precision (DECIMAL128): a double rounded digits beyond its
+  precision, flushed tiny numbers to 0 and huge ones to Infinity (a NumberFormatException in
+  `JsNumber`), and an integer beyond Long came back as a string; `repairJsonAsValue` returns that
+  `BigDecimal`. A literal longer than 1000 characters (Jackson's limit) never becomes one -
+  `BigDecimal` parsing is superlinear - and stays text where a double cannot hold it. An
+  exponent's `+` belongs to the number (Python's NUMBER_CHARS lacks it: `2.50E+3` came back as
+  `2.5`); a `+` no digit follows still ends the number before its `e`. A second differential
+  oracle - valid nested number-heavy JSON (signed / unsigned exponents, values beyond a double
+  or a Long, long decimals) repairs exactly like Jackson / play-json parses it - must stay at
+  100% (it was 27%)

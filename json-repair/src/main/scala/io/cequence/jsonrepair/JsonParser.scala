@@ -1132,6 +1132,11 @@ class JsonParser(
         getCharAt() match {
           case Some(c) if NumberChars.contains(c) && (!isArray || c != ',') =>
             index += 1
+          // an exponent's sign: the number ended at a '+' (Python's NUMBER_CHARS has none), so
+          // 2.50E+3 came back as 2.5
+          case Some('+')
+              if index > startIndex && getCharAt(-1).exists(c => c == 'e' || c == 'E') =>
+            index += 1
           case _ =>
             break()
         }
@@ -1139,6 +1144,13 @@ class JsonParser(
     }
 
     var numStr = substring(startIndex, index)
+
+    // a sign that no digit follows (1e+): the number ends before it, where it always did
+    val sign = numStr.indexOf('+')
+    if (sign >= 0 && !numStr.lift(sign + 1).exists(_.isDigit)) {
+      index = startIndex + sign
+      numStr = numStr.substring(0, sign)
+    }
 
     // Roll back one character if the number ends with invalid character
     if (numStr.nonEmpty && "-eE/,".contains(numStr.last)) {
@@ -1150,12 +1162,12 @@ class JsonParser(
       if (numStr.contains(',')) {
         numStr
       } else if (numStr.contains('.') || numStr.contains('e') || numStr.contains('E')) {
-        numStr.toDouble
+        JsonParser.decimal(numStr)
       } else if (numStr == "-") {
         // If there is a stray "-", parse the next value
         parseJson()
       } else {
-        numStr.toLong
+        JsonParser.integer(numStr)
       }
     } catch {
       case _: NumberFormatException =>
@@ -1309,4 +1321,39 @@ object JsonParser {
 
   private def isHex(c: Char): Boolean =
     (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+
+  // A number is a Double / Long (Python's float / int) where that holds it exactly, else a
+  // BigDecimal of play-json's precision (DECIMAL128): a double rounds digits beyond its
+  // precision, flushes a tiny number to 0 and a huge one to Infinity (which JsNumber rejects),
+  // and an integer beyond Long came back as a string. Not for numbers longer than Jackson's
+  // limit (1000 characters): parsing one into a BigDecimal is superlinear
+  private val MaxExactNumberLength = 1000
+
+  private def exact(numStr: String): Option[BigDecimal] =
+    if (numStr.length > MaxExactNumberLength) None
+    else
+      try Some(BigDecimal(numStr, java.math.MathContext.DECIMAL128))
+      catch { case _: NumberFormatException => None }
+
+  private def decimal(numStr: String): Any = {
+    val double = numStr.toDouble
+    exact(numStr) match {
+      case Some(value)
+          if double.isInfinite || BigDecimal.decimal(double).compare(value) != 0 =>
+        value
+      case None if double.isInfinite => numStr // too long for an exact value: kept as text
+      case _                         => double
+    }
+  }
+
+  // beyond Long: the exact value; anything else that is no number (e.g. 1/2) still throws, so
+  // the caller keeps it as a string
+  private def integer(numStr: String): Any =
+    try numStr.toLong
+    catch {
+      case e: NumberFormatException =>
+        val digits = numStr.stripPrefix("-")
+        if (digits.nonEmpty && digits.forall(_.isDigit)) exact(numStr).getOrElse(throw e)
+        else throw e
+    }
 }

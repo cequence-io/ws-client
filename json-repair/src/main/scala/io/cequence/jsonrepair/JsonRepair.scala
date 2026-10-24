@@ -270,7 +270,9 @@ object JsonRepair {
       case l: Long    => JsNumber(l)
       case d: Double  => JsNumber(d)
       case f: Float   => JsNumber(f.toDouble)
-      case s: String  =>
+      // a number a Double / Long cannot hold exactly (JsonParser)
+      case b: BigDecimal => JsNumber(b)
+      case s: String     =>
         // First check for boolean or null literals that might be strings
         s.toLowerCase.trim match {
           case "true"  => JsBoolean(true)

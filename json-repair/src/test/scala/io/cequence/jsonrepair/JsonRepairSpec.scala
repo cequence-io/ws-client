@@ -769,4 +769,53 @@ class JsonRepairSpec extends AnyFlatSpec with Matchers {
     JsonRepair.repair("[\"\\l \\x41 " + u + "12 " + u + "ZZZZ\"]") shouldBe
       "[\"\\\\l \\\\x41 \\\\u12 \\\\uZZZZ\"]"
   }
+
+  // a number ended at its exponent's '+' sign: 2.50E+3 came back as 2.5 (and the rest of it as
+  // debris) - on the repair path, which valid nested JSON takes too
+  it should "keep an exponent with a plus sign" in {
+    JsonRepair.repair("""{"a": {"b": 2.50E+3, "c": -1.5e+1, "d": [1e+2, 1E+0]}}""") shouldBe
+      """{"a":{"b":2500,"c":-15,"d":[100,1]}}"""
+    JsonRepair.repair("""{"a":1E+2,}""") shouldBe """{"a":100}"""
+    JsonRepair.repair("""{"a": 2.50E+3""") shouldBe """{"a":2500}"""
+
+    // unchanged: a sign that no digit follows still ends the number before its e
+    JsonRepair.repair("""{"a": 1e+}""") shouldBe """{"a":1}"""
+    JsonRepair.repair("""{"a": 1e+, "b": 2}""") shouldBe """{"a":1,"b":2}"""
+  }
+
+  // numbers were Doubles / Longs: digits beyond a double's precision were rounded, a tiny number
+  // became 0, a huge one Infinity (a NumberFormatException in JsNumber) and an integer beyond
+  // Long a string
+  it should "repair a number a double cannot hold like Jackson parses it" in {
+    val nested =
+      """{"a": {"big": 1e400, "tiny": 3.006E-1000, "digits": 0.255621758985604992, """ +
+        """"id": 123456789012345678901, "plain": 1.5, "n": 3}}"""
+    JsonRepair.loads(nested) shouldBe Json.parse(nested)
+    JsonRepair.repair("[1e400,][1e400]") shouldBe "[[1E+400],[1E+400]]"
+    JsonRepair.repair("""{"a": 12345678901234567890123,}""") shouldBe
+      """{"a":12345678901234567890123}"""
+
+    // the raw value: a Double / Long where it holds the number exactly, as before
+    JsonRepair.repairJsonAsValue(
+      """{"a": {"x": 1.5, "n": 3, "big": 1e400, "id": 123456789012345678901}}"""
+    ) shouldBe Map(
+      "a" -> Map(
+        "x" -> 1.5,
+        "n" -> 3L,
+        "big" -> BigDecimal("1e400"),
+        "id" -> BigDecimal("123456789012345678901")
+      )
+    )
+
+    // longer than Jackson's limit (1000 characters) and beyond a double: kept as text - a
+    // BigDecimal of it would take superlinear time
+    val longNumber = "9" * 1001 + ".5"
+    JsonRepair.repair(
+      s"""{"a": {"b": $longNumber}}"""
+    ) shouldBe s"""{"a":{"b":"$longNumber"}}"""
+
+    // unchanged: no number at all
+    JsonRepair.repair("""{"a": "x", "b": 1/2}""") shouldBe """{"a":"x","b":"1/2"}"""
+    JsonRepair.repair("""{"price": 1,000}""") shouldBe """{"price":"1,000"}"""
+  }
 }
