@@ -270,7 +270,8 @@ Client-level settings (timeouts, proxy) live in `TransportSettings` instead. Use
 
 The build manages different dependency versions for Scala 2.12, 2.13, and 3.2:
 - Play JSON: 2.8.2 (Scala 2.12/2.13), 2.10.0-RC6 (Scala 3.2)
-- Akka Stream: 2.6.1 (Scala 2.12), 2.6.20 (Scala 2.13/3.2)
+- Akka Stream: 2.6.20 (not 2.6.1 on Scala 2.12: its akka-protobuf-v3 POM pulls protobuf-java
+  3.10.0); Akka HTTP 10.5.3 (ws-client-play-akka-stream only; BUSL-1.1 licensed)
 - Play WS (Akka): 2.1.11 (Scala 2.12/2.13), 2.2.0-M2 (Scala 3.2)
 - Play WS (Pekko, `org.playframework`): 3.0.14 (shaded AHC 2.16.1 / Netty 4.1.138 - stricter HTTP response parsing than 3.0.7's 4.1.118: bare-LF lines, CL + TE, control chars in headers are rejected); Pekko Stream: 1.6.0; Pekko HTTP: 1.3.0 (Scala 2.13 only)
 
@@ -308,6 +309,9 @@ Scala per project and an `inThisBuild` lookup sees the stale default version.
 - Jackson - declared directly in core and json-repair (overriding the 2.11.4 that play-json pins)
   so consumers resolve a patched line; its `StreamReadConstraints` bound nesting depth and
   string/number length on every parse
+- Bouncy Castle (ws-client-zio-http) - declared directly at 1.86 like Jackson: zio-http's
+  compile dependency netty-pkitesting pulls 1.84 (CVE-2026-8763, CVE-2026-13506 - the client
+  never uses it); bcprov / bcpkix / bcutil must share one version
 - ScalaTest - Testing framework (test scope)
 
 ## Common Development Patterns
