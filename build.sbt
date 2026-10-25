@@ -9,7 +9,7 @@ ThisBuild / description := "Generic WebServices client library for Scala with pl
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala213
-ThisBuild / version := "1.1.4-SNAPSHOT"
+ThisBuild / version := "1.1.4"
 ThisBuild / isSnapshot := false
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 

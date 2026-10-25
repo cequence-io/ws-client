@@ -15,7 +15,7 @@ The project includes:
 - Streaming support for large payloads
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 1.1.4-SNAPSHOT (latest release: 1.1.3)
+Current version: 1.1.4
 
 ## Build Commands
 
