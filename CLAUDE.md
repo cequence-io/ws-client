@@ -95,10 +95,12 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      decompression: AHC < 2.16.1 (play-ws 2.1.11 / 2.2.0-M2 - the Akka flavor) inflates gzip /
      deflate bodies without any limit (CVE-2026-85721), so `PlayWSClientEngine.boundedInflater`
      replaces AHC's `inflater` handler with AHC 2.16.1's own design (`maxDecompressedResponseSize`
-     property, default 256 MiB, `DecompressionException`, rest of the body dropped). It is
-     installed only when the shaded AHC lacks the limit (no `getMaxDecompressedResponseSize` on
-     `AsyncHttpClientConfig`), so the Pekko flavor keeps AHC's own. The provider specs cover both
-     (redirect with the property set; a gzip bomb under a lowered limit)
+     property, default 256 MiB, 0 or less = no limit - keep AHC's `> 0` guard;
+     `DecompressionException`, rest of the body dropped; counted per response, so a long
+     compressed stream fails too). It is installed only when the shaded AHC lacks the limit (no
+     `getMaxDecompressedResponseSize` on `AsyncHttpClientConfig`), so the Pekko flavor keeps
+     AHC's own. The provider specs cover both (redirect with the property set; a gzip bomb under
+     a lowered limit, and with 0 / -1)
    - Known CVEs (reachability checked 2026-10-24): the Akka flavor's shaded Netty 4.1.45 / 4.1.60
      and AHC 2.10.5 / 2.12.3 carry dozens; reachable were only the cookie store (now off),
      redirects (only with the property) and decompression - all three now closed in code.
@@ -447,7 +449,9 @@ val loggedService = log(service, "MyService")
   `%0A`, since 1.1.4) on every engine: the hand-built bodies (`MultipartBodyBuilder`,
   `PlayWSMultipartWritable`) via `FilePart.name` / `filenamePart` / `dataPartName`; the native
   sttp / zio-http / pekko-http renderers get `MultipartParams.escape`d names (none of them
-  escapes CR / LF; pekko-http drops the header instead, and encodes FILE names itself). A
+  escapes CR / LF; pekko-http drops the header instead). The one exception: pekko-http FILE
+  names go out raw - pekko-http renders them itself, `?` per unsafe character plus an RFC 5987
+  `filename*` (so servers see a different file name there than on the other engines). A
   data-part name that is a token stays unquoted (bytes as before). Covered on every engine by
   `TestServers.multipartInjection`. `FilePart.extension` (the default content-type lookup) is
   empty for a name of only dots - `split('.')` yields no element there, `.last` threw

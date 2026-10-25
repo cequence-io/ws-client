@@ -465,7 +465,7 @@ final class SttpWSClientEngine private[ws] (
 
 object SttpWSClientEngine {
 
-  import ThrowableUtil.hasCause
+  import ThrowableUtil.{causeChain, hasCause}
 
   def apply(
     transportSettings: TransportSettings = TransportSettings()
@@ -497,13 +497,10 @@ object SttpWSClientEngine {
   // sttp's SttpClientException message is "Exception when sending request: <method> <uri>" -
   // the FULL request URI, query string (API keys passed as query params) included - so neither
   // its text nor the wrapper itself may reach a Cequence exception: a failure is described by
-  // the transport cause below the (deepest) wrapper - bounded walk, like hasCause
+  // the transport cause below the deepest wrapper (the failure itself without a wrapper)
   private def transportCause(e: Throwable): Option[Throwable] =
-    Iterator
-      .iterate(e)(_.getCause)
-      .takeWhile(_ != null)
-      .take(10)
-      .find(t => !hasCause(t, classOf[SttpClientException]))
+    causeChain(e).collect { case wrapper: SttpClientException => wrapper }.toList.lastOption
+      .fold(Option(e))(wrapper => Option(wrapper.getCause))
 
   private def describe(e: Throwable): String =
     transportCause(e)

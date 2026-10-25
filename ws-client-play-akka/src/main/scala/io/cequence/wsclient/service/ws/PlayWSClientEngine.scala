@@ -790,8 +790,9 @@ object PlayWSClientEngine {
    * which inflates gzip / deflate response bodies without any, CVE-2026-85721), the channel
    * initializer replacing its response inflater with a bounded one: AHC 2.16.1's own fix - a
    * response whose decompressed body exceeds `maxDecompressedResponseSize` bytes (256 MiB by
-   * default; the AHC property, read from the same sources) fails with a
-   * `DecompressionException`, the rest of its body dropped. `None` for an AHC with the limit.
+   * default, 0 or less: no limit; the AHC property, read from the same sources) fails with a
+   * `DecompressionException`, the rest of its body dropped. The count covers the whole
+   * response - a long-lived compressed stream included. `None` for an AHC with the limit.
    */
   private[ws] def boundedInflater: Option[java.util.function.Consumer[Channel]] =
     if (ahcBoundsDecompression) None
@@ -815,7 +816,7 @@ object PlayWSClientEngine {
     }
 
   // AHC 2.16.1's BoundedHttpContentDecompressor: the decoder of each compressed response counts
-  // the bytes it produces
+  // the bytes it produces - unless the limit is 0 or less, AHC's "no limit"
   private final class BoundedInflater(
     keepEncodingHeader: Boolean,
     maxBytes: Long
@@ -823,7 +824,8 @@ object PlayWSClientEngine {
 
     override protected def newContentDecoder(contentEncoding: String): EmbeddedChannel = {
       val decoder = super.newContentDecoder(contentEncoding)
-      if (decoder != null) decoder.pipeline().addLast(new DecompressedSizeLimit(maxBytes))
+      if (decoder != null && maxBytes > 0)
+        decoder.pipeline().addLast(new DecompressedSizeLimit(maxBytes))
       decoder
     }
 

@@ -247,6 +247,10 @@ class PlayAkkaWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         }
         // the default limit: 256 MiB
         withEngine(None)(bodyLength(_, "bomb")) shouldBe Some(4 * mebibyte)
+        // 0 or less: no limit, as in AHC 2.16.1
+        Seq(0, -1).foreach { noLimit =>
+          withEngine(Some(noLimit))(bodyLength(_, "bomb")) shouldBe Some(4 * mebibyte)
+        }
       }
     }
 

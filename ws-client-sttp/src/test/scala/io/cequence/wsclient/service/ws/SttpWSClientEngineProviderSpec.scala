@@ -24,6 +24,8 @@ import io.cequence.wsclient.testkit.TestServers.{
   withEchoServer
 }
 import play.api.libs.json.{JsString, Json}
+import sttp.client4.{basicRequest, SttpClientException}
+import sttp.model.Uri
 
 import java.io.{File, PrintWriter, StringWriter}
 import java.net.{InetSocketAddress, ServerSocket}
@@ -296,6 +298,36 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       val dns = failureOf("http://nonexistent-host-ws-client-test.invalid")
       dns shouldBe a[CequenceWSUnknownHostException]
       assertRedacted(dns)
+    }
+
+    "describe a failure by the transport cause below the deepest sttp wrapper" in {
+      val request = basicRequest.get(Uri.unsafeParse("http://localhost/ping?key=secret"))
+      def failureOf(e: Exception) =
+        Try(SttpWSClientEngine.defaultRecoverErrors("svc")(e)).failed.get
+
+      val reset = new java.io.IOException("connection reset")
+      val nested = failureOf(
+        new SttpClientException.ReadException(
+          request,
+          new SttpClientException.ReadException(request, reset)
+        )
+      )
+      nested.getClass shouldBe classOf[CequenceWSException]
+      nested.getMessage shouldBe "svc failed: connection reset."
+      nested.getCause shouldBe reset
+
+      // no sttp wrapper: the failure itself
+      val slow = new java.util.concurrent.TimeoutException("too slow")
+      val timeout = failureOf(slow)
+      timeout shouldBe a[CequenceWSTimeoutException]
+      timeout.getMessage shouldBe "svc timed out: too slow."
+      timeout.getCause shouldBe slow
+
+      // a wrapper without a cause: described by its class, no cause
+      val bare = new SttpClientException.ReadException(request, null)
+      val failure = failureOf(bare)
+      failure.getMessage shouldBe s"svc failed: ${bare.getClass.getName}."
+      failure.getCause shouldBe null
     }
 
     "serve two sites through one engine, with correctly isolated auth headers" in {
