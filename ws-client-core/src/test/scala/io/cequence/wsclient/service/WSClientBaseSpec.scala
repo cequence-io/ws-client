@@ -34,7 +34,7 @@ class WSClientBaseSpec extends AnyWordSpec with Matchers {
 
   "WSClientBase.contentTypeByExtension (default)" should {
 
-    "give the extension's content type, and none for a name of only dots" in {
+    "give the extension's content type, and none for a name without an extension" in {
       val client = new DefaultClient()
       client.contentType(FilePart("file", "/tmp/report.pdf")) shouldBe
         "content-type: application/pdf\r\n"
@@ -46,6 +46,9 @@ class WSClientBaseSpec extends AnyWordSpec with Matchers {
       ) shouldBe "content-type: image/webp\r\n"
       // threw NoSuchElementException (FilePart.extension), failing the whole request
       client.contentType(FilePart("file", "/tmp/report.pdf", Some("..."))) shouldBe ""
+      // a name without a dot is no extension - a file named "pdf" went out as application/pdf
+      client.contentType(FilePart("file", "/tmp/pdf")) shouldBe ""
+      client.contentType(FilePart("file", "/tmp/report.pdf", Some("json"))) shouldBe ""
     }
   }
 

@@ -20,9 +20,13 @@ case class FilePart(
   }
   def filenamePart = MultipartParams.quoted(filenameAux)
 
-  // empty for a name of only dots ("...", or a "." / ".." path): split drops trailing empty
-  // strings, so it yields no element at all there - .last threw NoSuchElementException
-  def extension: String = filenameAux.split('.').lastOption.getOrElse("")
+  // the part after the last dot - empty for a name without a dot (split('.').last made such a
+  // name its own extension: a file named "pdf" went out as application/pdf), after a trailing
+  // dot, and for a name of only dots ("...", or a "." / ".." path - .last threw there)
+  def extension: String = {
+    val lastDot = filenameAux.lastIndexOf('.')
+    if (lastDot < 0) "" else filenameAux.substring(lastDot + 1)
+  }
 }
 
 /**

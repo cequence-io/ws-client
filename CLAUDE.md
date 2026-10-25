@@ -454,7 +454,9 @@ val loggedService = log(service, "MyService")
   `filename*` (so servers see a different file name there than on the other engines). A
   data-part name that is a token stays unquoted (bytes as before). Covered on every engine by
   `TestServers.multipartInjection`. `FilePart.extension` (the default content-type lookup) is
-  empty for a name of only dots - `split('.')` yields no element there, `.last` threw
+  the part after the last dot - empty for a name without a dot (`split('.').last` made such a
+  name its own extension: a file named `pdf` went out as `application/pdf`), after a trailing
+  dot, and for a name of only dots (`.last` threw there)
 - Failure messages never carry the request URL (query params may hold API keys). sttp's
   `SttpClientException` text includes the full URI, so `SttpWSClientEngine.defaultRecoverErrors`
   describes a failure by the transport cause below the sttp wrapper and maps every remaining

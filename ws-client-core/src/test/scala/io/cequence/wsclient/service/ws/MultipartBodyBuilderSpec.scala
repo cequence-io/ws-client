@@ -148,14 +148,16 @@ class MultipartBodyBuilderSpec extends AnyWordSpec with Matchers {
 
   "FilePart.extension" should {
 
-    "be the part after the last dot, and empty for a name of only dots" in {
+    "be the part after the last dot - empty without a dot, after a trailing one, or of only dots" in {
       FilePart("file", "/tmp/report.pdf").extension shouldBe "pdf"
       FilePart("file", "/tmp/archive.tar.gz").extension shouldBe "gz"
       FilePart("file", "/tmp/data.json", Some("upload.TXT")).extension shouldBe "TXT"
-      // as before: no dot is the whole name, a trailing dot the part before it
-      FilePart("file", "/tmp/README").extension shouldBe "README"
-      FilePart("file", "/tmp/notes.").extension shouldBe "notes"
       FilePart("file", "/tmp/.env").extension shouldBe "env"
+      // a name without a dot was its own extension, a trailing dot gave the part before it
+      FilePart("file", "/tmp/README").extension shouldBe ""
+      FilePart("file", "/tmp/pdf").extension shouldBe ""
+      FilePart("file", "/tmp/notes.").extension shouldBe ""
+      FilePart("file", "/tmp/archive.tar.").extension shouldBe ""
       // threw NoSuchElementException - and so did the default content-type lookup
       FilePart("file", "/tmp/data.json", Some("...")).extension shouldBe ""
       FilePart("file", "/tmp/data.json", Some(".")).extension shouldBe ""
