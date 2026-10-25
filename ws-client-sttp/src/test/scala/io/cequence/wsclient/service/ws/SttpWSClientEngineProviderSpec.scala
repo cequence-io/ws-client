@@ -2,6 +2,7 @@ package io.cequence.wsclient.service.ws
 
 import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
 import io.cequence.wsclient.domain.{
+  CequenceWSException,
   CequenceWSTimeoutException,
   CequenceWSUnknownHostException,
   SiteBinding,
@@ -14,13 +15,23 @@ import io.cequence.wsclient.service.spi.{
 }
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
-import io.cequence.wsclient.testkit.TestServers.{withDumbProxy, withEchoServer}
+import io.cequence.wsclient.testkit.TestServers.{
+  CookieIsolation,
+  cookieIsolation,
+  MultipartInjection,
+  multipartInjection,
+  withDumbProxy,
+  withEchoServer
+}
 import play.api.libs.json.{JsString, Json}
+import sttp.client4.{basicRequest, SttpClientException}
+import sttp.model.Uri
 
-import java.io.{File, PrintWriter}
-import java.net.InetSocketAddress
+import java.io.{File, PrintWriter, StringWriter}
+import java.net.{InetSocketAddress, ServerSocket}
 import scala.concurrent.Await
 import scala.concurrent.duration._
+import scala.util.Try
 
 class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
@@ -53,6 +64,25 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         engine.close()
         noException should be thrownBy engine.close()
       }
+    }
+
+    "keep no cookie jar: never send a cookie the site did not supply (site-stateless)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try cookieIsolation(engine) shouldBe CookieIsolation.expected(streaming = false)
+      finally engine.close()
+    }
+
+    "keep caller-supplied multipart names inside their Content-Disposition parameter" in {
+      // a quote or CR/LF in a display file name, file key or data-part name used to add
+      // parameters, part headers and a content prefix to the part
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        Seq(false, true).foreach { useInMemoryBody =>
+          withClue(s"useInMemoryBody = $useInMemoryBody: ") {
+            multipartInjection(engine, useInMemoryBody) shouldBe MultipartInjection.expected
+          }
+        }
+      finally engine.close()
     }
 
     "POST a JSON body" in {
@@ -198,6 +228,106 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       }
 
       engine.close()
+    }
+
+    "never echo query values in a failure's message or cause chain (timeout, refused, DNS)" in {
+      // sttp's own exceptions carry the FULL request URI - an API key in extraParams included
+      val siteSecret = "site-query-secret"
+      val callSecret = "call-query-secret"
+
+      def failureOf(
+        coreUrl: String,
+        settings: TransportSettings = TransportSettings()
+      ) = {
+        val engine = WSClientEngineRegistry(settings, Some(expectedEngineId))
+        val site =
+          SiteBinding(coreUrl, WsRequestContext(extraParams = Seq("key" -> siteSecret)))
+        try
+          Try(
+            Await.result(
+              engine.execGETRich(site, "slow", params = Seq("token" -> Some(callSecret))),
+              30.seconds
+            )
+          ).failed.get
+        finally engine.close()
+      }
+
+      def rendered(e: Throwable) = {
+        val out = new StringWriter()
+        e.printStackTrace(new PrintWriter(out))
+        out.toString
+      }
+
+      def assertRedacted(e: Throwable) = {
+        rendered(e) should not include siteSecret
+        rendered(e) should not include callSecret
+      }
+
+      val server = HttpServer.create(new InetSocketAddress(0), 0)
+      server.createContext(
+        "/slow",
+        new HttpHandler {
+          override def handle(exchange: HttpExchange): Unit = {
+            Thread.sleep(2000)
+            exchange.close()
+          }
+        }
+      )
+      server.start()
+      val timeout =
+        try
+          failureOf(
+            s"http://localhost:${server.getAddress.getPort}",
+            TransportSettings(timeouts = Timeouts(requestTimeout = Some(300)))
+          )
+        finally server.stop(0)
+      timeout shouldBe a[CequenceWSTimeoutException]
+      assertRedacted(timeout)
+
+      val closedPort = {
+        val socket = new ServerSocket(0)
+        try socket.getLocalPort
+        finally socket.close()
+      }
+      val refused = failureOf(s"http://localhost:$closedPort")
+      // the sttp wrapper used to surface raw - now a CequenceWSException with the cause below it
+      refused.getClass shouldBe classOf[CequenceWSException]
+      refused.getCause shouldBe a[java.net.ConnectException]
+      assertRedacted(refused)
+
+      val dns = failureOf("http://nonexistent-host-ws-client-test.invalid")
+      dns shouldBe a[CequenceWSUnknownHostException]
+      assertRedacted(dns)
+    }
+
+    "describe a failure by the transport cause below the deepest sttp wrapper" in {
+      val request = basicRequest.get(Uri.unsafeParse("http://localhost/ping?key=secret"))
+      def failureOf(e: Exception) =
+        Try(SttpWSClientEngine.defaultRecoverErrors("svc")(e)).failed.get
+
+      val reset = new java.io.IOException("connection reset")
+      val nested = failureOf(
+        new SttpClientException.ReadException(
+          request,
+          new SttpClientException.ReadException(request, reset)
+        )
+      )
+      nested.getClass shouldBe classOf[CequenceWSException]
+      nested.getMessage shouldBe "svc failed: connection reset."
+      nested.getCause shouldBe reset
+
+      // no sttp wrapper: the failure itself
+      val slow = new java.util.concurrent.TimeoutException("too slow")
+      val timeout = failureOf(slow)
+      timeout shouldBe a[CequenceWSTimeoutException]
+      timeout.getMessage shouldBe "svc timed out: too slow."
+      timeout.getCause shouldBe slow
+
+      // a wrapper without a cause: described by its class, no cause
+      val bare = new SttpClientException.ReadException(request, null)
+      val failure = failureOf(bare)
+      failure.getMessage shouldBe s"svc failed: ${bare.getClass.getName}."
+      failure.getCause shouldBe null
     }
 
     "serve two sites through one engine, with correctly isolated auth headers" in {

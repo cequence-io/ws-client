@@ -21,7 +21,22 @@ import play.api.libs.ws.{
   StandaloneWSRequest
 }
 import play.api.libs.ws.ahc.StandaloneAhcWSClient
-import play.shaded.ahc.org.asynchttpclient.config.AsyncHttpClientConfigDefaults
+import play.shaded.ahc.io.netty.buffer.ByteBuf
+import play.shaded.ahc.io.netty.channel.{
+  Channel,
+  ChannelHandlerContext,
+  ChannelInboundHandlerAdapter
+}
+import play.shaded.ahc.io.netty.channel.embedded.EmbeddedChannel
+import play.shaded.ahc.io.netty.handler.codec.compression.DecompressionException
+import play.shaded.ahc.io.netty.handler.codec.http.HttpContentDecompressor
+import play.shaded.ahc.io.netty.util.ReferenceCountUtil
+import play.shaded.ahc.org.asynchttpclient.AsyncHttpClientConfig
+import play.shaded.ahc.org.asynchttpclient.config.{
+  AsyncHttpClientConfigDefaults,
+  AsyncHttpClientConfigHelper
+}
+import play.shaded.ahc.org.asynchttpclient.netty.channel.ChannelManager
 
 import java.io.File
 import java.net.UnknownHostException
@@ -99,6 +114,21 @@ class PlayWSClientEngine(
         )
       )
       .setRequestTimeout(timeouts.requestTimeout.getOrElse(DefaultTimeouts.requestTimeout))
+      // engines are site-stateless: no cookie jar. The builder's default is ONE engine-wide
+      // cookie store (Play's own AhcConfigBuilder disables it too), which replayed a cookie one
+      // SiteBinding received on every other SiteBinding's requests - and over a site's own
+      // Cookie header
+      .setCookieStore(null)
+      // never follow a redirect - explicitly: the builder's default comes from the shaded AHC's
+      // properties, which -Dplay.shaded.ahc.org.asynchttpclient.followRedirect=true flips JVM-wide.
+      // Following re-sends bodies and custom secret headers (X-Api-Key) to whatever origin the
+      // Location names - on AHC < 2.14.5 (play-ws 2.1 / 2.2.0-M2) Authorization and Cookie too
+      // (CVE-2026-40490, CVE-2026-45300)
+      .setFollowRedirect(false)
+    // AHC < 2.16.1 inflates gzip / deflate response bodies without any limit (CVE-2026-85721)
+    PlayWSClientEngine.boundedInflater.foreach(
+      configBuilder.setHttpAdditionalChannelInitializer
+    )
     // the shaded AHC's own default (TLSv1.2/1.1/1) fails the handshake with TLS-1.3-only hosts -
     // offer the JDK's default client protocols instead, unless the operator configured AHC's list
     PlayWSClientEngine.tlsProtocols.foreach(protocols =>
@@ -740,6 +770,100 @@ object PlayWSClientEngine {
       context.init(null, Array.empty[TrustManager], null)
       context.getDefaultSSLParameters.getProtocols
     }.toOption.filter(_.nonEmpty)
+
+  // the shaded AHC's decompression limit (AHC 2.16.1+):
+  // play.shaded.ahc.org.asynchttpclient.maxDecompressedResponseSize
+  private[ws] val AhcMaxDecompressedResponseSizeProperty =
+    AsyncHttpClientConfigDefaults.ASYNC_CLIENT_CONFIG_ROOT + "maxDecompressedResponseSize"
+
+  // AHC 2.16.1's default
+  private val DefaultMaxDecompressedResponseSize = 256 * 1024 * 1024
+
+  // AHC 2.16.1+ (play-ws 3.0.14 / 2.2.18) bounds decompression itself
+  private val ahcBoundsDecompression =
+    classOf[AsyncHttpClientConfig].getMethods.exists(
+      _.getName == "getMaxDecompressedResponseSize"
+    )
+
+  /**
+   * For a shaded AHC without a decompression limit (play-ws 2.1.x / 2.2.0-M2 - AHC < 2.16.1,
+   * which inflates gzip / deflate response bodies without any, CVE-2026-85721), the channel
+   * initializer replacing its response inflater with a bounded one: AHC 2.16.1's own fix - a
+   * response whose decompressed body exceeds `maxDecompressedResponseSize` bytes (256 MiB by
+   * default, 0 or less: no limit; the AHC property, read from the same sources) fails with a
+   * `DecompressionException`, the rest of its body dropped. The count covers the whole
+   * response - a long-lived compressed stream included. `None` for an AHC with the limit.
+   */
+  private[ws] def boundedInflater: Option[java.util.function.Consumer[Channel]] =
+    if (ahcBoundsDecompression) None
+    else {
+      val maxBytes = Option(
+        AsyncHttpClientConfigHelper.getAsyncHttpClientConfig.getString(
+          AhcMaxDecompressedResponseSizeProperty
+        )
+      ).map(_.trim.toInt).getOrElse(DefaultMaxDecompressedResponseSize)
+      // the engine never sets it, so the builder's value is the default
+      val keepEncodingHeader = AsyncHttpClientConfigDefaults.defaultKeepEncodingHeader()
+      val initializer: java.util.function.Consumer[Channel] = channel =>
+        channel
+          .pipeline()
+          .replace(
+            ChannelManager.INFLATER_HANDLER,
+            ChannelManager.INFLATER_HANDLER,
+            new BoundedInflater(keepEncodingHeader, maxBytes.toLong)
+          )
+      Some(initializer)
+    }
+
+  // AHC 2.16.1's BoundedHttpContentDecompressor: the decoder of each compressed response counts
+  // the bytes it produces - unless the limit is 0 or less, AHC's "no limit"
+  private final class BoundedInflater(
+    keepEncodingHeader: Boolean,
+    maxBytes: Long
+  ) extends HttpContentDecompressor {
+
+    override protected def newContentDecoder(contentEncoding: String): EmbeddedChannel = {
+      val decoder = super.newContentDecoder(contentEncoding)
+      if (decoder != null && maxBytes > 0)
+        decoder.pipeline().addLast(new DecompressedSizeLimit(maxBytes))
+      decoder
+    }
+
+    // as AHC's own inflater
+    override protected def getTargetContentEncoding(contentEncoding: String): String =
+      if (keepEncodingHeader) contentEncoding
+      else super.getTargetContentEncoding(contentEncoding)
+  }
+
+  private final class DecompressedSizeLimit(maxBytes: Long)
+      extends ChannelInboundHandlerAdapter {
+
+    private var decompressedBytes = 0L
+    private var exceeded = false
+
+    override def channelRead(
+      ctx: ChannelHandlerContext,
+      msg: Any
+    ): Unit =
+      if (exceeded) ReferenceCountUtil.release(msg) // the rest of an oversized body
+      else
+        msg match {
+          case bytes: ByteBuf =>
+            decompressedBytes += bytes.readableBytes
+            if (decompressedBytes > maxBytes) {
+              exceeded = true
+              ReferenceCountUtil.release(bytes)
+              throw new DecompressionException(
+                s"Decompressed response body exceeds the maximum of $maxBytes bytes " +
+                  s"($decompressedBytes bytes decompressed so far)"
+              )
+            }
+            ctx.fireChannelRead(bytes)
+
+          case other =>
+            ctx.fireChannelRead(other)
+        }
+  }
 
   private[ws] def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
     (serviceEndPointName: String) =>

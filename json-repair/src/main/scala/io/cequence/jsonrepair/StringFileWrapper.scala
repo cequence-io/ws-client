@@ -1,64 +1,42 @@
 package io.cequence.jsonrepair
 
 import java.io.{File, RandomAccessFile}
-import scala.collection.mutable
+import java.nio.charset.Charset
+import scala.annotation.nowarn
 
 /**
  * A wrapper for file handling that makes it behave like a string. This simplifies the code by
  * transforming file descriptor handling into string handling.
  *
+ * The file is decoded once, as a whole, in the platform charset - the charset the standard
+ * parse attempt of `JsonRepair.fromFile` reads it in - and indexed by CHARACTER. (Up to 1.1.2
+ * it was read in byte chunks indexed by byte offset: a file with any multibyte character
+ * failed with a `StringIndexOutOfBoundsException`, and a character split across two chunks was
+ * decoded as two replacement characters. The chunks saved no memory either: the standard parse
+ * attempt reads the whole file anyway, and the repaired value holds its content.)
+ *
  * @param file
  *   The file to wrap
  * @param chunkLength
- *   The length of each chunk to read from the file (in bytes)
+ *   No longer used (the file is decoded at once); kept for source compatibility
  */
 class StringFileWrapper(
   file: File,
-  chunkLength: Int = 0
+  @nowarn("msg=never used") chunkLength: Int = 0
 ) {
-  private val fd = new RandomAccessFile(file, "r")
-  private var _length: Long = -1
 
-  // Buffers are chunks of strings that are read from the file
-  // and kept in memory to keep reads low
-  private val buffers: mutable.Map[Int, String] = mutable.Map.empty
-
-  // Default chunk length is 1MB if not specified or too small
-  private val bufferLength: Int = if (chunkLength < 2) 1000000 else chunkLength
-
-  /**
-   * Retrieve or load a buffer chunk from the file.
-   *
-   * @param index
-   *   The index of the buffer chunk to retrieve
-   * @return
-   *   The buffer chunk at the specified index
-   */
-  private def getBuffer(index: Int): String = {
-    buffers.getOrElseUpdate(
-      index, {
-        fd.seek(index.toLong * bufferLength)
-        val bytes = new Array[Byte](bufferLength)
-        val bytesRead = fd.read(bytes)
-
-        // If we read less than the buffer size, trim the array
-        val result = if (bytesRead < bufferLength) {
-          new String(bytes.take(bytesRead))
-        } else {
-          new String(bytes)
-        }
-
-        // Save memory by keeping max 2MB buffer chunks and min 2 chunks
-        if (buffers.size > math.max(2, 2000000 / bufferLength)) {
-          val oldestKey = buffers.keys.min
-          if (oldestKey != index) {
-            buffers.remove(oldestKey)
-          }
-        }
-
-        result
-      }
-    )
+  private val content: String = {
+    val fd = new RandomAccessFile(file, "r")
+    try {
+      val size = fd.length()
+      if (size > Int.MaxValue - 8)
+        throw new IllegalArgumentException(
+          s"File too large to repair: $size bytes (at most 2 GiB are supported)."
+        )
+      val bytes = new Array[Byte](size.toInt)
+      fd.readFully(bytes)
+      new String(bytes, Charset.defaultCharset())
+    } finally fd.close()
   }
 
   /**
@@ -69,10 +47,7 @@ class StringFileWrapper(
    * @return
    *   The character at the specified index
    */
-  def apply(index: Int): Char = {
-    val bufferIndex = index / bufferLength
-    getBuffer(bufferIndex)(index % bufferLength)
-  }
+  def apply(index: Int): Char = content.charAt(index)
 
   /**
    * Get a slice of characters from the file.
@@ -87,20 +62,7 @@ class StringFileWrapper(
   def slice(
     start: Int,
     end: Int
-  ): String = {
-    val bufferStart = start / bufferLength
-    val bufferEnd = end / bufferLength
-
-    if (bufferStart == bufferEnd) {
-      getBuffer(bufferStart).substring(start % bufferLength, end % bufferLength)
-    } else {
-      val startSlice = getBuffer(bufferStart).substring(start % bufferLength)
-      val endSlice = getBuffer(bufferEnd).substring(0, end % bufferLength)
-      val middleSlices = (bufferStart + 1 until bufferEnd).map(getBuffer)
-
-      startSlice + middleSlices.mkString + endSlice
-    }
-  }
+  ): String = content.substring(start, end)
 
   /**
    * Get the total length of the file.
@@ -108,20 +70,10 @@ class StringFileWrapper(
    * @return
    *   The total number of characters in the file
    */
-  def length: Long = {
-    if (_length < 0) {
-      val currentPosition = fd.getFilePointer
-      fd.seek(fd.length())
-      _length = fd.getFilePointer
-      fd.seek(currentPosition)
-    }
-    _length
-  }
+  def length: Long = content.length.toLong
 
   /**
-   * Close the file descriptor.
+   * Close the file descriptor (a no-op: the file is closed once it is read).
    */
-  def close(): Unit = {
-    fd.close()
-  }
+  def close(): Unit = ()
 }

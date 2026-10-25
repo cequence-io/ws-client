@@ -15,7 +15,7 @@ The project includes:
 - Streaming support for large payloads
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 1.1.3
+Current version: 1.1.4
 
 ## Build Commands
 
@@ -90,12 +90,36 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      needs JDK 11+. Covered end-to-end by the Play provider specs (`TestServers.withTlsServer`,
      `withTrustingEngine`); `ws-client-play-akka` / `-pekko` / `-zio-http` fork their tests
      because those point the JVM-global default trust store at a test cert
+   - Redirects are off explicitly (`.setFollowRedirect(false)`): the AHC builder's default comes
+     from the JVM-wide property `play.shaded.ahc.org.asynchttpclient.followRedirect`. Response
+     decompression: AHC < 2.16.1 (play-ws 2.1.11 / 2.2.0-M2 - the Akka flavor) inflates gzip /
+     deflate bodies without any limit (CVE-2026-85721), so `PlayWSClientEngine.boundedInflater`
+     replaces AHC's `inflater` handler with AHC 2.16.1's own design (`maxDecompressedResponseSize`
+     property, default 256 MiB, 0 or less = no limit - keep AHC's `> 0` guard;
+     `DecompressionException`, rest of the body dropped; counted per response, so a long
+     compressed stream fails too). It is installed only when the shaded AHC lacks the limit (no
+     `getMaxDecompressedResponseSize` on `AsyncHttpClientConfig`), so the Pekko flavor keeps
+     AHC's own. The provider specs cover both (redirect with the property set; a gzip bomb under
+     a lowered limit, and with 0 / -1)
+   - Known CVEs (reachability checked 2026-10-24): the Akka flavor's shaded Netty 4.1.45 / 4.1.60
+     and AHC 2.10.5 / 2.12.3 carry dozens; reachable were only the cookie store (now off),
+     redirects (only with the property) and decompression - all three now closed in code.
+     The rest (HTTP/2, SPDY, SNI, CORS, server decoders, Realm / NTLM, WebSocket) is unused by
+     the engine. play-ws 2.2.18 (still Akka 2.6.21; AHC 2.16.1, Netty 4.1.138) is the Scala 2.13
+     upgrade path; 2.12 has none (2.1.11 is the last), Scala 3 needs 3.3+
 
 4. **ws-client-play-akka-stream** - Streaming extensions (named `ws-client-play-stream` before 1.0.0)
    - Depends on `ws-client-core-akka` and `ws-client-play-akka`
    - Adds `PlayWSStreamClientEngine` for Server-Sent Events (SSE)
    - Uses Akka HTTP for JSON streaming over WebSockets
    - Streaming frame limit: 20,000 bytes (defaultMaxFrameLength)
+   - Scala 3: Play WS 2.2.0-M2 implements `stream()` as the buffered `execute()` (the whole body
+     as one element once the response ended; cancelling cannot abort the request), so
+     `PlayWSStreaming` (in `src/main/scala-3`) calls the client's package-private streaming path
+     instead, through `play.api.libs.ws.ahc.StreamedExecution` - what `stream()` does in Play WS
+     2.1.x / 3.x (minus request filters, which the engine never sets). The `scala-2` twin calls
+     `stream()`. Covered by the stream spec (first event before the body ends; the cancelled
+     stream aborts the request)
 
 5. **json-repair** - JSON repair utility
    - Independent module for fixing malformed JSON
@@ -155,9 +179,10 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      any survive.
 
 8. **ws-client-testkit** - test-only fixtures (never published): embedded echo / SSE / proxy-stub
-   / protocol-restricted TLS servers (`TestServers`) and a generic `LatchedSubscriber` for
-   `Flow` publishers; engine modules depend on it `% Test`. Core's test classpath is NOT shared
-   via `test->test` - its dummy engine providers would leak into every engine's discovery tests.
+   / protocol-restricted TLS servers (`TestServers`), the shared `cookieIsolation` and
+   `multipartInjection` engine scenarios, and a generic `LatchedSubscriber` for `Flow`
+   publishers; engine modules depend on it `% Test`. Core's test classpath is NOT shared via
+   `test->test` - its dummy engine providers would leak into every engine's discovery tests.
 
 ### Key Architectural Patterns
 
@@ -254,7 +279,8 @@ Client-level settings (timeouts, proxy) live in `TransportSettings` instead. Use
 
 The build manages different dependency versions for Scala 2.12, 2.13, and 3.2:
 - Play JSON: 2.8.2 (Scala 2.12/2.13), 2.10.0-RC6 (Scala 3.2)
-- Akka Stream: 2.6.1 (Scala 2.12), 2.6.20 (Scala 2.13/3.2)
+- Akka Stream: 2.6.20 (not 2.6.1 on Scala 2.12: its akka-protobuf-v3 POM pulls protobuf-java
+  3.10.0); Akka HTTP 10.5.3 (ws-client-play-akka-stream only; BUSL-1.1 licensed)
 - Play WS (Akka): 2.1.11 (Scala 2.12/2.13), 2.2.0-M2 (Scala 3.2)
 - Play WS (Pekko, `org.playframework`): 3.0.14 (shaded AHC 2.16.1 / Netty 4.1.138 - stricter HTTP response parsing than 3.0.7's 4.1.118: bare-LF lines, CL + TE, control chars in headers are rejected); Pekko Stream: 1.6.0; Pekko HTTP: 1.3.0 (Scala 2.13 only)
 
@@ -292,6 +318,9 @@ Scala per project and an `inThisBuild` lookup sees the stale default version.
 - Jackson - declared directly in core and json-repair (overriding the 2.11.4 that play-json pins)
   so consumers resolve a patched line; its `StreamReadConstraints` bound nesting depth and
   string/number length on every parse
+- Bouncy Castle (ws-client-zio-http) - declared directly at 1.86 like Jackson: zio-http's
+  compile dependency netty-pkitesting pulls 1.84 (CVE-2026-8763, CVE-2026-13506 - the client
+  never uses it); bcprov / bcpkix / bcutil must share one version
 - ScalaTest - Testing framework (test scope)
 
 ## Common Development Patterns
@@ -415,10 +444,38 @@ val loggedService = log(service, "MyService")
   terminate events with `\r\n\r\n` need `framingDelimiter = "\r\n\r\n"`)
 - Form fields: repeated keys keep every value on every engine (`EngineSupport.groupValues`,
   never `.toMap`); multipart files go out under their BASE name (`FilePart.filenameAux`) unless
-  a display name is given
-- No engine follows redirects (sttp disables its follow-by-default per request) - a 3xx comes
+  a display name is given. Caller-supplied `Content-Disposition` values (data-part names, file
+  keys, file names) are encoded by core `MultipartParams` (`"` / CR / LF -> `%22` / `%0D` /
+  `%0A`, since 1.1.4) on every engine: the hand-built bodies (`MultipartBodyBuilder`,
+  `PlayWSMultipartWritable`) via `FilePart.name` / `filenamePart` / `dataPartName`; the native
+  sttp / zio-http / pekko-http renderers get `MultipartParams.escape`d names (none of them
+  escapes CR / LF; pekko-http drops the header instead). The one exception: pekko-http FILE
+  names go out raw - pekko-http renders them itself, `?` per unsafe character plus an RFC 5987
+  `filename*` (so servers see a different file name there than on the other engines). A
+  data-part name that is a token stays unquoted (bytes as before). Covered on every engine by
+  `TestServers.multipartInjection`. `FilePart.extension` (the default content-type lookup) is
+  the part after the last dot - empty for a name without a dot (`split('.').last` made such a
+  name its own extension: a file named `pdf` went out as `application/pdf`), after a trailing
+  dot, and for a name of only dots (`.last` threw there)
+- Failure messages never carry the request URL (query params may hold API keys). sttp's
+  `SttpClientException` text includes the full URI, so `SttpWSClientEngine.defaultRecoverErrors`
+  describes a failure by the transport cause below the sttp wrapper and maps every remaining
+  sttp failure to `CequenceWSException` - never put `e.getMessage` of a request-describing
+  exception into a message
+- `StreamTransformers.DelimiterFramer` (jdk / zio-http SSE framing) tracks frames by offset and
+  compacts its buffer once per chunk - keep it linear per chunk (`DelimiterFramerSpec` diffs it
+  against the 1.1.2 implementation)
+- No engine follows redirects (sttp disables its follow-by-default per request, the Play engines
+  set `setFollowRedirect(false)` - the shaded AHC's default is a JVM-wide property) - a 3xx comes
   back as a non-acceptable status. Following redirects would re-send bodies and custom secret
   headers (e.g. `X-Api-Key`) to whatever origin the `Location` names
+- No engine keeps a cookie jar (since 1.1.4): `Set-Cookie` is surfaced in `RichResponse.headers`
+  but never stored or replayed - a jar is per-engine state shared by every `SiteBinding`. Keep
+  `.setCookieStore(null)` in `PlayWSClientEngine.client`: the shaded AHC builder defaults to ONE
+  engine-wide `ThreadSafeCookieStore` (Play's own `AhcConfigBuilder` disables it, but the engine
+  builds its AHC config directly), which replayed one site's / tenant's cookies on every other
+  `SiteBinding` (AHC 2.1.11 even honored a foreign `Domain` attribute). Covered on every engine by
+  the shared testkit scenario `TestServers.cookieIsolation`
 - `DirectWSClient` defaults a scheme-less URL to `https://` and rejects schemes other than
   http/https; plain HTTP needs an explicit `http://`
 - Artifact rename hazard: the pre-1.0 `ws-client-play` / `ws-client-play-stream` artifacts and
@@ -438,4 +495,42 @@ val loggedService = log(service, "MyService")
   changes there minimal (prefer fixes in `JsonRepair.convertToJsValue`), and verify any change
   differentially against the previous version - thousands of generated valid + mutated inputs
   through every entry point (`repairJson`, `loads` flag variants, `repairJsonAsValue`,
-  `fromFile`) on 2.12 and 2.13, every output difference explained
+  `fromFile`) on 2.12 and 2.13, every output difference explained. Arrays and concatenated
+  top-level values accumulate with `::` plus one `reverse` (never `:+` - it copies the list per
+  element, quadratic; `::` also keeps the recursive `parseArray` frame as small as before,
+  which a `ListBuffer` did not). The public entry points run inside `withStackGuard`: input
+  nested deeper than the thread's stack fails with an ordinary `IllegalArgumentException`
+  instead of a `StackOverflowError` (which escapes `NonFatal` and leaves a `Future`
+  incomplete). No depth limit by design - a limit would change results for deep input that
+  repairs today on a large stack. `fromFile` parses exactly the characters the string entry
+  points parse: `StringFileWrapper` decodes the whole file once (platform charset), by character
+  (it used to index byte chunks by byte offset - multibyte files crashed); a differential check
+  of `fromFile(skipJsonParse = true)` against `loads(content, skipJsonParse = true)` must match
+  100%. Every parser loop must consume input per iteration: `parseArray` steps past a value that
+  consumed none (as `parse()` does at the top level) - the context stack is known to leak (a
+  `{""}` key without a value, the duplicate-key break leave `ObjectKey` behind; deliberately
+  left so, the leak shapes many repairs), and under it `parseString` can return without
+  consuming, which used to loop forever while the array grew. The right-trim (Python's
+  `rstrip`) is the precompiled `(?<!\s)\s+$` - never `replaceAll("\\s+$")`, quadratic on a long
+  interior whitespace run. Escape sequences decode like a JSON parser's (the decoded character
+  replaces the backslash, `\uXXXX` included) EXCEPT `\"`, which keeps its backslash for
+  `convertToJsValue` to unescape (it strips the quotes around a value, so a decoded
+  `\"quoted\"` would lose them); a newline that came from an escape is content, not trimmed.
+  Valid nested JSON whose strings are non-empty letters / spaces / escapes repairs exactly like
+  Jackson parses it - a differential oracle that must stay at 100% (empty strings and strings
+  holding JSON punctuation still diverge, pre-existing). In test sources, no backslash-u in any
+  literal or comment: Scala 2.12's lexer decodes (or rejects) it everywhere, even in
+  triple-quoted strings - build it as `"\\u" + hex`. Tips for the differential check: run it as a
+  standalone JVM (sbt's 1 GB heap OOMs on a looping input), with a per-call timeout and
+  `-XX:-OmitStackTraceInFastThrow` (hot NPEs otherwise lose their message), and compare
+  exception classes, not messages. Numbers are a `Double` / `Long` only where that holds the literal exactly, else
+  a `BigDecimal` of play-json's precision (DECIMAL128): a double rounded digits beyond its
+  precision, flushed tiny numbers to 0 and huge ones to Infinity (a NumberFormatException in
+  `JsNumber`), and an integer beyond Long came back as a string; `repairJsonAsValue` returns that
+  `BigDecimal`. A literal longer than 1000 characters (Jackson's limit) never becomes one -
+  `BigDecimal` parsing is superlinear - and stays text where a double cannot hold it. An
+  exponent's `+` belongs to the number (Python's NUMBER_CHARS lacks it: `2.50E+3` came back as
+  `2.5`); a `+` no digit follows still ends the number before its `e`. A second differential
+  oracle - valid nested number-heavy JSON (signed / unsigned exponents, values beyond a double
+  or a Long, long decimals) repairs exactly like Jackson / play-json parses it - must stay at
+  100% (it was 27%)

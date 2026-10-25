@@ -9,16 +9,16 @@ import com.sun.net.httpserver.{
   HttpsParameters,
   HttpsServer
 }
-import io.cequence.wsclient.domain.SiteBinding
-import io.cequence.wsclient.service.WSClientEngine
+import io.cequence.wsclient.domain.{SiteBinding, WsRequestContext}
+import io.cequence.wsclient.service.{WSClientEngine, WSClientOutputStreamCore}
 import io.cequence.wsclient.service.spi.{TransportSettings, WSClientEngineRegistry}
-import play.api.libs.json.Json
+import play.api.libs.json.{JsValue, Json}
 
 import java.io.File
 import java.net.{InetSocketAddress, ServerSocket}
 import java.nio.file.Files
 import java.security.KeyStore
-import java.util.concurrent.{Executors, ThreadFactory}
+import java.util.concurrent.{Executors, ThreadFactory, TimeoutException}
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.{KeyManagerFactory, SSLContext}
 import scala.concurrent.{Await, ExecutionContext}
@@ -388,4 +388,303 @@ object TestServers {
     implicit ec: ExecutionContext
   ): String =
     tlsAttempt(engine, keyStore, serverProtocols).result.fold(throw _, identity)
+
+  /**
+   * What the requests of the [[cookieIsolation]] scenario carried in their `Cookie` header (""
+   * for none), and whether the caller still saw the `Set-Cookie` header of the cookie-setting
+   * response.
+   */
+  final case class CookieIsolation(
+    setCookieSurfaced: Boolean,
+    sameSite: String,
+    otherTenant: String,
+    otherPort: String,
+    domainPlanted: String,
+    siteSupplied: String,
+    streamed: Option[String]
+  )
+
+  object CookieIsolation {
+
+    /**
+     * A site-stateless engine keeps NO cookie jar: it surfaces `Set-Cookie` to the caller, but
+     * only ever sends the cookies a site supplies itself. `streamed` is checked (`Some`) on
+     * streaming engines only.
+     */
+    def expected(streaming: Boolean): CookieIsolation =
+      CookieIsolation(
+        setCookieSurfaced = true,
+        sameSite = "",
+        otherTenant = "",
+        otherPort = "",
+        domainPlanted = "",
+        siteSupplied = "site=supplied",
+        streamed = if (streaming) Some("") else None
+      )
+  }
+
+  /**
+   * The cookie-isolation scenario on `engine`. Tenant A (`Bearer tenant-a`) logs in at
+   * `http://127.0.0.1:A`, whose server answers with a session `Set-Cookie`. Then each of these
+   * sends a request that records the `Cookie` header it carried: tenant A again; tenant B (own
+   * credentials, same host and port); a site on another port of the same host; a `localhost`
+   * site, after that other-port server set a cookie with `Domain=localhost`; a site supplying
+   * its own `Cookie` header; and, on streaming engines, tenant B's SSE request. A request that
+   * does not complete within 30 s fails the caller with a `TimeoutException`.
+   */
+  def cookieIsolation(engine: WSClientEngine): CookieIsolation = {
+    def cookieOf(exchange: HttpExchange) =
+      Option(exchange.getRequestHeaders.getFirst("Cookie")).getOrElse[String]("")
+
+    def setCookie(value: String): HttpExchange => Unit = { exchange =>
+      exchange.getRequestBody.readAllBytes()
+      exchange.getResponseHeaders.add("Set-Cookie", value)
+      respond(exchange, 200, """{"status":"ok"}""")
+    }
+
+    val cookieEcho: HttpExchange => Unit = { exchange =>
+      exchange.getRequestBody.readAllBytes()
+      respond(exchange, 200, Json.obj("cookie" -> cookieOf(exchange)).toString)
+    }
+
+    val cookieEchoEvents: HttpExchange => Unit = { exchange =>
+      exchange.getRequestBody.readAllBytes()
+      val event = Json.obj("cookie" -> cookieOf(exchange))
+      respond(exchange, 200, s"data: $event\n\ndata: [DONE]\n\n", "text/event-stream")
+    }
+
+    withServer(
+      "/login" -> setCookie("session=tenant-a-session; Path=/"),
+      "/data" -> cookieEcho,
+      "/events" -> cookieEchoEvents
+    ) { portA =>
+      withServer(
+        "/plant" -> setCookie("planted=other-port-cookie; Domain=localhost; Path=/"),
+        "/data" -> cookieEcho
+      ) { portB =>
+        def binding(
+          coreUrl: String,
+          headers: (String, String)*
+        ) =
+          SiteBinding(coreUrl, WsRequestContext(authHeaders = headers))
+
+        val tenantA = binding(s"http://127.0.0.1:$portA", "Authorization" -> "Bearer tenant-a")
+        val tenantB = binding(s"http://127.0.0.1:$portA", "Authorization" -> "Bearer tenant-b")
+        val otherPortSite = binding(s"http://127.0.0.1:$portB")
+        val localhostSite = binding(s"http://localhost:$portA")
+        val supplyingSite = binding(s"http://127.0.0.1:$portA", "Cookie" -> "site=supplied")
+
+        def get(
+          site: SiteBinding,
+          endPoint: String
+        ) =
+          Await.result(engine.execGETRich(site, endPoint), 30.seconds)
+
+        def cookieSentBy(site: SiteBinding) =
+          (engine.getResponseOrError(get(site, "data")).json \ "cookie").as[String]
+
+        val login = get(tenantA, "login")
+        val setCookieSurfaced = login.headers.exists { case (name, values) =>
+          name.equalsIgnoreCase("Set-Cookie") && values.exists(_.contains("tenant-a-session"))
+        }
+        val sameSite = cookieSentBy(tenantA)
+        val otherTenant = cookieSentBy(tenantB)
+        val otherPort = cookieSentBy(otherPortSite)
+        get(otherPortSite, "plant")
+        val domainPlanted = cookieSentBy(localhostSite)
+        val siteSupplied = cookieSentBy(supplyingSite)
+
+        val streamed = engine match {
+          case streaming: WSClientOutputStreamCore =>
+            val subscriber = new LatchedSubscriber[JsValue]
+            streaming.execJsonStreamPublisher(tenantB, "events", "GET").subscribe(subscriber)
+            if (!subscriber.awaitDone(30))
+              throw new TimeoutException("The SSE request did not complete within 30 s.")
+            subscriber.error.foreach(error => throw error)
+            subscriber.received match {
+              case Seq(event) => Some((event \ "cookie").as[String])
+              case events =>
+                throw new IllegalStateException(s"Expected one SSE event, got: $events")
+            }
+
+          case _ => None
+        }
+
+        CookieIsolation(
+          setCookieSurfaced = setCookieSurfaced,
+          sameSite = sameSite,
+          otherTenant = otherTenant,
+          otherPort = otherPort,
+          domainPlanted = domainPlanted,
+          siteSupplied = siteSupplied,
+          streamed = streamed
+        )
+      }
+    }
+  }
+
+  /**
+   * One part of a multipart body as a receiver parses it: the number of `Content-Disposition`
+   * headers, the names of any other part headers than `Content-Disposition` / `Content-Type`
+   * (lower-cased), the `Content-Disposition` parameters (quoted-strings unquoted, sorted by
+   * name - their order carries no meaning; a duplicate stays visible) and the content.
+   */
+  final case class ReceivedPart(
+    dispositions: Int,
+    otherHeaders: Seq[String],
+    dispositionParams: Seq[(String, String)],
+    content: String
+  )
+
+  object MultipartInjection {
+
+    // caller-supplied names that try to leave their quoted-string: an extra parameter, extra
+    // part headers and (via the blank line) a content prefix
+    val DataName = "k\"\r\nY-Injected: 2"
+    val FileKey = "f\"; filename=\"evil.sh\r\nZ-Injected: 3"
+    val DisplayName = "a\"; name=\"x\r\nX-Injected: 1\r\n\r\nP"
+    val DataValue = "data-value"
+    val FileContent = "file-content"
+    val FileName = "upload.txt"
+
+    // the WHATWG / RFC 7578 4.2 encoding of a Content-Disposition parameter value
+    def html5Escaped(value: String): String =
+      value.replace("\"", "%22").replace("\r", "%0D").replace("\n", "%0A")
+
+    /**
+     * The parts the scenario posts (one data part, a file under a display name, a file under
+     * its base name), each staying ONE part with one `Content-Disposition` header and its own
+     * content - the names HTML5-encoded (the Play, jdk, sttp and zio-http engines).
+     */
+    val expected: Seq[ReceivedPart] = Seq(
+      ReceivedPart(1, Nil, Seq("name" -> html5Escaped(DataName)), DataValue),
+      ReceivedPart(
+        1,
+        Nil,
+        Seq("filename" -> html5Escaped(DisplayName), "name" -> "file"),
+        FileContent
+      ),
+      ReceivedPart(
+        1,
+        Nil,
+        Seq("filename" -> FileName, "name" -> html5Escaped(FileKey)),
+        FileContent
+      )
+    )
+  }
+
+  /**
+   * Posts a multipart body whose data-part name, file key and display file name (see
+   * [[MultipartInjection]]) carry quotes and CR/LF, and returns its parts as the server
+   * received them.
+   */
+  def multipartInjection(
+    engine: WSClientEngine,
+    useInMemoryBody: Boolean
+  ): Seq[ReceivedPart] = {
+    import MultipartInjection._
+
+    val dir = Files.createTempDirectory("ws-client-multipart")
+    val file = dir.resolve(FileName).toFile
+    Files.write(file.toPath, FileContent.getBytes("UTF-8"))
+
+    try
+      withEchoServer { port =>
+        val response = engine.getResponseOrError(
+          Await.result(
+            engine.execPOSTMultipartRich(
+              SiteBinding(s"http://localhost:$port"),
+              "upload",
+              fileParams = Seq(("file", file, Some(DisplayName)), (FileKey, file, None)),
+              bodyParams = Seq(DataName -> Some(DataValue)),
+              useInMemoryBody = useInMemoryBody
+            ),
+            30.seconds
+          )
+        )
+        val contentType = (response.json \ "contentType").as[String]
+        val boundary = contentType
+          .split(";")
+          .map(_.trim)
+          .collectFirst {
+            case param if param.startsWith("boundary=") =>
+              param.stripPrefix("boundary=").stripPrefix("\"").stripSuffix("\"")
+          }
+          .getOrElse(throw new IllegalStateException(s"No boundary in: $contentType"))
+
+        parseMultipart((response.json \ "body").as[String], boundary)
+      }
+    finally {
+      Files.deleteIfExists(file.toPath)
+      Files.deleteIfExists(dir)
+    }
+  }
+
+  private def parseMultipart(
+    body: String,
+    boundary: String
+  ): Seq[ReceivedPart] =
+    body
+      .split(java.util.regex.Pattern.quote("--" + boundary), -1)
+      .toSeq
+      .drop(1) // the (empty) preamble
+      .takeWhile(!_.startsWith("--")) // the close delimiter and epilogue
+      .map { part =>
+        val withoutCrlf = part.stripPrefix("\r\n").stripSuffix("\r\n")
+        val headerEnd = withoutCrlf.indexOf("\r\n\r\n")
+        val (headerBlock, content) =
+          if (headerEnd < 0) (withoutCrlf, "")
+          else (withoutCrlf.substring(0, headerEnd), withoutCrlf.substring(headerEnd + 4))
+        val headers = headerBlock.split("\r\n").toSeq.filter(_.nonEmpty).map { line =>
+          val colon = line.indexOf(':')
+          if (colon < 0) (line.toLowerCase, "")
+          else (line.substring(0, colon).trim.toLowerCase, line.substring(colon + 1).trim)
+        }
+        val dispositions = headers.filter(_._1 == "content-disposition")
+        ReceivedPart(
+          dispositions = dispositions.size,
+          otherHeaders = headers
+            .map(_._1)
+            .filterNot(
+              Set("content-disposition", "content-type")
+            ),
+          dispositionParams = dispositions.headOption
+            .map(header => dispositionParams(header._2).sortBy(_._1))
+            .getOrElse(Nil),
+          content = content
+        )
+      }
+
+  // `form-data; key=token; key="quoted \" string"` -> the (key, value) pairs
+  private def dispositionParams(value: String): Seq[(String, String)] = {
+    val params = Seq.newBuilder[(String, String)]
+    var i = value.indexOf(';')
+    while (i >= 0 && i < value.length) {
+      i += 1
+      while (i < value.length && value.charAt(i) == ' ') i += 1
+      val eq = value.indexOf('=', i)
+      if (eq < 0) i = -1
+      else {
+        val key = value.substring(i, eq).trim.toLowerCase
+        val result = new StringBuilder
+        i = eq + 1
+        if (i < value.length && value.charAt(i) == '"') {
+          i += 1
+          while (i < value.length && value.charAt(i) != '"') {
+            if (value.charAt(i) == '\\' && i + 1 < value.length) i += 1
+            result += value.charAt(i)
+            i += 1
+          }
+          i += 1 // the closing quote
+        } else
+          while (i < value.length && value.charAt(i) != ';') {
+            result += value.charAt(i)
+            i += 1
+          }
+        params += key -> result.toString.trim
+        i = value.indexOf(';', i)
+      }
+    }
+    params.result()
+  }
 }

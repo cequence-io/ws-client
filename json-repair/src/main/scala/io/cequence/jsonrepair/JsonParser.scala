@@ -1,5 +1,6 @@
 package io.cequence.jsonrepair
 
+import java.util.regex.Pattern
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.util.control.Breaks.break
@@ -125,13 +126,16 @@ class JsonParser(
     if (index < length) {
       log("The parser returned early, checking if there's more json elements")
 
+      // newest first, reversed once below: List :+ copies the whole list per element (quadratic)
       var jsonArray = List(json)
       var lastIndex = index
 
       while (index < length) {
         val j = parseJson()
-        if (j.toString.nonEmpty) {
-          jsonArray = jsonArray :+ j
+        // a later top-level null literal (e.g. with handleLiterals) is a value like true /
+        // false - j.toString threw a NullPointerException on it
+        if (j == null || j.toString.nonEmpty) {
+          jsonArray = j :: jsonArray
         }
         if (index == lastIndex) {
           index += 1
@@ -139,7 +143,7 @@ class JsonParser(
         lastIndex = index
       }
 
-      val nonEmptyElements = jsonArray.filterNot(elem => elem == "")
+      val nonEmptyElements = jsonArray.reverse.filterNot(elem => elem == "")
 
       // If nothing extra was found, don't return an array
       val result = if (nonEmptyElements.size == 1) {
@@ -344,6 +348,8 @@ class JsonParser(
   }
 
   def parseArray(): List[JsonValue] = {
+    // newest first, reversed once at the end: List :+ copies the whole list per element
+    // (quadratic). A plain List also keeps this recursive frame as small as it was
     var arr = List.empty[JsonValue]
 
     // Enter ARRAY context (if your context logic requires it)
@@ -358,13 +364,14 @@ class JsonParser(
       skipWhitespacesAt()
 
       // 2) Parse next JSON value
+      val valueStart = index
       val value = parseJson() // could be "", "...", or a valid JsonValue
 
       // 3) Check for corner cases
       value match {
         case null =>
           // index += 1
-          arr = arr :+ null
+          arr = null :: arr
 
         case "" =>
           // "It is possible that parse_json() returns nothing valid, so we increase by 1"
@@ -377,12 +384,20 @@ class JsonParser(
             log("While parsing an array, found a stray '...'; ignoring it")
           } else {
             // If the last character isn't '.', treat "..." as a legitimate string
-            arr = arr :+ s
+            arr = s :: arr
           }
 
         case parsedValue: JsonValue =>
           // If parseJson() returned a valid value (including possibly an empty string-literal)
-          arr = arr :+ parsedValue
+          arr = parsedValue :: arr
+      }
+
+      // A value that consumed no input would be parsed again from the same state - forever,
+      // the array growing until the heap is exhausted (parseString steps back from a quote it
+      // takes for the next key's, e.g. under a stale object context: [{"a": {""}}, b"c": 1]).
+      // Move past it, as parse() does at the top level
+      if (index == valueStart) {
+        index += 1
       }
 
       // 4) After reading a value, skip over any whitespace or commas before the next item
@@ -405,7 +420,7 @@ class JsonParser(
     // Reset context after finishing
     context.reset()
 
-    arr
+    arr.reverse
   }
 
   /**
@@ -553,6 +568,8 @@ class JsonParser(
 
     char = getCharAt().getOrElse(CHAR_NONE)
     var unmatched_delimiter = false
+    // sb's length right after the last character decoded from an escape sequence
+    var escapedEnd = -1
 
     scala.util.control.Breaks.breakable {
       while (char != CHAR_NONE && char != rstring_delimiter) {
@@ -693,19 +710,39 @@ class JsonParser(
         if (char != CHAR_NONE && sb.nonEmpty && sb.last == '\\') {
           // This is a special case, if people use real strings this might happen
           log("Found a stray escape sequence, normalizing it")
-          if (Set(rstring_delimiter, 't', 'n', 'r', 'b', '\\').contains(char)) {
-            val escMap = Map(
-              't' -> '\t',
-              'n' -> '\n',
-              'r' -> '\r',
-              'b' -> '\b',
-              '\\' -> '\\'
-            )
+          val escMap = Map(
+            't' -> '\t',
+            'n' -> '\n',
+            'r' -> '\r',
+            'b' -> '\b',
+            'f' -> '\f',
+            '\\' -> '\\'
+          )
 
-            // sb.deleteCharAt(sb.length - 1)
-            sb.append(escMap.getOrElse(char, char))
-            index += 1
-            char = getCharAt().getOrElse(CHAR_NONE)
+          // the escaped character, and how many characters after the backslash encode it
+          val escape =
+            if (Set(rstring_delimiter, 't', 'n', 'r', 'b', 'f', '/', '\\').contains(char))
+              Some((escMap.getOrElse(char, char), 1))
+            else if (
+              char == 'u' && (1 to 4).forall(i => getCharAt(i).exists(JsonParser.isHex))
+            )
+              Some((Integer.parseInt(substring(index + 1, index + 5), 16).toChar, 5))
+            else None
+
+          escape match {
+            case Some((escaped, encodedLength)) =>
+              // The character replaces its backslash (Python: string_acc[:-1]) - except a double
+              // quote, which keeps it: convertToJsValue unescapes \" itself, and it strips the
+              // quotes around a value, so a decoded \"quoted\" would lose them
+              if (escaped != '"') {
+                sb.deleteCharAt(sb.length - 1)
+                escapedEnd = sb.length + 1
+              }
+              sb.append(escaped)
+              index += encodedLength
+              char = getCharAt().getOrElse(CHAR_NONE)
+
+            case None =>
           }
         }
 
@@ -935,16 +972,17 @@ class JsonParser(
     if (char != rstring_delimiter) {
       log("While parsing a string, we missed the closing quote, ignoring")
       // Equivalent to Python's rstrip()
-      val trimmed = sb.toString().replaceAll("\\s+$", "")
+      val trimmed = JsonParser.TrailingWhitespace.matcher(sb.toString()).replaceAll("")
       sb.clear()
       sb.append(trimmed)
     } else {
       index += 1
     }
 
-    // Clean the whitespaces for some corner cases
-    if (missing_quotes || (sb.nonEmpty && sb.last == '\n')) {
-      val trimmed = sb.toString().replaceAll("\\s+$", "")
+    // Clean the whitespaces for some corner cases - a raw line break before the closing quote,
+    // not an escaped one: "x\n" is content (valid JSON nested in a repaired one keeps it)
+    if (missing_quotes || (sb.nonEmpty && sb.last == '\n' && sb.length != escapedEnd)) {
+      val trimmed = JsonParser.TrailingWhitespace.matcher(sb.toString()).replaceAll("")
       sb.clear()
       sb.append(trimmed)
     }
@@ -1094,6 +1132,11 @@ class JsonParser(
         getCharAt() match {
           case Some(c) if NumberChars.contains(c) && (!isArray || c != ',') =>
             index += 1
+          // an exponent's sign: the number ended at a '+' (Python's NUMBER_CHARS has none), so
+          // 2.50E+3 came back as 2.5
+          case Some('+')
+              if index > startIndex && getCharAt(-1).exists(c => c == 'e' || c == 'E') =>
+            index += 1
           case _ =>
             break()
         }
@@ -1101,6 +1144,13 @@ class JsonParser(
     }
 
     var numStr = substring(startIndex, index)
+
+    // a sign that no digit follows (1e+): the number ends before it, where it always did
+    val sign = numStr.indexOf('+')
+    if (sign >= 0 && !numStr.lift(sign + 1).exists(_.isDigit)) {
+      index = startIndex + sign
+      numStr = numStr.substring(0, sign)
+    }
 
     // Roll back one character if the number ends with invalid character
     if (numStr.nonEmpty && "-eE/,".contains(numStr.last)) {
@@ -1112,12 +1162,12 @@ class JsonParser(
       if (numStr.contains(',')) {
         numStr
       } else if (numStr.contains('.') || numStr.contains('e') || numStr.contains('E')) {
-        numStr.toDouble
+        JsonParser.decimal(numStr)
       } else if (numStr == "-") {
         // If there is a stray "-", parse the next value
         parseJson()
       } else {
-        numStr.toLong
+        JsonParser.integer(numStr)
       }
     } catch {
       case _: NumberFormatException =>
@@ -1260,4 +1310,50 @@ class JsonParser(
       return ""
     }
   }
+}
+
+object JsonParser {
+
+  // Python's rstrip() - the matches of "\\s+$", but a match may start only where a whitespace
+  // run starts: "\\s+$" retried from every position inside a run, re-scanning the rest of it
+  // each time (quadratic - 40,000 spaces before a letter took 2 s)
+  private val TrailingWhitespace = Pattern.compile("(?<!\\s)\\s+$")
+
+  private def isHex(c: Char): Boolean =
+    (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+
+  // A number is a Double / Long (Python's float / int) where that holds it exactly, else a
+  // BigDecimal of play-json's precision (DECIMAL128): a double rounds digits beyond its
+  // precision, flushes a tiny number to 0 and a huge one to Infinity (which JsNumber rejects),
+  // and an integer beyond Long came back as a string. Not for numbers longer than Jackson's
+  // limit (1000 characters): parsing one into a BigDecimal is superlinear
+  private val MaxExactNumberLength = 1000
+
+  private def exact(numStr: String): Option[BigDecimal] =
+    if (numStr.length > MaxExactNumberLength) None
+    else
+      try Some(BigDecimal(numStr, java.math.MathContext.DECIMAL128))
+      catch { case _: NumberFormatException => None }
+
+  private def decimal(numStr: String): Any = {
+    val double = numStr.toDouble
+    exact(numStr) match {
+      case Some(value)
+          if double.isInfinite || BigDecimal.decimal(double).compare(value) != 0 =>
+        value
+      case None if double.isInfinite => numStr // too long for an exact value: kept as text
+      case _                         => double
+    }
+  }
+
+  // beyond Long: the exact value; anything else that is no number (e.g. 1/2) still throws, so
+  // the caller keeps it as a string
+  private def integer(numStr: String): Any =
+    try numStr.toLong
+    catch {
+      case e: NumberFormatException =>
+        val digits = numStr.stripPrefix("-")
+        if (digits.nonEmpty && digits.forall(_.isDigit)) exact(numStr).getOrElse(throw e)
+        else throw e
+    }
 }

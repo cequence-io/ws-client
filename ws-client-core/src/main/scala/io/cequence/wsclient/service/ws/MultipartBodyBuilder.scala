@@ -30,9 +30,10 @@ object MultipartBodyBuilder {
     def write(str: String): Unit = out.write(str.getBytes(cs))
 
     form.dataParts.foreach { case (name, values) =>
+      val partName = MultipartParams.dataPartName(name)
       values.foreach { value =>
         write(
-          s"--$boundary\r\n${HttpHeaderNames.CONTENT_DISPOSITION}: form-data; name=$name\r\n\r\n$value\r\n"
+          s"--$boundary\r\n${HttpHeaderNames.CONTENT_DISPOSITION}: form-data; name=$partName\r\n\r\n$value\r\n"
         )
       }
     }

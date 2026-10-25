@@ -410,13 +410,16 @@ final class SttpWSClientEngine private[ws] (
   )(
     implicit filePartToContent: FilePart => String
   ) = {
+    // sttp escapes '"' but not CR / LF in Content-Disposition parameters - hand it the
+    // encoded names (MultipartParams) so a name can never add part headers
     val dataParts = bodyParams.collect { case (key, Some(value)) =>
-      multipart(key, value.toString)
+      multipart(MultipartParams.escape(key), value.toString)
     }
 
     val fileParts = fileParams.map { case (key, file, headerFileName) =>
       val filePart = FilePart(key, file.getPath, headerFileName)
-      val base = multipartFile(key, file).fileName(filePart.filenameAux)
+      val base = multipartFile(MultipartParams.escape(key), file)
+        .fileName(MultipartParams.escape(filePart.filenameAux))
 
       parseContentType(filePartToContent(filePart)).map(base.contentType).getOrElse(base)
     }
@@ -462,7 +465,7 @@ final class SttpWSClientEngine private[ws] (
 
 object SttpWSClientEngine {
 
-  import ThrowableUtil.hasCause
+  import ThrowableUtil.{causeChain, hasCause}
 
   def apply(
     transportSettings: TransportSettings = TransportSettings()
@@ -491,6 +494,19 @@ object SttpWSClientEngine {
     HttpClientFutureBackend(options)
   }
 
+  // sttp's SttpClientException message is "Exception when sending request: <method> <uri>" -
+  // the FULL request URI, query string (API keys passed as query params) included - so neither
+  // its text nor the wrapper itself may reach a Cequence exception: a failure is described by
+  // the transport cause below the deepest wrapper (the failure itself without a wrapper)
+  private def transportCause(e: Throwable): Option[Throwable] =
+    causeChain(e).collect { case wrapper: SttpClientException => wrapper }.toList.lastOption
+      .fold(Option(e))(wrapper => Option(wrapper.getCause))
+
+  private def describe(e: Throwable): String =
+    transportCause(e)
+      .map(cause => Option(cause.getMessage).getOrElse(cause.getClass.getName))
+      .getOrElse(e.getClass.getName)
+
   private[ws] def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
     (serviceEndPointName: String) =>
       {
@@ -499,7 +515,8 @@ object SttpWSClientEngine {
             if hasCause(e, classOf[TimeoutException]) ||
               hasCause(e, classOf[java.net.http.HttpTimeoutException]) =>
           throw new CequenceWSTimeoutException(
-            s"${serviceEndPointName} timed out: ${e.getMessage}."
+            s"${serviceEndPointName} timed out: ${describe(e)}.",
+            transportCause(e).orNull
           )
         // the default (JDK HttpClient) backend reports a DNS failure as ConnectException
         // caused by UnresolvedAddressException, never as UnknownHostException
@@ -507,7 +524,15 @@ object SttpWSClientEngine {
             if hasCause(e, classOf[UnknownHostException]) ||
               hasCause(e, classOf[UnresolvedAddressException]) =>
           throw new CequenceWSUnknownHostException(
-            s"${serviceEndPointName} cannot resolve a host name: ${e.getMessage}."
+            s"${serviceEndPointName} cannot resolve a host name: ${describe(e)}.",
+            transportCause(e).orNull
+          )
+        // every other sttp failure (connection refused / reset, read errors, ...): the
+        // URI-bearing sttp wrapper must never escape
+        case e: Exception if hasCause(e, classOf[SttpClientException]) =>
+          throw new CequenceWSException(
+            s"${serviceEndPointName} failed: ${describe(e)}.",
+            transportCause(e).orNull
           )
       }
   }

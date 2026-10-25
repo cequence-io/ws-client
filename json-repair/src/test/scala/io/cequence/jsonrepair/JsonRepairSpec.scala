@@ -4,6 +4,13 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import play.api.libs.json._
 
+import java.io.File
+import java.nio.file.Files
+import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.duration._
+import scala.util.control.NonFatal
+import scala.util.{Failure, Try}
+
 class JsonRepairSpec extends AnyFlatSpec with Matchers {
 
   "JsonRepair" should "handle basic valid types correctly" in {
@@ -554,5 +561,261 @@ class JsonRepairSpec extends AnyFlatSpec with Matchers {
         |}""".stripMargin
     ) shouldBe
       """{"key":{"value":"Name","reference":"value value value value"}}""".stripMargin
+  }
+
+  // the repair parser (and the conversion to JsValue) recurse once per nesting level: input
+  // nested deeper than the thread's stack must fail like other bad input - a StackOverflowError
+  // escapes Try / NonFatal recovery and leaves a Future running the repair incomplete forever
+  it should "fail input nested deeper than the stack with an ordinary exception" in {
+    val file = File.createTempFile("json-repair-deep-", ".json")
+    file.deleteOnExit()
+
+    val entryPoints: Seq[(String, String => Any)] = Seq(
+      "repair" -> (input => JsonRepair.repair(input)),
+      "repairJson" -> (input => JsonRepair.repairJson(input, skipJsonParse = true)),
+      "loads" -> (input => JsonRepair.loads(input, convertNumbers = true)),
+      "repairJsonAsValue" -> (input => JsonRepair.repairJsonAsValue(input)),
+      "fromFile" -> { input =>
+        Files.write(file.toPath, input.getBytes("UTF-8"))
+        JsonRepair.fromFile(file.getPath, skipJsonParse = true)
+      }
+    )
+
+    for {
+      input <- Seq("[" * 100000, "{\"a\":" * 100000, "[" * 100000 + "]" * 100000)
+      (name, entryPoint) <- entryPoints
+    } {
+      // a small, fixed stack - the input overflows it whatever the JVM's default thread stack
+      var outcome: Option[Try[Any]] = None
+      val thread = new Thread(
+        null,
+        new Runnable {
+          override def run(): Unit = outcome = Some(Try(entryPoint(input)))
+        },
+        "json-repair-deep",
+        512L * 1024
+      )
+      thread.start()
+      thread.join()
+
+      withClue(s"$name on ${input.take(10)}...: ") {
+        outcome match {
+          case Some(Failure(e)) =>
+            e shouldBe an[IllegalArgumentException]
+            e.getMessage should include("too deep")
+          case other => fail(s"expected an ordinary failure, got $other")
+        }
+      }
+    }
+  }
+
+  it should "fail, not hang, a Future repairing input nested deeper than the stack" in {
+    implicit val ec: ExecutionContext = ExecutionContext.global
+    val repaired = Future(JsonRepair.repair("[" * 1000000))
+
+    Await.ready(repaired, 30.seconds).value match {
+      case Some(Failure(e)) => NonFatal(e) shouldBe true
+      case other            => fail(s"expected a failed Future, got $other")
+    }
+  }
+
+  // arrays used to be built with List :+ (a full copy per element - quadratic): 200k elements
+  // took over a minute - and so did 200k concatenated top-level values
+  it should "repair large arrays and many top-level values in linear time" in {
+    val n = 200000
+    // valid JSON, but routed to the repair parser by the bracket heuristic
+    val nested = "[[" + "1," * n + "1]]"
+    val unterminated = "[" + "1," * n + "1"
+    val concatenated = "[]" * n
+
+    val start = System.nanoTime()
+    JsonRepair.repair(nested) shouldBe nested
+    JsonRepair.repair(unterminated) shouldBe unterminated + "]"
+    JsonRepair.repair(concatenated) shouldBe Seq.fill(n)("[]").mkString("[", ",", "]")
+    val seconds = (System.nanoTime() - start) / 1e9
+
+    // linear: well under a second (the bound is CI headroom); quadratic: minutes
+    seconds should be < 20.0
+  }
+
+  // with handleLiterals, a top-level null after the first value threw a NullPointerException
+  // (j.toString) - it is a value like true / false
+  it should "keep a later top-level null literal as a value (handleLiterals)" in {
+    def repaired(input: String) =
+      JsonRepair.repairJson(input, skipJsonParse = true, handleLiterals = true)
+
+    repaired("""{"a": 1} null""") shouldBe """[{"a":1},null]"""
+    repaired("""{"a": 1} true""") shouldBe """[{"a":1},true]"""
+    repaired("""[1] null [2]""") shouldBe """[[1],null,[2]]"""
+    repaired("""null {"a": 1}""") shouldBe """[null,{"a":1}]""" // a FIRST null always worked
+    JsonRepair.loads("[1] null", skipJsonParse = true, handleLiterals = true) shouldBe
+      Json.arr(Json.arr(1), JsNull)
+    JsonRepair.repairJsonAsValue("[1] NULL", handleLiterals = true) shouldBe
+      List(List(1L), null)
+  }
+
+  // the file wrapper indexed its 1 MB byte chunks by byte offset: any multibyte character made
+  // fromFile throw a StringIndexOutOfBoundsException (and one split across two chunks became two
+  // replacement characters)
+  it should "repair a file with multibyte characters exactly like the same string" in {
+    assume(
+      java.nio.charset.Charset.defaultCharset() == java.nio.charset.StandardCharsets.UTF_8,
+      "fromFile decodes in the platform charset"
+    )
+    val file = File.createTempFile("json-repair-utf8-", ".json")
+    file.deleteOnExit()
+
+    def fromFileMatchesString(content: String) = {
+      Files.write(file.toPath, content.getBytes("UTF-8"))
+      val expected = JsonRepair.loads(content, skipJsonParse = true)
+      for (chunkLength <- Seq(0, 2, 3, 7)) {
+        withClue(s"chunkLength = $chunkLength: ") {
+          JsonRepair.fromFile(file.getPath, chunkLength = chunkLength) shouldBe expected
+          JsonRepair.fromFile(
+            file.getPath,
+            skipJsonParse = true,
+            chunkLength = chunkLength
+          ) shouldBe
+            expected
+        }
+      }
+      expected
+    }
+
+    try {
+      fromFileMatchesString(
+        """{"name": "Zoë", "city": "Zürich", "note": "日本語 😀", "list": [1, 2,"""
+      ) shouldBe Json.obj(
+        "name" -> "Zoë",
+        "city" -> "Zürich",
+        "note" -> "日本語 😀",
+        "list" -> Json.arr(1, 2)
+      )
+
+      // past the old 1 MB chunk boundary, with characters straddling it
+      val n = 120000
+      fromFileMatchesString("[" + Seq.fill(n)("\"é😀\"").mkString(",")) shouldBe
+        JsArray(Seq.fill(n)(JsString("é😀")))
+    } finally file.delete()
+  }
+
+  // a value that consumed no input (parseString stepping back from a quote it took for the start
+  // of the next key, misled by an object context the {""} left behind) was parsed again from the
+  // same state, forever - the array growing until the heap ran out
+  it should "return, not loop forever, on an array value that consumes no input" in {
+    implicit val ec: ExecutionContext = ExecutionContext.global
+    def repaired(input: String) = Await.result(Future(JsonRepair.repair(input)), 30.seconds)
+
+    repaired("""[{"a": {""}}, b"c": 1]""") shouldBe """[{"a":{}},"b","c",1]"""
+    repaired("""[{"a": {""}, "b": 1}, c"d": 2]""") shouldBe """[{"a":{},"b":1},"c","d",2]"""
+    repaired("""[{"a": {""}}, "x", y"z": 1]""") shouldBe """[{"a":{}},"x","y","z",1]"""
+    repaired("[false{\"\n:{\"\"}l\",}a\"\":") shouldBe """[false,{"":{},"l":""},"a",":"]"""
+    Await.result(
+      Future(JsonRepair.repairJsonAsValue("""[{"a": {""}}, b"c": 1]""")),
+      30.seconds
+    ) shouldBe List(Map("a" -> Map()), "b", "c", 1L)
+  }
+
+  // the right-trim (Python's rstrip) was the regex \s+$, retried from every position inside a
+  // whitespace run - quadratic: 40,000 spaces before a letter took 2 s, 200,000 about a minute
+  it should "trim trailing whitespace in linear time" in {
+    val spaces = " " * 200000
+
+    val start = System.nanoTime()
+    // an unterminated string, an unquoted value, a raw line break before the closing quote
+    JsonRepair.repair("[\"x" + spaces + "y") shouldBe "[\"x" + spaces + "y\"]"
+    JsonRepair.repair("{\"a\": x" + spaces + "y}") shouldBe "{\"a\":\"x" + spaces + "y\"}"
+    JsonRepair.repair("[\"x" + spaces + "y\n\"]") shouldBe "[\"x" + spaces + "y\"]"
+    JsonRepair.repair("{\"a\": {\"b\": \"x" + spaces + "y\n\"}}") shouldBe
+      "{\"a\":{\"b\":\"x" + spaces + "y\"}}"
+    val seconds = (System.nanoTime() - start) / 1e9
+
+    // linear: milliseconds (the bound is CI headroom); quadratic: minutes
+    seconds should be < 20.0
+  }
+
+  // the repair path kept every escape's backslash AND appended the decoded character ("x\ny"
+  // came back as x, backslash, line break, y; a trailing \n as a stray backslash), and left
+  // backslash-u, \/ and \f undecoded - valid nested JSON takes the repair path, so it came back
+  // altered
+  it should "decode escape sequences on the repair path like a JSON parser" in {
+    // a backslash-u escape (none in literals: Scala 2.12 decodes them anywhere in the source)
+    val u = "\\u"
+    val nested = """{"a": {"b": "x\ny\tz\r\b\f\/ \\ \"q\" """ + u + "00e9 " + u + "d83d" + u +
+      "de00 " + u + "005c" + u + "0041" + u + """000a", "c": ["line\n", "C:\\Users\\", "\"quoted\""]}}"""
+
+    JsonRepair.loads(nested) shouldBe Json.parse(nested)
+    JsonRepair.loads(nested, skipJsonParse = true) shouldBe Json.parse(nested)
+    Json.parse(JsonRepair.repairJson(nested)) shouldBe Json.parse(nested)
+    Json.parse(JsonRepair.repairJson(nested, ensureAscii = false)) shouldBe Json.parse(nested)
+    JsonRepair.repairJsonAsValue("""[{"a": "x\ny """ + u + "00e9\"}]") shouldBe
+      List(Map("a" -> "x\ny é"))
+
+    // broken JSON: the same characters, the usual repairs
+    JsonRepair.repair("""{"text": "Hello\nWorld""") shouldBe """{"text":"Hello\nWorld"}"""
+    JsonRepair.repair("""{"text": "Hello\n"""") shouldBe """{"text":"Hello\n"}"""
+    // an unclosed string is right-trimmed, as before (and as in Python)
+    JsonRepair.repair("""{"text": "Hello\n""") shouldBe """{"text":"Hello"}"""
+    JsonRepair.repair("""{"key": 'it\'s'}""") shouldBe """{"key":"it's"}"""
+    // Python's own form of the "handle escaping correctly" case: a \t escape, not a raw tab
+    JsonRepair.repair(
+      """{"real_content": "Some string: Some other string \t Some string <a href=\"https://domain.com\">Some link</a>""""
+    ) shouldBe """{"real_content":"Some string: Some other string \t Some string <a href=\"https://domain.com\">Some link</a>"}"""
+
+    // unchanged: a raw line break before the closing quote is trimmed, \" stays a quote,
+    // invalid escapes keep their backslash
+    JsonRepair.repair("[\"line\n\"]") shouldBe """["line"]"""
+    JsonRepair.repair("""{"a": {"b": "\"quoted\""}}""") shouldBe """{"a":{"b":"\"quoted\""}}"""
+    JsonRepair.repair("[\"\\l \\x41 " + u + "12 " + u + "ZZZZ\"]") shouldBe
+      "[\"\\\\l \\\\x41 \\\\u12 \\\\uZZZZ\"]"
+  }
+
+  // a number ended at its exponent's '+' sign: 2.50E+3 came back as 2.5 (and the rest of it as
+  // debris) - on the repair path, which valid nested JSON takes too
+  it should "keep an exponent with a plus sign" in {
+    JsonRepair.repair("""{"a": {"b": 2.50E+3, "c": -1.5e+1, "d": [1e+2, 1E+0]}}""") shouldBe
+      """{"a":{"b":2500,"c":-15,"d":[100,1]}}"""
+    JsonRepair.repair("""{"a":1E+2,}""") shouldBe """{"a":100}"""
+    JsonRepair.repair("""{"a": 2.50E+3""") shouldBe """{"a":2500}"""
+
+    // unchanged: a sign that no digit follows still ends the number before its e
+    JsonRepair.repair("""{"a": 1e+}""") shouldBe """{"a":1}"""
+    JsonRepair.repair("""{"a": 1e+, "b": 2}""") shouldBe """{"a":1,"b":2}"""
+  }
+
+  // numbers were Doubles / Longs: digits beyond a double's precision were rounded, a tiny number
+  // became 0, a huge one Infinity (a NumberFormatException in JsNumber) and an integer beyond
+  // Long a string
+  it should "repair a number a double cannot hold like Jackson parses it" in {
+    val nested =
+      """{"a": {"big": 1e400, "tiny": 3.006E-1000, "digits": 0.255621758985604992, """ +
+        """"id": 123456789012345678901, "plain": 1.5, "n": 3}}"""
+    JsonRepair.loads(nested) shouldBe Json.parse(nested)
+    JsonRepair.repair("[1e400,][1e400]") shouldBe "[[1E+400],[1E+400]]"
+    JsonRepair.repair("""{"a": 12345678901234567890123,}""") shouldBe
+      """{"a":12345678901234567890123}"""
+
+    // the raw value: a Double / Long where it holds the number exactly, as before
+    JsonRepair.repairJsonAsValue(
+      """{"a": {"x": 1.5, "n": 3, "big": 1e400, "id": 123456789012345678901}}"""
+    ) shouldBe Map(
+      "a" -> Map(
+        "x" -> 1.5,
+        "n" -> 3L,
+        "big" -> BigDecimal("1e400"),
+        "id" -> BigDecimal("123456789012345678901")
+      )
+    )
+
+    // longer than Jackson's limit (1000 characters) and beyond a double: kept as text - a
+    // BigDecimal of it would take superlinear time
+    val longNumber = "9" * 1001 + ".5"
+    JsonRepair.repair(
+      s"""{"a": {"b": $longNumber}}"""
+    ) shouldBe s"""{"a":{"b":"$longNumber"}}"""
+
+    // unchanged: no number at all
+    JsonRepair.repair("""{"a": "x", "b": 1/2}""") shouldBe """{"a":"x","b":"1/2"}"""
+    JsonRepair.repair("""{"price": 1,000}""") shouldBe """{"price":"1,000"}"""
   }
 }

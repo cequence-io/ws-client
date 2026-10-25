@@ -9,7 +9,7 @@ ThisBuild / description := "Generic WebServices client library for Scala with pl
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala213
-ThisBuild / version := "1.1.3"
+ThisBuild / version := "1.1.4"
 ThisBuild / isSnapshot := false
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 
@@ -74,7 +74,9 @@ lazy val akkaStreamLibs = Def.setting {
   CrossVersion.partialVersion(scalaVersion.value) match {
     case Some((2, 12)) =>
       Seq(
-        "com.typesafe.akka" %% "akka-stream" % "2.6.1" exclude ("com.typesafe.play", "play-json")
+        // not 2.6.1: its akka-protobuf-v3 POM declares protobuf-java 3.10.0 (5 CVEs - unused,
+        // but on every 2.12 consumer's classpath)
+        "com.typesafe.akka" %% "akka-stream" % "2.6.20" exclude ("com.typesafe.play", "play-json")
       )
     case Some((2, 13)) =>
       Seq(
@@ -134,7 +136,7 @@ lazy val jacksonLibs = Seq(
   "com.fasterxml.jackson.datatype" % "jackson-datatype-jsr310" % jacksonVersion
 )
 
-val akkaHttpVersion = "10.5.1" //"10.5.0-M1"
+val akkaHttpVersion = "10.5.3" // 10.5.1 has CVE-2023-44487 (HTTP/2 server - unused here)
 
 // Pekko (open-source successor of Akka; the pekko modules are source-generated from the akka ones)
 val pekkoVersion = "1.6.0"
@@ -329,6 +331,17 @@ lazy val `ws-client-sttp` =
 
 val zioHttpVersion = "3.11.6"
 
+// zio-http's compile dependency netty-pkitesting (test certificates) brings Bouncy Castle 1.84
+// (CVE-2026-8763, CVE-2026-13506 - the client never uses it). Declared directly, as Jackson is,
+// so consumers resolve a patched line; the three jars must share one version
+val bouncyCastleVersion = "1.86"
+
+lazy val bouncyCastleLibs = Seq(
+  "org.bouncycastle" % "bcprov-jdk18on" % bouncyCastleVersion,
+  "org.bouncycastle" % "bcpkix-jdk18on" % bouncyCastleVersion,
+  "org.bouncycastle" % "bcutil-jdk18on" % bouncyCastleVersion
+)
+
 lazy val `ws-client-zio-http` =
   (project in file("ws-client-zio-http"))
     .settings(
@@ -337,6 +350,7 @@ lazy val `ws-client-zio-http` =
       libraryDependencies += "dev.zio" %% "zio-http" % zioHttpVersion,
       // ZStream -> org.reactivestreams Publisher (then FlowAdapters -> java.util.concurrent.Flow)
       libraryDependencies += "dev.zio" %% "zio-interop-reactivestreams" % "2.0.2",
+      libraryDependencies ++= bouncyCastleLibs,
       libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
       // the TLS spec points the JVM-global default trust store at a test certificate; fork so
       // that cannot leak into other modules' tests
