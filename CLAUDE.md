@@ -466,6 +466,11 @@ val loggedService = log(service, "MyService")
   the part after the last dot - empty for a name without a dot (`split('.').last` made such a
   name its own extension: a file named `pdf` went out as `application/pdf`), after a trailing
   dot, and for a name of only dots (`.last` threw there)
+- A remote value never enters a message whole: `JsonUtil.JsonOps.asSafe` renders a mismatching
+  JSON only as `jsonExcerpt` (compact, at most 500 chars, nesting below 16 levels elided) and
+  once (its own `CequenceWSException` is not re-wrapped). Up to 1.1.4 it pretty-printed the
+  whole value twice - text growing with size x depth: a 643 KB response exhausted a 512 MiB
+  heap. Never interpolate `Json.prettyPrint` / `Json.stringify` of a whole remote value
 - Timeouts bound the response BODY on every engine: java.net.http's `HttpRequest.timeout` stops
   at the response headers, so the jdk engine wraps `ofString` in `DeadlineBodySubscriber`
   (the rest of the `requestTimeout` budget; cancels the body subscription - which closes the

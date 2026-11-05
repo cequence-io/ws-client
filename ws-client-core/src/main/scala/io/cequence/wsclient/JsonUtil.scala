@@ -12,6 +12,56 @@ import java.{util => ju}
 
 object JsonUtil {
 
+  // An error never carries the whole (remote) value, only a compact excerpt of at most
+  // MaxJsonInErrorMessage chars with nesting below MaxExcerptDepth elided. Up to 1.1.4 asSafe
+  // pretty-printed the whole value, twice: the text grows with size x depth (~1000x at Jackson's
+  // nesting limit), so a 643 KB response exhausted a 512 MiB heap
+  private val MaxJsonInErrorMessage = 500
+  private val MaxExcerptDepth = 16
+
+  private[wsclient] def jsonExcerpt(json: JsValue): String = {
+    val sb = new java.lang.StringBuilder
+    def full = sb.length >= MaxJsonInErrorMessage
+
+    // iterative over fields / items, so a huge object or array stops at the bound
+    def go(
+      value: JsValue,
+      depth: Int
+    ): Unit =
+      if (!full) value match {
+        case _: JsObject if depth >= MaxExcerptDepth => sb.append("{...}")
+        case _: JsArray if depth >= MaxExcerptDepth  => sb.append("[...]")
+        case JsObject(fields) =>
+          sb.append('{')
+          val it = fields.iterator
+          var first = true
+          while (it.hasNext && !full) {
+            val (key, item) = it.next()
+            if (!first) sb.append(',')
+            first = false
+            sb.append(Json.stringify(JsString(key.take(MaxJsonInErrorMessage)))).append(':')
+            go(item, depth + 1)
+          }
+          sb.append('}')
+        case JsArray(items) =>
+          sb.append('[')
+          val it = items.iterator
+          var first = true
+          while (it.hasNext && !full) {
+            if (!first) sb.append(',')
+            first = false
+            go(it.next(), depth + 1)
+          }
+          sb.append(']')
+        case JsString(s) => sb.append(Json.stringify(JsString(s.take(MaxJsonInErrorMessage))))
+        case leaf        => sb.append(Json.stringify(leaf))
+      }
+
+    go(json, 0)
+    if (sb.length > MaxJsonInErrorMessage) sb.substring(0, MaxJsonInErrorMessage) + "..."
+    else sb.toString
+  }
+
   implicit class JsonOps(val json: JsValue) {
     def asSafe[T](
       implicit fjs: Reads[T]
@@ -24,13 +74,15 @@ object JsonUtil {
               s"JSON at path '${path}' contains the following errors: ${pathErrors.map(_.message).mkString(";")}"
             }.mkString("\n")
             throw new CequenceWSException(
-              s"Unexpected JSON:\n'${Json.prettyPrint(json)}'. Cannot be parsed due to: $errorString"
+              s"Unexpected JSON:\n'${jsonExcerpt(json)}'. Cannot be parsed due to: $errorString"
             )
         }
       } catch {
+        // our own exception above - not wrapped (and the value rendered) a second time
+        case e: CequenceWSException => throw e
         case e: Exception =>
           throw new CequenceWSException(
-            s"Error thrown while processing a JSON '${Json.prettyPrint(json)}'. Cause: ${e.getMessage}"
+            s"Error thrown while processing a JSON '${jsonExcerpt(json)}'. Cause: ${e.getMessage}"
           )
       }
 
