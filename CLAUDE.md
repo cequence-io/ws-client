@@ -179,8 +179,9 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      any survive.
 
 8. **ws-client-testkit** - test-only fixtures (never published): embedded echo / SSE / proxy-stub
-   / protocol-restricted TLS servers (`TestServers`), the shared engine scenarios
-   (`cookieIsolation`, `multipartInjection`, `queryEncoding`), and a generic `LatchedSubscriber` for `Flow`
+   / protocol-restricted TLS servers and a tunnelling CONNECT proxy (`TestServers`), the shared
+   engine scenarios (`cookieIsolation`, `multipartInjection`, `queryEncoding`,
+   `proxyConnectReply`, `connectTunnel`), and a generic `LatchedSubscriber` for `Flow`
    publishers; engine modules depend on it `% Test`. Core's test classpath is NOT shared via
    `test->test` - its dummy engine providers would leak into every engine's discovery tests.
 
@@ -465,6 +466,12 @@ val loggedService = log(service, "MyService")
   the part after the last dot - empty for a name without a dot (`split('.').last` made such a
   name its own extension: a file named `pdf` went out as `application/pdf`), after a trailing
   dot, and for a name of only dots (`.last` threw there)
+- A proxy's non-200 reply to CONNECT fails the request on the Play engines
+  (`PlayWSClientEngine.ConnectReplyGuard`, added to every AHC channel by `channelInitializer`
+  together with the bounded inflater - both flavors). Only a 200 establishes a tunnel; up to
+  1.1.4 any other reply was taken as the https site's own response (a forged 202 + body
+  accepted as success). Covered by `TestServers.proxyConnectReply` (Play, jdk, sttp, zio-http)
+  and `connectTunnel` (Play: a real 200 tunnel to the TLS test server)
 - Failure messages never carry the request URL (query params may hold API keys). sttp's
   `SttpClientException` text includes the full URI, so `SttpWSClientEngine.defaultRecoverErrors`
   describes a failure by the transport cause below the sttp wrapper and maps every remaining

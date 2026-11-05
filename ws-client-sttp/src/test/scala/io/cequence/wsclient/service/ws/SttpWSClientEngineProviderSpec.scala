@@ -22,6 +22,7 @@ import io.cequence.wsclient.testkit.TestServers.{
   multipartInjection,
   QueryEncoding,
   queryEncoding,
+  proxyConnectReply,
   withDumbProxy,
   withEchoServer
 }
@@ -94,6 +95,17 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
       try queryEncoding(engine) shouldBe QueryEncoding.expected
       finally engine.close()
+    }
+
+    "fail a proxy's non-200 reply to CONNECT instead of taking it as the https site's response" in {
+      // up to 1.1.4 the Play engines took a forged 202 - and its body - from the proxy as the
+      // https site's own response (only a 200 establishes a tunnel)
+      val result =
+        proxyConnectReply(settings => WSClientEngineRegistry(settings, Some(expectedEngineId)))
+
+      result.proxySawConnect shouldBe true
+      result.nonStreamed shouldBe a[Left[_, _]]
+      result.streamed.foreach(_ shouldBe a[Left[_, _]])
     }
 
     "POST a JSON body" in {

@@ -24,12 +24,21 @@ import play.api.libs.ws.ahc.StandaloneAhcWSClient
 import play.shaded.ahc.io.netty.buffer.ByteBuf
 import play.shaded.ahc.io.netty.channel.{
   Channel,
+  ChannelDuplexHandler,
   ChannelHandlerContext,
-  ChannelInboundHandlerAdapter
+  ChannelInboundHandlerAdapter,
+  ChannelPromise
 }
 import play.shaded.ahc.io.netty.channel.embedded.EmbeddedChannel
 import play.shaded.ahc.io.netty.handler.codec.compression.DecompressionException
-import play.shaded.ahc.io.netty.handler.codec.http.HttpContentDecompressor
+import play.shaded.ahc.io.netty.handler.codec.http.{
+  HttpContentDecompressor,
+  HttpMethod,
+  HttpRequest,
+  HttpResponse,
+  HttpStatusClass,
+  LastHttpContent
+}
 import play.shaded.ahc.io.netty.util.ReferenceCountUtil
 import play.shaded.ahc.org.asynchttpclient.AsyncHttpClientConfig
 import play.shaded.ahc.org.asynchttpclient.config.{
@@ -125,10 +134,8 @@ class PlayWSClientEngine(
       // Location names - on AHC < 2.14.5 (play-ws 2.1 / 2.2.0-M2) Authorization and Cookie too
       // (CVE-2026-40490, CVE-2026-45300)
       .setFollowRedirect(false)
-    // AHC < 2.16.1 inflates gzip / deflate response bodies without any limit (CVE-2026-85721)
-    PlayWSClientEngine.boundedInflater.foreach(
-      configBuilder.setHttpAdditionalChannelInitializer
-    )
+    // fails a proxy's non-200 reply to CONNECT, and (AHC < 2.16.1) bounds response inflation
+    configBuilder.setHttpAdditionalChannelInitializer(PlayWSClientEngine.channelInitializer)
     // the shaded AHC's own default (TLSv1.2/1.1/1) fails the handshake with TLS-1.3-only hosts -
     // offer the JDK's default client protocols instead, unless the operator configured AHC's list
     PlayWSClientEngine.tlsProtocols.foreach(protocols =>
@@ -809,6 +816,89 @@ object PlayWSClientEngine {
    * `DecompressionException`, the rest of its body dropped. The count covers the whole
    * response - a long-lived compressed stream included. `None` for an AHC with the limit.
    */
+  /**
+   * The engine's AHC channel initializer: the [[ConnectReplyGuard]] on every channel, plus the
+   * [[boundedInflater]] where the shaded AHC lacks its own decompression limit. Read per
+   * client, as the inflater's limit property is.
+   */
+  private[ws] def channelInitializer: java.util.function.Consumer[Channel] = {
+    val inflater = boundedInflater
+    channel => {
+      inflater.foreach(_.accept(channel))
+      channel
+        .pipeline()
+        .addBefore(
+          ChannelManager.AHC_HTTP_HANDLER,
+          ConnectReplyGuardName,
+          new ConnectReplyGuard
+        )
+      ()
+    }
+  }
+
+  private[ws] val ConnectReplyGuardName = "ws-client-connect-guard"
+
+  /**
+   * Fails a proxy's non-200 reply to CONNECT. Through `TransportSettings.proxyURL` an https
+   * target is reached through a CONNECT tunnel, and only a 200 reply establishes one. Up to
+   * 1.1.4 the engine took any other reply as the https target's own response, so the proxy, or
+   * anyone on the plain-HTTP hop to it, could author "HTTPS" responses (a forged 202 with any
+   * JSON body accepted as success). Such a reply now fails the request with an IOException -
+   * as java.net.http ("Tunnel failed") and Netty's HttpProxyHandler do - its body is dropped
+   * and the channel closed. A 200 passes (the TLS handshake follows); plain http targets
+   * (absolute-form, no CONNECT) are unaffected.
+   */
+  private final class ConnectReplyGuard extends ChannelDuplexHandler {
+    private var connectPending = false
+    private var discarding = false
+
+    override def write(
+      ctx: ChannelHandlerContext,
+      msg: Any,
+      promise: ChannelPromise
+    ): Unit = {
+      msg match {
+        case request: HttpRequest if request.method == HttpMethod.CONNECT =>
+          connectPending = true
+        case _ =>
+      }
+      ctx.write(msg, promise)
+      ()
+    }
+
+    override def channelRead(
+      ctx: ChannelHandlerContext,
+      msg: Any
+    ): Unit =
+      if (discarding) {
+        if (msg.isInstanceOf[LastHttpContent]) discarding = false
+        ReferenceCountUtil.release(msg)
+        ()
+      } else
+        msg match {
+          case response: HttpResponse
+              if connectPending && response.status.codeClass != HttpStatusClass.INFORMATIONAL =>
+            connectPending = false
+            if (response.status.code == 200) ctx.fireChannelRead(response)
+            else {
+              val status = response.status.code
+              discarding = !response.isInstanceOf[LastHttpContent]
+              ReferenceCountUtil.release(response)
+              ctx.fireExceptionCaught(
+                new java.io.IOException(
+                  s"Proxy tunnel failed: CONNECT answered with HTTP $status"
+                )
+              )
+              ctx.close()
+            }
+            ()
+
+          case other =>
+            ctx.fireChannelRead(other)
+            ()
+        }
+  }
+
   private[ws] def boundedInflater: Option[java.util.function.Consumer[Channel]] =
     if (ahcBoundsDecompression) None
     else {
