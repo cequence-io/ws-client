@@ -529,10 +529,22 @@ val loggedService = log(service, "MyService")
   `CequenceWSException` instead, on every lookup - recommended for CI
 - JSON repair is procedural (faithful port from Python) and may not be idiomatic Scala. Its
   repair path deliberately coerces the strings "true"/"false"/"null" to typed values - desired
-  behavior, keep it (do not make it opt-in). Valid NESTED JSON also takes the repair path (the
-  concatenated-JSON heuristic counts braces), so the repair path must not otherwise alter
-  content: apostrophes are preserved. Key order beyond 4 keys is NOT (the parser accumulates
-  into a plain `Map`) - deliberately left so. `JsonParser` is a large, fragile port: keep
+  behavior, keep it (do not make it opt-in). `loads` / `repair` / `repairJson` decode a text
+  that is exactly ONE valid JSON value (Jackson streaming check `isSingleJsonValue`: one value,
+  then only whitespace) with `Json.parse` - up to 1.1.4 the brace-count heuristic
+  (`isConcatenatedJsonString`) sent almost every valid NESTED document to the repair parser,
+  where string content could add, replace or drop sibling members (a value ending in an
+  escaped backslash) and `[ ]` / `{ }` swallowed the members after them. For such a text the
+  heuristic flags, only the repair path's leaf coercions are kept (`coerceStringLeaves`:
+  "true"/"false"/"null", `convertNumbers`) - never `convertToJsValue` on a strict value (it
+  strips quote characters that are content); flat valid text gets `Json.parse` as before. Every
+  other input takes the path it always took (malformed -> repair parser, `{..}{..}` -> array);
+  `fromFile` / `repairJsonAsValue` are unaffected. The routing differential (2026-11-05): 20,000
+  generated valid + mutated inputs x 11 entry-point variants on 2.12 and 2.13 - every difference
+  a single valid value whose new result is `Json.parse` + the coercions, malformed input
+  identical. On the repair path (malformed input) key order beyond 4 keys is lost (the parser
+  accumulates into a plain `Map`) - deliberately left so; the repair path must not otherwise
+  alter content: apostrophes are preserved. `JsonParser` is a large, fragile port: keep
   changes there minimal (prefer fixes in `JsonRepair.convertToJsValue`), and verify any change
   differentially against the previous version - thousands of generated valid + mutated inputs
   through every entry point (`repairJson`, `loads` flag variants, `repairJsonAsValue`,
@@ -557,9 +569,8 @@ val loggedService = log(service, "MyService")
   replaces the backslash, `\uXXXX` included) EXCEPT `\"`, which keeps its backslash for
   `convertToJsValue` to unescape (it strips the quotes around a value, so a decoded
   `\"quoted\"` would lose them); a newline that came from an escape is content, not trimmed.
-  Valid nested JSON whose strings are non-empty letters / spaces / escapes repairs exactly like
-  Jackson parses it - a differential oracle that must stay at 100% (empty strings and strings
-  holding JSON punctuation still diverge, pre-existing). In test sources, no backslash-u in any
+  Valid JSON now decodes exactly like Jackson (plus the leaf coercions) whatever its strings
+  hold - the Jackson oracle must stay at 100%. In test sources, no backslash-u in any
   literal or comment: Scala 2.12's lexer decodes (or rejects) it everywhere, even in
   triple-quoted strings - build it as `"\\u" + hex`. Tips for the differential check: run it as a
   standalone JVM (sbt's 1 GB heap OOMs on a looping input), with a per-call timeout and
