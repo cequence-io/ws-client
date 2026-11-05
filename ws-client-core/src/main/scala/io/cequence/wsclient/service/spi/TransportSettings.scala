@@ -17,10 +17,12 @@ import io.cequence.wsclient.service.ws.Timeouts
  *     connection pool; ignored by the other backends
  *   - `readTimeout`: Play/AHC client-level; pekko-http applies it per request (`toStrict`);
  *     zio-http as a read-idle timeout on the channel (no bytes within the window - also bounds
- *     the gap between SSE events); ignored by jdk and sttp
+ *     the gap between SSE events); jdk as the idle timeout of a stream (no data while its
+ *     subscriber waits; defaults to the request timeout); ignored by sttp
  *   - `requestTimeout`: Play/AHC client-level (bounds the WHOLE exchange incl. streaming);
- *     applied per request by pekko-http, jdk, sttp and zio-http (zio-http: the whole exchange
- *     for plain calls, but only the wait for the response headers for streams)
+ *     applied per request by pekko-http, jdk, sttp and zio-http (jdk / sttp / zio-http: the
+ *     whole exchange of a plain call, the response body included; for streams only the wait
+ *     for the response headers)
  *
  * Timeouts are ENGINE-level by design - deliberately not overridable per site, so engines stay
  * fully stateless (no per-configuration client caches). A service that genuinely needs

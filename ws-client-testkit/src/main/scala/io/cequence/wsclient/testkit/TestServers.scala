@@ -12,6 +12,7 @@ import com.sun.net.httpserver.{
 import io.cequence.wsclient.domain.{SiteBinding, WsRequestContext}
 import io.cequence.wsclient.service.{WSClientEngine, WSClientOutputStreamCore}
 import io.cequence.wsclient.service.spi.{TransportSettings, WSClientEngineRegistry}
+import io.cequence.wsclient.service.ws.Timeouts
 import play.api.libs.json.{JsValue, Json}
 
 import java.io.File
@@ -655,6 +656,100 @@ object TestServers {
           content = content
         )
       }
+
+  /**
+   * The outcome of calls to a server that sends complete response headers and then stalls:
+   * `Left(error message)` or `Right(what was received)`, plus the milliseconds each took.
+   */
+  final case class StalledBody(
+    nonStreamed: Either[String, String],
+    nonStreamedMs: Long,
+    streamed: Option[Either[String, String]],
+    streamedMs: Option[Long]
+  )
+
+  /**
+   * The stalled-body scenario on an engine built by `newEngine` with `requestTimeout = 1500`
+   * and `readTimeout = 1000`: a non-streamed GET whose response promises 100 body bytes and
+   * sends 6, and (on engines implementing `WSClientOutputStreamCore`, if `checkStream`) an SSE
+   * call that gets one event and then nothing. The server keeps every connection open. Each
+   * call is given 15 s - an engine whose deadline stops at the response headers never
+   * finishes.
+   */
+  def stalledBody(
+    checkStream: Boolean = true
+  )(
+    newEngine: TransportSettings => WSClientEngine
+  ): StalledBody = {
+    val server = new ServerSocket(0)
+    val sockets = new java.util.concurrent.ConcurrentLinkedQueue[java.net.Socket]()
+    val acceptor = new Thread(new Runnable {
+      override def run(): Unit =
+        try
+          while (true) {
+            val socket = server.accept()
+            sockets.add(socket)
+            val in = new java.io.BufferedReader(
+              new java.io.InputStreamReader(socket.getInputStream, "UTF-8")
+            )
+            val requestLine = Option(in.readLine()).getOrElse("")
+            var line = in.readLine()
+            while (line != null && line.nonEmpty) line = in.readLine()
+            val response =
+              if (requestLine.contains("/sse"))
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" +
+                  "f\r\ndata: {\"n\":1}\n\n\r\n"
+              else
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"a\":1"
+            socket.getOutputStream.write(response.getBytes("UTF-8"))
+            socket.getOutputStream.flush()
+            // ... and nothing more: the connection stays open until the scenario ends
+          }
+        catch {
+          case _: Throwable => // server closed by the scenario
+        }
+    })
+    acceptor.setDaemon(true)
+    acceptor.start()
+
+    val engine = newEngine(
+      TransportSettings(Timeouts(requestTimeout = Some(1500), readTimeout = Some(1000)))
+    )
+    try {
+      val site = SiteBinding(s"http://127.0.0.1:${server.getLocalPort}")
+
+      val start = System.nanoTime()
+      val nonStreamed =
+        Try(Await.result(engine.execGETRich(site, "after-headers"), 15.seconds)) match {
+          case Success(rich) => Right(s"HTTP ${rich.status.code}: ${rich.status.message}")
+          case Failure(e)    => Left(s"${e.getClass.getSimpleName}: ${e.getMessage}")
+        }
+      val nonStreamedMs = (System.nanoTime() - start) / 1000000L
+
+      val streamed = engine match {
+        case streaming: WSClientOutputStreamCore if checkStream =>
+          val streamStart = System.nanoTime()
+          val subscriber = new LatchedSubscriber[JsValue]
+          streaming.execJsonStreamPublisher(site, "sse", "GET").subscribe(subscriber)
+          val outcome =
+            if (!subscriber.awaitDone(15))
+              Right(s"no terminal signal, events: ${subscriber.received}")
+            else
+              subscriber.error match {
+                case Some(e) => Left(s"${e.getClass.getSimpleName}: ${e.getMessage}")
+                case None    => Right(s"completed, events: ${subscriber.received}")
+              }
+          Some((outcome, (System.nanoTime() - streamStart) / 1000000L))
+        case _ => None
+      }
+
+      StalledBody(nonStreamed, nonStreamedMs, streamed.map(_._1), streamed.map(_._2))
+    } finally {
+      engine.close()
+      server.close()
+      sockets.forEach(socket => socket.close())
+    }
+  }
 
   /**
    * A real (if minimal) tunnelling proxy: answers `CONNECT host:port` with `200 Connection

@@ -47,6 +47,26 @@ private[wsclient] object EngineSupport {
   val MaxErrorBodyBytes: Int = 4 * 1024
   val ErrorBodyReadTimeoutMs: Int = 10 * 1000
 
+  /**
+   * One daemon thread for the engines' deadlines on response bodies (jdk, sttp): java.net.http
+   * enforces `HttpRequest.timeout` only until the response headers arrive. Cancelled timers
+   * are removed at once, so a finished request leaves nothing behind.
+   */
+  lazy val deadlineScheduler: java.util.concurrent.ScheduledThreadPoolExecutor = {
+    val executor = new java.util.concurrent.ScheduledThreadPoolExecutor(
+      1,
+      new java.util.concurrent.ThreadFactory {
+        override def newThread(runnable: Runnable): Thread = {
+          val thread = new Thread(runnable, "ws-client-deadlines")
+          thread.setDaemon(true)
+          thread
+        }
+      }
+    )
+    executor.setRemoveOnCancelPolicy(true)
+    executor
+  }
+
   def streamErrorMessage(
     label: String,
     status: Int,

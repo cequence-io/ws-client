@@ -21,6 +21,7 @@ import io.cequence.wsclient.testkit.TestServers.{
   multipartInjection,
   QueryEncoding,
   queryEncoding,
+  stalledBody,
   ReceivedPart,
   respond,
   sse,
@@ -139,6 +140,19 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
       try queryEncoding(engine) shouldBe QueryEncoding.expected
       finally engine.close()
+    }
+
+    "fail a call whose response stalls after the headers within the request / read timeout" in {
+      // up to 1.1.4 the jdk and sttp engines hung forever: java.net.http's HttpRequest.timeout
+      // stops at the response headers (pekko-http streams: bounded only by pekko's own client idle-timeout, not checked)
+      val result = stalledBody(checkStream = false)(settings =>
+        WSClientEngineRegistry(settings, Some(expectedEngineId))
+      )
+
+      result.nonStreamed shouldBe a[Left[_, _]]
+      result.nonStreamedMs should be < 6000L
+      result.streamed.foreach(_ shouldBe a[Left[_, _]])
+      result.streamedMs.foreach(_ should be < 6000L)
     }
 
     "merge query params with a query already embedded in the endpoint" in {

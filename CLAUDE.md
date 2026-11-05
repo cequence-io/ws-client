@@ -181,7 +181,7 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
 8. **ws-client-testkit** - test-only fixtures (never published): embedded echo / SSE / proxy-stub
    / protocol-restricted TLS servers and a tunnelling CONNECT proxy (`TestServers`), the shared
    engine scenarios (`cookieIsolation`, `multipartInjection`, `queryEncoding`,
-   `proxyConnectReply`, `connectTunnel`), and a generic `LatchedSubscriber` for `Flow`
+   `proxyConnectReply`, `connectTunnel`, `stalledBody`), and a generic `LatchedSubscriber` for `Flow`
    publishers; engine modules depend on it `% Test`. Core's test classpath is NOT shared via
    `test->test` - its dummy engine providers would leak into every engine's discovery tests.
 
@@ -466,6 +466,18 @@ val loggedService = log(service, "MyService")
   the part after the last dot - empty for a name without a dot (`split('.').last` made such a
   name its own extension: a file named `pdf` went out as `application/pdf`), after a trailing
   dot, and for a name of only dots (`.last` threw there)
+- Timeouts bound the response BODY on every engine: java.net.http's `HttpRequest.timeout` stops
+  at the response headers, so the jdk engine wraps `ofString` in `DeadlineBodySubscriber`
+  (the rest of the `requestTimeout` budget; cancels the body subscription - which closes the
+  connection - and fails with `HttpTimeoutException`) and bounds streams with
+  `IdleTimeoutPublisher` (`readTimeout`, default `requestTimeout`; counts only while the
+  subscriber has demand, so slow consumers and long healthy SSE streams are fine); the sttp
+  engine reads the body itself (`asStringWithDeadline`: closes the stream at the deadline, the
+  read marked `blocking`). Up to 1.1.4 a body that stalled after the headers hung jdk / sttp
+  calls forever (sttp also parked a global-EC thread). Shared daemon timer:
+  `EngineSupport.deadlineScheduler`. Covered on every engine by `TestServers.stalledBody`
+  (pekko-http: the stream part is not checked - pekko's own client idle-timeout, 60 s, bounds
+  it, not `readTimeout`)
 - A proxy's non-200 reply to CONNECT fails the request on the Play engines
   (`PlayWSClientEngine.ConnectReplyGuard`, added to every AHC channel by `channelInitializer`
   together with the bounded inflater - both flavors). Only a 200 establishes a tunnel; up to

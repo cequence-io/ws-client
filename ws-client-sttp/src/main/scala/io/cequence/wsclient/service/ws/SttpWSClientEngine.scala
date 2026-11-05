@@ -26,9 +26,12 @@ import scala.concurrent.{ExecutionContext, Future}
  * `WSClientOutputStreamExtraAkka`/`-Pekko`).
  *
  * Timeout mapping: sttp exposes a single per-request timeout, to which `requestTimeout` is
- * mapped; `readTimeout`/`pooledConnectionIdleTimeout` are ignored, and `connectTimeout` can
- * only be set on the backend itself (the discovery provider does this via `TransportSettings`;
- * with `SttpWSClientEngine.apply` configure it via `BackendOptions` on your own backend).
+ * mapped - with the JDK backend it covers only the wait for the response headers, so the
+ * engine reads the body under the rest of the same budget (up to 1.1.4 a body that stalled
+ * after the headers hung the call forever, parking an `ExecutionContext.global` thread);
+ * `readTimeout`/`pooledConnectionIdleTimeout` are ignored, and `connectTimeout` can only be
+ * set on the backend itself (the discovery provider does this via `TransportSettings`; with
+ * `SttpWSClientEngine.apply` configure it via `BackendOptions` on your own backend).
  *
  * Redirects are never followed (a per-request option, so it binds caller-supplied backends
  * too) - a 3xx comes back as a non-acceptable status, like on every other engine.
@@ -354,6 +357,43 @@ final class SttpWSClientEngine private[ws] (
       .response(asStringAlways)
   }
 
+  // the body as a String (charset from Content-Type, else UTF-8 - as asStringAlways), read
+  // under the request deadline: java.net.http's HttpRequest.timeout (sttp's readTimeout) stops
+  // at the response headers. At the deadline the stream is closed - which unblocks the read
+  // and makes java.net.http close the connection - and the call fails with an
+  // HttpTimeoutException (-> CequenceWSTimeoutException). sttp evaluates the function in a
+  // plain Future: the read is marked `blocking` here
+  private def asStringWithDeadline(deadlineNanos: Long): ResponseAs[String] =
+    asInputStreamAlways { stream =>
+      val expired = new java.util.concurrent.atomic.AtomicBoolean(false)
+      val timer = EngineSupport.deadlineScheduler.schedule(
+        new Runnable {
+          override def run(): Unit = {
+            expired.set(true)
+            stream.close()
+          }
+        },
+        math.max((deadlineNanos - System.nanoTime()) / 1000000L, 0L),
+        java.util.concurrent.TimeUnit.MILLISECONDS
+      )
+      try scala.concurrent.blocking(stream.readAllBytes())
+      catch {
+        case _: java.io.IOException if expired.get =>
+          throw new java.net.http.HttpTimeoutException(
+            s"response body not received within $requestTimeoutMs ms"
+          )
+      } finally {
+        timer.cancel(false)
+        ()
+      }
+    }.mapWithMetadata {
+      (
+        bytes,
+        metadata
+      ) =>
+        new String(bytes, SttpWSClientEngine.charsetOf(metadata.contentType))
+    }
+
   private def uri(
     site: SiteBinding,
     requestContext: WsRequestContext,
@@ -440,6 +480,7 @@ final class SttpWSClientEngine private[ws] (
     acceptableStatusCodes: Seq[Int]
   ): Future[RichResponse] =
     request
+      .response(asStringWithDeadline(System.nanoTime() + requestTimeoutMs * 1000000L))
       .send(backend)
       .map { rawResponse =>
         val response =
@@ -501,6 +542,15 @@ object SttpWSClientEngine {
   private def transportCause(e: Throwable): Option[Throwable] =
     causeChain(e).collect { case wrapper: SttpClientException => wrapper }.toList.lastOption
       .fold(Option(e))(wrapper => Option(wrapper.getCause))
+
+  // the charset parameter of a Content-Type, UTF-8 when absent, malformed or unsupported
+  private[ws] def charsetOf(contentType: Option[String]): java.nio.charset.Charset =
+    contentType
+      .flatMap(ct => MediaType.parse(ct).toOption)
+      .flatMap(_.charset)
+      .map(_.trim.stripPrefix("\"").stripSuffix("\""))
+      .flatMap(name => scala.util.Try(java.nio.charset.Charset.forName(name)).toOption)
+      .getOrElse(java.nio.charset.StandardCharsets.UTF_8)
 
   private def describe(e: Throwable): String =
     transportCause(e)
