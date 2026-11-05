@@ -19,6 +19,8 @@ import io.cequence.wsclient.testkit.TestServers.{
   cookieIsolation,
   MultipartInjection,
   multipartInjection,
+  QueryEncoding,
+  queryEncoding,
   ReceivedPart,
   respond,
   sse,
@@ -127,6 +129,15 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
             multipartInjection(engine, useInMemoryBody) shouldBe expected
           }
         }
+      finally engine.close()
+    }
+
+    "percent-encode query param keys and values (raw values in, decoded as sent)" in {
+      // the Play engines put them into the URL verbatim up to 1.1.4: a '#' cut the query off
+      // (Pinecone's fetch(ids) with "doc#0" came back empty), '&' / '=' split a value, '+'
+      // read as a space
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try queryEncoding(engine) shouldBe QueryEncoding.expected
       finally engine.close()
     }
 

@@ -15,7 +15,7 @@ import io.cequence.wsclient.service.spi.{TransportSettings, WSClientEngineRegist
 import play.api.libs.json.{JsValue, Json}
 
 import java.io.File
-import java.net.{InetSocketAddress, ServerSocket}
+import java.net.{InetSocketAddress, ServerSocket, URLDecoder}
 import java.nio.file.Files
 import java.security.KeyStore
 import java.util.concurrent.{Executors, ThreadFactory, TimeoutException}
@@ -654,6 +654,88 @@ object TestServers {
           content = content
         )
       }
+
+  /**
+   * The query as the server received it: the endpoint string's own query (raw, as many pairs
+   * as the endpoint wrote), then the parameters - each `&`-separated pair split at its first
+   * `=`, both sides form-decoded (`+` is a space, as most servers read it; a malformed escape
+   * comes back as `<undecodable:...>`).
+   */
+  final case class ReceivedQuery(
+    endpointQuery: String,
+    params: Seq[(String, String)]
+  )
+
+  object QueryEncoding {
+
+    // a query the endpoint string carries itself (Azure's api-version) - not a parameter
+    val EndpointQuery = "api-version=2024-02-01"
+
+    /**
+     * Raw values (and keys) holding characters that are reserved in a query or need encoding:
+     * a `#` used to start a fragment, so the rest of the query was lost (Pinecone's
+     * `fetch(ids)` with `doc#0`); `&` / `=` split a value; `+` reads as a space; a bare `%`;
+     * an encoded-looking value that is still a raw value; non-ASCII; a key that needs
+     * encoding.
+     */
+    val Params: Seq[(String, String)] = Seq(
+      "ids" -> "doc#0",
+      "ids" -> "doc#1",
+      "q" -> "a b&c=d",
+      "expr" -> "1+1",
+      "pct" -> "100%",
+      "pre" -> "a%20b",
+      "text" -> ("na" + 0xef.toChar + "ve " + 0x65e5.toChar + 0x672c.toChar),
+      "odd key&x=" -> "v"
+    )
+
+    // a base64-style API key in WsRequestContext.extraParams
+    val ExtraParam: (String, String) = "key" -> "k+/="
+
+    val expected: ReceivedQuery = ReceivedQuery(EndpointQuery, Params :+ ExtraParam)
+  }
+
+  /**
+   * GETs `items?`[[QueryEncoding.EndpointQuery]] with [[QueryEncoding.Params]] and an extra
+   * param from the site's request context, and returns the query as the server received it.
+   */
+  def queryEncoding(engine: WSClientEngine): ReceivedQuery = {
+    import QueryEncoding._
+
+    def decode(value: String) =
+      try URLDecoder.decode(value, "UTF-8")
+      catch { case _: IllegalArgumentException => s"<undecodable:$value>" }
+
+    withEchoServer { port =>
+      val site = SiteBinding(
+        s"http://localhost:$port",
+        WsRequestContext(extraParams = Seq(ExtraParam))
+      )
+      val response = engine.getResponseOrError(
+        Await.result(
+          engine.execGETRich(
+            site,
+            s"items?$EndpointQuery",
+            params = Params.map { case (key, value) => key -> Some(value) }
+          ),
+          30.seconds
+        )
+      )
+
+      val pairs = (response.json \ "query").as[String].split("&").toSeq
+      val (endpointPairs, paramPairs) = pairs.splitAt(EndpointQuery.split("&").length)
+
+      ReceivedQuery(
+        endpointPairs.mkString("&"),
+        paramPairs.filter(_.nonEmpty).map { pair =>
+          pair.split("=", 2) match {
+            case Array(key, value) => decode(key) -> decode(value)
+            case Array(key)        => decode(key) -> ""
+          }
+        }
+      )
+    }
+  }
 
   // `form-data; key=token; key="quoted \" string"` -> the (key, value) pairs
   private def dispositionParams(value: String): Seq[(String, String)] = {

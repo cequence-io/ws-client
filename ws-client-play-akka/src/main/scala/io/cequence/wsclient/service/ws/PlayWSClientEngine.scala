@@ -39,7 +39,7 @@ import play.shaded.ahc.org.asynchttpclient.config.{
 import play.shaded.ahc.org.asynchttpclient.netty.channel.ChannelManager
 
 import java.io.File
-import java.net.UnknownHostException
+import java.net.{URLEncoder, UnknownHostException}
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.{SSLContext, TrustManager}
@@ -644,14 +644,17 @@ class PlayWSClientEngine(
 
   // aux
 
-  protected def paramsAsString(params: Seq[(String, Any)]): String = {
-    val string = params.map { case (tag, value) => s"$tag=$value" }.mkString("&")
+  protected def paramsAsString(params: Seq[(String, Any)]): String =
+    paramsOptionalAsString(params.map { case (tag, value) => (tag, Some(value)) })
 
-    if (string.nonEmpty) s"?$string" else ""
-  }
-
+  // keys and values are raw - percent-encoded here (up to 1.1.4 they went in verbatim: a '#'
+  // cut the query off, '&' / '=' split a value, '+' read as a space)
   protected def paramsOptionalAsString(params: Seq[(String, Option[Any])]): String = {
-    val string = params.collect { case (tag, Some(value)) => s"$tag=$value" }.mkString("&")
+    import PlayWSClientEngine.encodeQueryComponent
+
+    val string = params.collect { case (tag, Some(value)) =>
+      s"${encodeQueryComponent(tag)}=${encodeQueryComponent(value.toString)}"
+    }.mkString("&")
 
     if (string.nonEmpty) s"?$string" else ""
   }
@@ -709,6 +712,18 @@ object PlayWSClientEngine {
     implicit materializer: Materializer,
     ec: ExecutionContext
   ): PlayWSClientEngine = new PlayWSClientEngine(transportSettings)
+
+  /**
+   * RFC 3986 percent-encoding of a query key or value: every byte of its UTF-8 form but the
+   * unreserved characters (letters, digits, `-`, `.`, `_`, `~`). `URLEncoder` alone writes
+   * form encoding, whose `+` for a space an RFC 3986 server reads as a literal `+`.
+   */
+  private[ws] def encodeQueryComponent(value: String): String =
+    URLEncoder
+      .encode(value, "UTF-8")
+      .replace("+", "%20")
+      .replace("*", "%2A")
+      .replace("%7E", "~")
 
   /**
    * The TLS protocols the engine's client offers - or `None` to leave the shaded AHC's own

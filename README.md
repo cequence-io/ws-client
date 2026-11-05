@@ -194,7 +194,7 @@ val island = engine.copy(reuseExecContext = false)
 //   engines built on a caller-supplied environment throw - create those via their factory)
 ```
 
-**Query-parameter encoding** differs between the engine families: the `jdk`, `sttp`, `pekko-http`, and `zio-http` engines expect **raw (unencoded) parameter values** and percent-encode them for you; the Play-based engines pass values through verbatim (long-standing behavior, kept for backward compatibility), so with those you must pre-encode values containing reserved characters yourself. Keep this in mind when swapping engines - a pre-encoded value like `a%20b` gets double-encoded on the non-Play engines.
+**Query-parameter encoding**: every engine takes **raw (unencoded) parameter keys and values** - `params` and `WsRequestContext.extraParams` - and percent-encodes them for you. Up to 1.1.4 the Play-based engines put them into the URL verbatim: a `#` cut the query off (with every parameter after it, extra params included), `&` and `=` split a value, and `+` read as a space. If you pre-encoded values for the Play engines, stop: a pre-encoded value like `a%20b` is now sent as the literal text `a%20b`, as on every other engine. A query written into the endpoint string itself (e.g. `"items?api-version=2024-02-01"`) is not a parameter - encode that one yourself.
 
 **Cookies**: engines keep no cookie jar - a `Set-Cookie` response header is surfaced in `RichResponse.headers` but never stored or sent on a later request, so one site's (or tenant's) cookies can never reach another `SiteBinding`. A site that needs a cookie sends it itself, as a `Cookie` header in its `WsRequestContext` (or from `requestContextFun`).
 

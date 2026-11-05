@@ -13,6 +13,8 @@ import io.cequence.wsclient.testkit.TestServers.{
   cookieIsolation,
   MultipartInjection,
   multipartInjection,
+  QueryEncoding,
+  queryEncoding,
   negotiatedProtocol,
   respond,
   selfSignedKeyStore,
@@ -129,6 +131,15 @@ class PlayPekkoWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
             multipartInjection(engine, useInMemoryBody) shouldBe MultipartInjection.expected
           }
         }
+      finally engine.close()
+    }
+
+    "percent-encode query param keys and values (raw values in, decoded as sent)" in {
+      // the Play engines put them into the URL verbatim up to 1.1.4: a '#' cut the query off
+      // (Pinecone's fetch(ids) with "doc#0" came back empty), '&' / '=' split a value, '+'
+      // read as a space
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try queryEncoding(engine) shouldBe QueryEncoding.expected
       finally engine.close()
     }
 
@@ -440,16 +451,17 @@ class PlayPekkoWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
           engine
             .execGETRich(
               site,
-              "ping?api-version=2024-02-01",
+              "ping?api-version=2024-02-01&prefix=a%2Fb%20c%2Bd",
               params = Seq("tag" -> Some("value"))
             )
             .map(engine.getResponseOrError),
           30.seconds
         )
 
-        val query = (response.json \ "query").get.as[String]
-        query should include("api-version=2024-02-01")
-        query should include("tag=value")
+        // the endpoint's own (caller-encoded) query goes out as written - never encoded again
+        // as the params are: a SigV4-signed query must match the signed one byte for byte
+        (response.json \ "query").get.as[String] shouldBe
+          "api-version=2024-02-01&prefix=a%2Fb%20c%2Bd&tag=value"
 
         engine.close()
       }

@@ -179,8 +179,8 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      any survive.
 
 8. **ws-client-testkit** - test-only fixtures (never published): embedded echo / SSE / proxy-stub
-   / protocol-restricted TLS servers (`TestServers`), the shared `cookieIsolation` and
-   `multipartInjection` engine scenarios, and a generic `LatchedSubscriber` for `Flow`
+   / protocol-restricted TLS servers (`TestServers`), the shared engine scenarios
+   (`cookieIsolation`, `multipartInjection`, `queryEncoding`), and a generic `LatchedSubscriber` for `Flow`
    publishers; engine modules depend on it `% Test`. Core's test classpath is NOT shared via
    `test->test` - its dummy engine providers would leak into every engine's discovery tests.
 
@@ -401,9 +401,17 @@ val loggedService = log(service, "MyService")
   `reuseExecContext = false` spins up an owned daemon system (discovery-created engines only). Engines resolve `Timeouts` per field (missing
   fields fall back to defaults - a partially-specified `Timeouts` never disables the request
   timeout)
-- Query-param encoding contract: the jdk/sttp/pekko-http/zio-http engines take raw values and
-  percent-encode them; the Play engines pass values through verbatim (pre-existing behavior
-  kept for backward compatibility - callers pre-encode reserved characters there)
+- Query-param encoding contract: every engine takes raw keys and values (`params` and
+  `WsRequestContext.extraParams`) and percent-encodes them - the Play engines since the release
+  after 1.1.4 (`PlayWSClientEngine.encodeQueryComponent`, RFC 3986: `%20` for a space; the jdk
+  engine writes form encoding, `+`). Up to 1.1.4 the Play engines passed them verbatim: a `#`
+  cut the query off (Pinecone `fetch(ids)` with `doc#0` came back empty), `&` / `=` split a
+  value. A query written into the endpoint string is not a parameter - the caller encodes it.
+  The Play engines send it byte for byte (openai-scala's SigV4-signed Bedrock GETs build their
+  query there: the sent query must match the signed one); sttp / pekko-http / zio-http
+  re-encode it (`a%2Fb%20c` goes out as `a/b+c`, zio-http `a%2Fb+c` - pre-existing). Covered
+  on every engine by the shared testkit scenario `TestServers.queryEncoding`; the Play specs
+  pin the endpoint query's bytes
 - `TransportSettings.proxyURL` ("host:port" or "scheme://host:port", port required; only
   host + port are used - always a plain HTTP proxy, scheme / credentials / path ignored) is
   honored by the Play/jdk/sttp/zio-http engines (zio-http tunnels via CONNECT but resolves the
