@@ -21,7 +21,7 @@ import org.apache.pekko.http.scaladsl.settings.{
   ConnectionPoolSettings
 }
 import org.apache.pekko.pattern.after
-import org.apache.pekko.stream.scaladsl.{Framing, Source}
+import org.apache.pekko.stream.scaladsl.{Framing, Sink, Source}
 import org.apache.pekko.stream.{Materializer, SystemMaterializer}
 import org.apache.pekko.util.ByteString
 import org.slf4j.LoggerFactory
@@ -89,7 +89,7 @@ class PekkoHttpWSClientEngine(
       )
     )
 
-    val base = ConnectionPoolSettings(system)
+    val base = PekkoHttpWSClientEngine.sizedForApiUse(ConnectionPoolSettings(system), system)
     transportSettings.timeouts.connectTimeout
       .map(ms =>
         base.withConnectionSettings(
@@ -125,8 +125,12 @@ class PekkoHttpWSClientEngine(
   //////////
 
   /**
-   * A new engine with the given transport settings - always builds its own `Http()` connection
-   * pool, so it is closed independently of this engine.
+   * A new engine with the given transport settings, closed independently of this engine.
+   * pekko-http keeps its connection pools per actor system, keyed by host and pool settings: a
+   * copy on the SAME system (`reuseExecContext = true`) with equal connection settings shares
+   * this engine's per-host pools (requests queue behind each other's once a host's
+   * `max-connections` are in use); only a copy on its own system (`reuseExecContext = false`)
+   * gets its own pools.
    *
    *   - `reuseExecContext = true` (default): the copy runs on THIS engine's actor system /
    *     dispatcher and does NOT own it (`ownsSystem = false`), so its `close()` only drains
@@ -731,9 +735,15 @@ class PekkoHttpWSClientEngine(
           )
         )
       )
-      // if the timer won, the pool slot stays occupied until the late response's entity is
-      // consumed - discard it when it eventually arrives, or bursts exhaust the pool
-      result.failed.foreach(_ => responseFuture.foreach(_.entity.discardBytes()))
+      // the timer won: ABORT a late response (cancelling its entity closes the connection and
+      // frees the pool slot at once). Up to 1.1.4 it was drained - discardBytes read a late
+      // response, an SSE generation included, to its very end, holding the slot meanwhile.
+      // pekko-http cannot withdraw a request that is still queued for a connection: it is sent
+      // once a slot frees, after its caller saw the timeout - which the pool sizing
+      // (sizedForApiUse) leaves to calls beyond max-connections in flight to one host
+      result.failed.foreach(_ =>
+        responseFuture.foreach(_.entity.dataBytes.runWith(Sink.cancelled))
+      )
       result
     }.getOrElse(responseFuture)
   }
@@ -790,6 +800,42 @@ class PekkoHttpWSClientEngine(
 }
 
 object PekkoHttpWSClientEngine {
+
+  private val MaxConnectionsPath = "pekko.http.host-connection-pool.max-connections"
+  private val MaxOpenRequestsPath = "pekko.http.host-connection-pool.max-open-requests"
+
+  // per-host pool size for a site-stateless engine (as the zio-http engine's 1024): pekko-http's
+  // default of 4 connections let one site's slow calls (long generations, SSE streams) hold a
+  // host's whole pool, so every other site of the engine queued behind them - and timed out
+  private[ws] val MaxConnectionsPerHost = 1024
+  private[ws] val MaxOpenRequestsPerHost = 2048 // pekko: a power of 2
+
+  /**
+   * `settings` with the per-host limits raised to [[MaxConnectionsPerHost]] /
+   * [[MaxOpenRequestsPerHost]] - each one only while it still has pekko-http's own default
+   * (reference.conf): a value the application configured stays in force.
+   */
+  private[ws] def sizedForApiUse(
+    settings: ConnectionPoolSettings,
+    system: ActorSystem
+  ): ConnectionPoolSettings = {
+    val config = system.settings.config
+    val reference =
+      com.typesafe.config.ConfigFactory.defaultReference(system.getClass.getClassLoader)
+    def isDefault(path: String) = config.getInt(path) == reference.getInt(path)
+
+    val withConnections =
+      if (isDefault(MaxConnectionsPath)) settings.withMaxConnections(MaxConnectionsPerHost)
+      else settings
+    if (isDefault(MaxOpenRequestsPath))
+      withConnections.withMaxOpenRequests(
+        math.max(
+          MaxOpenRequestsPerHost,
+          Integer.highestOneBit(withConnections.maxConnections) * 2
+        )
+      )
+    else withConnections
+  }
 
   /**
    * Creates a self-contained engine on the given (caller-supplied) actor system - `ownsSystem`

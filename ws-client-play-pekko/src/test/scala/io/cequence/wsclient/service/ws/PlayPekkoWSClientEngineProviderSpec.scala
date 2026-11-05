@@ -13,6 +13,11 @@ import io.cequence.wsclient.testkit.TestServers.{
   cookieIsolation,
   MultipartInjection,
   multipartInjection,
+  QueryEncoding,
+  queryEncoding,
+  stalledBody,
+  proxyConnectReply,
+  connectTunnel,
   negotiatedProtocol,
   respond,
   selfSignedKeyStore,
@@ -130,6 +135,45 @@ class PlayPekkoWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
           }
         }
       finally engine.close()
+    }
+
+    "percent-encode query param keys and values (raw values in, decoded as sent)" in {
+      // the Play engines put them into the URL verbatim up to 1.1.4: a '#' cut the query off
+      // (Pinecone's fetch(ids) with "doc#0" came back empty), '&' / '=' split a value, '+'
+      // read as a space
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try queryEncoding(engine) shouldBe QueryEncoding.expected
+      finally engine.close()
+    }
+
+    "fail a call whose response stalls after the headers within the request / read timeout" in {
+      // up to 1.1.4 the jdk and sttp engines hung forever: java.net.http's HttpRequest.timeout
+      // stops at the response headers
+      val result =
+        stalledBody()(settings => WSClientEngineRegistry(settings, Some(expectedEngineId)))
+
+      result.nonStreamed shouldBe a[Left[_, _]]
+      result.nonStreamedMs should be < 6000L
+      result.streamed.foreach(_ shouldBe a[Left[_, _]])
+      result.streamedMs.foreach(_ should be < 6000L)
+    }
+
+    "fail a proxy's non-200 reply to CONNECT instead of taking it as the https site's response" in {
+      // up to 1.1.4 the Play engines took a forged 202 - and its body - from the proxy as the
+      // https site's own response (only a 200 establishes a tunnel)
+      val result =
+        proxyConnectReply(settings => WSClientEngineRegistry(settings, Some(expectedEngineId)))
+
+      result.proxySawConnect shouldBe true
+      result.nonStreamed shouldBe a[Left[_, _]]
+      result.streamed.foreach(_ shouldBe a[Left[_, _]])
+    }
+
+    "still tunnel an https call through a proxy that answers CONNECT with 200" in {
+      // the CONNECT reply guard passes a 200: the TLS handshake follows through the tunnel
+      connectTunnel(selfSignedKeyStore())(settings =>
+        WSClientEngineRegistry(settings, Some(expectedEngineId))
+      ) shouldBe ((200, 1))
     }
 
     "never follow a redirect - not even with the shaded AHC's followRedirect property set" in {
@@ -440,16 +484,17 @@ class PlayPekkoWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
           engine
             .execGETRich(
               site,
-              "ping?api-version=2024-02-01",
+              "ping?api-version=2024-02-01&prefix=a%2Fb%20c%2Bd",
               params = Seq("tag" -> Some("value"))
             )
             .map(engine.getResponseOrError),
           30.seconds
         )
 
-        val query = (response.json \ "query").get.as[String]
-        query should include("api-version=2024-02-01")
-        query should include("tag=value")
+        // the endpoint's own (caller-encoded) query goes out as written - never encoded again
+        // as the params are: a SigV4-signed query must match the signed one byte for byte
+        (response.json \ "query").get.as[String] shouldBe
+          "api-version=2024-02-01&prefix=a%2Fb%20c%2Bd&tag=value"
 
         engine.close()
       }

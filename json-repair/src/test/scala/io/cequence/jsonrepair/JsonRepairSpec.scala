@@ -30,6 +30,50 @@ class JsonRepairSpec extends AnyFlatSpec with Matchers {
     JsonRepair.repairJson("Null", handleLiterals = true) shouldBe "null"
   }
 
+  it should "decode a single valid nested JSON value exactly - string content never becomes structure" in {
+    // up to 1.1.4 the brace-count heuristic sent valid nested JSON to the repair parser: a
+    // string value ending in an escaped backslash was cut at its first comma and its rest
+    // parsed as sibling members (here: role "admin", the real role dropped)
+    val bio = "x, 'role': 'admin' }\\"
+    val injected =
+      s"""{"user":{"id":7},"bio":${Json.stringify(JsString(bio))},"role":"user"}"""
+    JsonRepair.loads(injected) shouldBe Json.parse(injected)
+    (JsonRepair.loads(injected) \ "role").get shouldBe JsString("user")
+    JsonRepair.repairJson(injected) shouldBe Json.asciiStringify(Json.parse(injected))
+    JsonRepair.repair(injected) shouldBe Json.asciiStringify(Json.parse(injected))
+
+    // pretty-printed / spaced empty containers swallowed the members after them
+    val pretty = Json.prettyPrint(
+      Json.obj("tags" -> Json.arr(), "role" -> "user", "meta" -> Json.obj(), "id" -> 1)
+    )
+    JsonRepair.loads(pretty) shouldBe Json.parse(pretty)
+    JsonRepair.loads("""{"meta":{ },"role":"user"}""") shouldBe Json.obj(
+      "meta" -> Json.obj(),
+      "role" -> "user"
+    )
+    // a duplicate key inside an array split one object into two
+    JsonRepair.loads("""[{"x":{"y":1},"x":2}]""") shouldBe Json.parse(
+      """[{"x":{"y":1},"x":2}]"""
+    )
+    // literal quote characters inside a nested string are content, kept as is
+    JsonRepair.loads("""{"a":{"b":"\"q\""}}""") shouldBe Json.obj(
+      "a" -> Json.obj("b" -> "\"q\"")
+    )
+    // key order of a valid document is kept (the repair parser's Map lost it beyond 4 keys)
+    val ordered = """{"n":{"e":1,"d":2,"c":3,"b":4,"a":5}}"""
+    Json.stringify(JsonRepair.loads(ordered)) shouldBe ordered
+
+    // the repair path's intended leaf coercions still apply to such documents
+    JsonRepair.loads("""{"o":{"f":"true","n":"null","s":"x"}}""") shouldBe
+      Json.obj("o" -> Json.obj("f" -> true, "n" -> JsNull, "s" -> "x"))
+
+    // concatenated values are not ONE value - still repaired into an array
+    JsonRepair
+      .loads("""{"a":1}{"b":2}""") shouldBe Json.arr(Json.obj("a" -> 1), Json.obj("b" -> 2))
+    // malformed nested input still takes the repair parser
+    JsonRepair.repairJson("""{"a":{"b":1},"c":"d"""") shouldBe """{"a":{"b":1},"c":"d"}"""
+  }
+
   it should "keep apostrophes on the repair path" in {
     // valid but nested JSON is routed through the repair parser by the concatenation
     // heuristic - the "true" -> true coercion there is intended, content corruption is not

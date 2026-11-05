@@ -101,11 +101,26 @@ object JsonRepair {
     // Improved check for potential concatenated JSON
     val isConcatenatedJson = isConcatenatedJsonString(jsonStr)
 
-    val result: Try[JsValue] = if (!skipJsonParse && !isConcatenatedJson) {
-      // Try to parse with standard JSON parser first
-      Try(Json.parse(jsonStr))
-    } else
-      Failure(new Exception("Failed to parse JSON or..."))
+    // Exactly one valid JSON value is decoded by the strict parser. The brace-count heuristic
+    // above sends almost every valid NESTED document to the repair parser, whose heuristics
+    // change the structure of valid input: up to 1.1.4 a string value ending in an escaped
+    // backslash could add, replace or drop sibling members, and "[ ]" / "{ }" swallowed the
+    // members after them. Only the repair path's intended leaf coercions are kept for those
+    // documents (coerceStringLeaves); every other input takes the path it always took
+    val strict =
+      if (!skipJsonParse && isSingleJsonValue(jsonStr)) Try(Json.parse(jsonStr)).toOption
+      else None
+
+    val result: Try[JsValue] = strict match {
+      case Some(value) if isConcatenatedJson =>
+        Success(coerceStringLeaves(value, convertNumbers))
+      case Some(value)                                   => Success(value)
+      case None if !skipJsonParse && !isConcatenatedJson =>
+        // Try to parse with standard JSON parser first
+        Try(Json.parse(jsonStr))
+      case None =>
+        Failure(new Exception("Failed to parse JSON or..."))
+    }
 
     result.getOrElse {
       val newResult = repairWithParser(
@@ -165,6 +180,54 @@ object JsonRepair {
         throw new IllegalArgumentException(
           "JSON nesting too deep to repair: the repair overflowed the thread's stack."
         )
+    }
+
+  private val strictJsonFactory = new com.fasterxml.jackson.core.JsonFactory()
+
+  // exactly one JSON value, followed by nothing but whitespace (Json.parse alone accepts and
+  // ignores trailing content: {"a":1}{"b":2} parses as {"a":1})
+  private def isSingleJsonValue(jsonStr: String): Boolean =
+    Try {
+      val parser = strictJsonFactory.createParser(jsonStr)
+      try
+        parser.nextToken() != null && {
+          parser.skipChildren()
+          parser.nextToken() == null
+        }
+      finally parser.close()
+    }.getOrElse(false)
+
+  // The repair path's leaf coercions - the strings "true" / "false" / "null" become literals,
+  // and with convertNumbers a numeric string (apostrophes ignored) a number - applied to the
+  // STRING LEAVES of a strictly parsed value: a string's content never becomes structure, and
+  // is otherwise kept exactly (no quote stripping, unlike convertToJsValue on parser output)
+  private def coerceStringLeaves(
+    value: JsValue,
+    convertNumbers: Boolean
+  ): JsValue =
+    value match {
+      case JsString(s) =>
+        s.toLowerCase.trim match {
+          case "true"  => JsBoolean(true)
+          case "false" => JsBoolean(false)
+          case "null"  => JsNull
+          case _ =>
+            val numberCandidate = s.replace("'", "")
+            if (
+              convertNumbers &&
+              numberCandidate.forall(c =>
+                c.isDigit || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E' || c.isWhitespace
+              )
+            )
+              Try(JsNumber(BigDecimal(numberCandidate.trim))).getOrElse(JsString(s))
+            else JsString(s)
+        }
+      case obj: JsObject =>
+        // .fields keeps the member order (the case-class extractor yields the underlying Map,
+        // whose .map rebuilds an unordered one)
+        JsObject(obj.fields.map { case (k, v) => k -> coerceStringLeaves(v, convertNumbers) })
+      case array: JsArray => JsArray(array.value.map(coerceStringLeaves(_, convertNumbers)))
+      case other          => other
     }
 
   /**

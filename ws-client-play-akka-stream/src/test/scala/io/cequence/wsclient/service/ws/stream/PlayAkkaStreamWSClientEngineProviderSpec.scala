@@ -22,6 +22,10 @@ import io.cequence.wsclient.testkit.TestServers.{
   cookieIsolation,
   MultipartInjection,
   multipartInjection,
+  QueryEncoding,
+  queryEncoding,
+  stalledBody,
+  proxyConnectReply,
   echo,
   respond,
   sse,
@@ -421,6 +425,38 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
           }
         }
       finally engine.close()
+    }
+
+    "percent-encode query param keys and values (raw values in, decoded as sent)" in {
+      // the Play engines put them into the URL verbatim up to 1.1.4: a '#' cut the query off
+      // (Pinecone's fetch(ids) with "doc#0" came back empty), '&' / '=' split a value, '+'
+      // read as a space
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try queryEncoding(engine) shouldBe QueryEncoding.expected
+      finally engine.close()
+    }
+
+    "fail a call whose response stalls after the headers within the request / read timeout" in {
+      // up to 1.1.4 the jdk and sttp engines hung forever: java.net.http's HttpRequest.timeout
+      // stops at the response headers
+      val result =
+        stalledBody()(settings => WSClientEngineRegistry(settings, Some(expectedEngineId)))
+
+      result.nonStreamed shouldBe a[Left[_, _]]
+      result.nonStreamedMs should be < 6000L
+      result.streamed.foreach(_ shouldBe a[Left[_, _]])
+      result.streamedMs.foreach(_ should be < 6000L)
+    }
+
+    "fail a proxy's non-200 reply to CONNECT instead of taking it as the https site's response" in {
+      // up to 1.1.4 the Play engines took a forged 202 - and its body - from the proxy as the
+      // https site's own response (only a 200 establishes a tunnel)
+      val result =
+        proxyConnectReply(settings => WSClientEngineRegistry(settings, Some(expectedEngineId)))
+
+      result.proxySawConnect shouldBe true
+      result.nonStreamed shouldBe a[Left[_, _]]
+      result.streamed.foreach(_ shouldBe a[Left[_, _]])
     }
 
     "copy() with reuseExecContext=true (default) shares this engine's actor system" in {

@@ -12,10 +12,11 @@ import com.sun.net.httpserver.{
 import io.cequence.wsclient.domain.{SiteBinding, WsRequestContext}
 import io.cequence.wsclient.service.{WSClientEngine, WSClientOutputStreamCore}
 import io.cequence.wsclient.service.spi.{TransportSettings, WSClientEngineRegistry}
+import io.cequence.wsclient.service.ws.Timeouts
 import play.api.libs.json.{JsValue, Json}
 
 import java.io.File
-import java.net.{InetSocketAddress, ServerSocket}
+import java.net.{InetSocketAddress, ServerSocket, URLDecoder}
 import java.nio.file.Files
 import java.security.KeyStore
 import java.util.concurrent.{Executors, ThreadFactory, TimeoutException}
@@ -23,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.{KeyManagerFactory, SSLContext}
 import scala.concurrent.{Await, ExecutionContext}
 import scala.concurrent.duration._
+import scala.util.{Failure, Success, Try}
 
 /**
  * Embedded servers and TLS fixtures for the engine specs (test-only module, never published).
@@ -654,6 +656,376 @@ object TestServers {
           content = content
         )
       }
+
+  /**
+   * The outcome of calls to a server that sends complete response headers and then stalls:
+   * `Left(error message)` or `Right(what was received)`, plus the milliseconds each took.
+   */
+  final case class StalledBody(
+    nonStreamed: Either[String, String],
+    nonStreamedMs: Long,
+    streamed: Option[Either[String, String]],
+    streamedMs: Option[Long]
+  )
+
+  /**
+   * The stalled-body scenario on an engine built by `newEngine` with `requestTimeout = 1500`
+   * and `readTimeout = 1000`: a non-streamed GET whose response promises 100 body bytes and
+   * sends 6, and (on engines implementing `WSClientOutputStreamCore`, if `checkStream`) an SSE
+   * call that gets one event and then nothing. The server keeps every connection open. Each
+   * call is given 15 s - an engine whose deadline stops at the response headers never
+   * finishes.
+   */
+  def stalledBody(
+    checkStream: Boolean = true
+  )(
+    newEngine: TransportSettings => WSClientEngine
+  ): StalledBody = {
+    val server = new ServerSocket(0)
+    val sockets = new java.util.concurrent.ConcurrentLinkedQueue[java.net.Socket]()
+    val acceptor = new Thread(new Runnable {
+      override def run(): Unit =
+        try
+          while (true) {
+            val socket = server.accept()
+            sockets.add(socket)
+            val in = new java.io.BufferedReader(
+              new java.io.InputStreamReader(socket.getInputStream, "UTF-8")
+            )
+            val requestLine = Option(in.readLine()).getOrElse("")
+            var line = in.readLine()
+            while (line != null && line.nonEmpty) line = in.readLine()
+            val response =
+              if (requestLine.contains("/sse"))
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" +
+                  "f\r\ndata: {\"n\":1}\n\n\r\n"
+              else
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"a\":1"
+            socket.getOutputStream.write(response.getBytes("UTF-8"))
+            socket.getOutputStream.flush()
+            // ... and nothing more: the connection stays open until the scenario ends
+          }
+        catch {
+          case _: Throwable => // server closed by the scenario
+        }
+    })
+    acceptor.setDaemon(true)
+    acceptor.start()
+
+    val engine = newEngine(
+      TransportSettings(Timeouts(requestTimeout = Some(1500), readTimeout = Some(1000)))
+    )
+    try {
+      val site = SiteBinding(s"http://127.0.0.1:${server.getLocalPort}")
+
+      val start = System.nanoTime()
+      val nonStreamed =
+        Try(Await.result(engine.execGETRich(site, "after-headers"), 15.seconds)) match {
+          case Success(rich) => Right(s"HTTP ${rich.status.code}: ${rich.status.message}")
+          case Failure(e)    => Left(s"${e.getClass.getSimpleName}: ${e.getMessage}")
+        }
+      val nonStreamedMs = (System.nanoTime() - start) / 1000000L
+
+      val streamed = engine match {
+        case streaming: WSClientOutputStreamCore if checkStream =>
+          val streamStart = System.nanoTime()
+          val subscriber = new LatchedSubscriber[JsValue]
+          streaming.execJsonStreamPublisher(site, "sse", "GET").subscribe(subscriber)
+          val outcome =
+            if (!subscriber.awaitDone(15))
+              Right(s"no terminal signal, events: ${subscriber.received}")
+            else
+              subscriber.error match {
+                case Some(e) => Left(s"${e.getClass.getSimpleName}: ${e.getMessage}")
+                case None    => Right(s"completed, events: ${subscriber.received}")
+              }
+          Some((outcome, (System.nanoTime() - streamStart) / 1000000L))
+        case _ => None
+      }
+
+      StalledBody(nonStreamed, nonStreamedMs, streamed.map(_._1), streamed.map(_._2))
+    } finally {
+      engine.close()
+      server.close()
+      sockets.forEach(socket => socket.close())
+    }
+  }
+
+  /**
+   * A real (if minimal) tunnelling proxy: answers `CONNECT host:port` with `200 Connection
+   * established` and relays bytes both ways to that target. Passes the count of tunnels it
+   * opened to the test.
+   */
+  def withConnectProxy[T](test: (Int, () => Int) => T): T = {
+    val server = new ServerSocket(0)
+    val tunnels = new AtomicInteger(0)
+
+    def pump(
+      from: java.io.InputStream,
+      to: java.io.OutputStream
+    ): Thread = {
+      val t = new Thread(new Runnable {
+        override def run(): Unit =
+          try {
+            val buffer = new Array[Byte](8192)
+            var n = from.read(buffer)
+            while (n >= 0) {
+              to.write(buffer, 0, n)
+              to.flush()
+              n = from.read(buffer)
+            }
+          } catch {
+            case _: Throwable => // either side closed
+          } finally
+            try to.close()
+            catch { case _: Throwable => }
+      })
+      t.setDaemon(true)
+      t.start()
+      t
+    }
+
+    val acceptor = new Thread(new Runnable {
+      override def run(): Unit =
+        try
+          while (true) {
+            val client = server.accept()
+            val in = client.getInputStream
+            // the request head, byte by byte - nothing of the tunnelled stream may be consumed
+            val head = new StringBuilder
+            while (!head.endsWith("\r\n\r\n")) {
+              val b = in.read()
+              if (b < 0) throw new java.io.EOFException("client closed before CONNECT")
+              head.append(b.toChar)
+            }
+            val target = head.toString.split(" ")(1)
+            val Array(host, port) = target.split(":")
+            val upstream = new java.net.Socket(host, port.toInt)
+            tunnels.incrementAndGet()
+            client.getOutputStream.write(
+              "HTTP/1.1 200 Connection established\r\n\r\n".getBytes("UTF-8")
+            )
+            client.getOutputStream.flush()
+            pump(in, upstream.getOutputStream)
+            pump(upstream.getInputStream, client.getOutputStream)
+          }
+        catch {
+          case _: Throwable => // server closed by the test
+        }
+    })
+    acceptor.setDaemon(true)
+    acceptor.start()
+
+    try test(server.getLocalPort, () => tunnels.get())
+    finally server.close()
+  }
+
+  /**
+   * A complete https call through [[withConnectProxy]] to a TLS test server whose certificate
+   * the engine (built by `newEngine` with `proxyURL` set, created and first used under that
+   * trust store) trusts: the status received and the number of tunnels the proxy opened.
+   */
+  def connectTunnel(
+    keyStore: TestKeyStore
+  )(
+    newEngine: TransportSettings => WSClientEngine
+  ): (Int, Int) =
+    withTlsServer(keyStore, Seq("TLSv1.3", "TLSv1.2"))("/" -> echo) { tlsPort =>
+      withConnectProxy {
+        (
+          proxyPort,
+          tunnels
+        ) =>
+          withDefaultTrustStore(keyStore) {
+            val engine = newEngine(TransportSettings(proxyURL = Some(s"127.0.0.1:$proxyPort")))
+            try {
+              val rich = Await.result(
+                engine.execGETRich(SiteBinding(s"https://localhost:$tlsPort"), "ping"),
+                30.seconds
+              )
+              (rich.status.code, tunnels())
+            } finally engine.close()
+          }
+      }
+    }
+
+  /**
+   * What a caller observed through a forward proxy that answers every CONNECT with a non-200
+   * reply carrying a body ([[ProxyConnectReply.ForgedBody]]): whether the proxy saw a CONNECT,
+   * and the outcome of a non-streamed GET and (on engines implementing
+   * `WSClientOutputStreamCore`) of an SSE call - `Left(error message)` or `Right("HTTP
+   * <status>: <body>" / "events: ...")`.
+   */
+  final case class ProxyConnectReply(
+    proxySawConnect: Boolean,
+    nonStreamed: Either[String, String],
+    streamed: Option[Either[String, String]]
+  )
+
+  object ProxyConnectReply {
+    // a 202 is in the default acceptable statuses: accepted as the https site's own response,
+    // the proxy (or anyone on the plain-HTTP hop to it) authored an "HTTPS" response
+    val ForgedBody = "data: {\"id\":\"forged-by-proxy\"}\n\n"
+  }
+
+  /**
+   * The proxy-CONNECT-reply scenario on an engine built by `newEngine` with `proxyURL` set: an
+   * https site (never connected to directly - the proxy is the only server) is called through
+   * a loopback proxy that answers CONNECT with `HTTP/1.1 202` and
+   * [[ProxyConnectReply.ForgedBody]]. A tunnelling engine must fail both calls: only a 200
+   * reply to CONNECT establishes a tunnel.
+   */
+  def proxyConnectReply(newEngine: TransportSettings => WSClientEngine): ProxyConnectReply = {
+    import ProxyConnectReply._
+
+    val server = new ServerSocket(0)
+    @volatile var sawConnect = false
+    val thread = new Thread(new Runnable {
+      override def run(): Unit =
+        try
+          while (true) {
+            val socket = server.accept()
+            try {
+              val in = new java.io.BufferedReader(
+                new java.io.InputStreamReader(socket.getInputStream, "UTF-8")
+              )
+              val firstLine = Option(in.readLine()).getOrElse("")
+              if (firstLine.startsWith("CONNECT ")) sawConnect = true
+              var line = in.readLine()
+              while (line != null && line.nonEmpty) line = in.readLine()
+
+              val body = ForgedBody.getBytes("UTF-8")
+              val head =
+                s"HTTP/1.1 202 Accepted\r\nContent-Type: text/event-stream\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n"
+              socket.getOutputStream.write(head.getBytes("UTF-8") ++ body)
+              socket.getOutputStream.flush()
+            } finally socket.close()
+          }
+        catch {
+          case _: Throwable => // server closed by the scenario
+        }
+    })
+    thread.setDaemon(true)
+    thread.start()
+
+    val engine = newEngine(
+      TransportSettings(proxyURL = Some(s"127.0.0.1:${server.getLocalPort}"))
+    )
+    try {
+      // a closed port: a tunnelling engine never connects to the site itself
+      val site = SiteBinding("https://localhost:1/v1")
+
+      val nonStreamed =
+        Try(Await.result(engine.execGETRich(site, "models"), 30.seconds)) match {
+          case Success(rich) =>
+            Right(s"HTTP ${rich.status.code}: ${rich.response.map(_.string).getOrElse("")}")
+          case Failure(e) => Left(String.valueOf(e.getMessage))
+        }
+
+      val streamed = engine match {
+        case streaming: WSClientOutputStreamCore =>
+          val subscriber = new LatchedSubscriber[JsValue]
+          streaming
+            .execJsonStreamPublisher(site, "chat/completions", "POST")
+            .subscribe(subscriber)
+          if (!subscriber.awaitDone(30)) throw new TimeoutException("SSE call did not finish")
+          Some(
+            subscriber.error match {
+              case Some(e) => Left(String.valueOf(e.getMessage))
+              case None    => Right(s"events: ${subscriber.received.mkString(", ")}")
+            }
+          )
+        case _ => None
+      }
+
+      ProxyConnectReply(sawConnect, nonStreamed, streamed)
+    } finally {
+      engine.close()
+      server.close()
+    }
+  }
+
+  /**
+   * The query as the server received it: the endpoint string's own query (raw, as many pairs
+   * as the endpoint wrote), then the parameters - each `&`-separated pair split at its first
+   * `=`, both sides form-decoded (`+` is a space, as most servers read it; a malformed escape
+   * comes back as `<undecodable:...>`).
+   */
+  final case class ReceivedQuery(
+    endpointQuery: String,
+    params: Seq[(String, String)]
+  )
+
+  object QueryEncoding {
+
+    // a query the endpoint string carries itself (Azure's api-version) - not a parameter
+    val EndpointQuery = "api-version=2024-02-01"
+
+    /**
+     * Raw values (and keys) holding characters that are reserved in a query or need encoding:
+     * a `#` used to start a fragment, so the rest of the query was lost (Pinecone's
+     * `fetch(ids)` with `doc#0`); `&` / `=` split a value; `+` reads as a space; a bare `%`;
+     * an encoded-looking value that is still a raw value; non-ASCII; a key that needs
+     * encoding.
+     */
+    val Params: Seq[(String, String)] = Seq(
+      "ids" -> "doc#0",
+      "ids" -> "doc#1",
+      "q" -> "a b&c=d",
+      "expr" -> "1+1",
+      "pct" -> "100%",
+      "pre" -> "a%20b",
+      "text" -> ("na" + 0xef.toChar + "ve " + 0x65e5.toChar + 0x672c.toChar),
+      "odd key&x=" -> "v"
+    )
+
+    // a base64-style API key in WsRequestContext.extraParams
+    val ExtraParam: (String, String) = "key" -> "k+/="
+
+    val expected: ReceivedQuery = ReceivedQuery(EndpointQuery, Params :+ ExtraParam)
+  }
+
+  /**
+   * GETs `items?`[[QueryEncoding.EndpointQuery]] with [[QueryEncoding.Params]] and an extra
+   * param from the site's request context, and returns the query as the server received it.
+   */
+  def queryEncoding(engine: WSClientEngine): ReceivedQuery = {
+    import QueryEncoding._
+
+    def decode(value: String) =
+      try URLDecoder.decode(value, "UTF-8")
+      catch { case _: IllegalArgumentException => s"<undecodable:$value>" }
+
+    withEchoServer { port =>
+      val site = SiteBinding(
+        s"http://localhost:$port",
+        WsRequestContext(extraParams = Seq(ExtraParam))
+      )
+      val response = engine.getResponseOrError(
+        Await.result(
+          engine.execGETRich(
+            site,
+            s"items?$EndpointQuery",
+            params = Params.map { case (key, value) => key -> Some(value) }
+          ),
+          30.seconds
+        )
+      )
+
+      val pairs = (response.json \ "query").as[String].split("&").toSeq
+      val (endpointPairs, paramPairs) = pairs.splitAt(EndpointQuery.split("&").length)
+
+      ReceivedQuery(
+        endpointPairs.mkString("&"),
+        paramPairs.filter(_.nonEmpty).map { pair =>
+          pair.split("=", 2) match {
+            case Array(key, value) => decode(key) -> decode(value)
+            case Array(key)        => decode(key) -> ""
+          }
+        }
+      )
+    }
+  }
 
   // `form-data; key=token; key="quoted \" string"` -> the (key, value) pairs
   private def dispositionParams(value: String): Seq[(String, String)] = {

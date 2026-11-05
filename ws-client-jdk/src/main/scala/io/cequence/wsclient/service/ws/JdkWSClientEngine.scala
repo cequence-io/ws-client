@@ -44,10 +44,12 @@ import scala.concurrent.{blocking, ExecutionContext, Future, Promise}
  *     implemented (this module is stream-library-free); akka/pekko consumers can wrap via
  *     `Source.fromPublisher`.
  *   - there is no INPUT streaming support (`WSClientInputStreamExtraAkka`/`-Pekko`)
- *   - `Timeouts.readTimeout` and `pooledConnectionIdleTimeout` are ignored - `java.net.http`
- *     has no per-read/idle timeout; `requestTimeout` covers the whole exchange (which for an
- *     indefinite SSE stream means the request timeout bounds the stream duration - widen it
- *     for long-lived streams, mirroring the Play/AHC engines' behavior)
+ *   - `requestTimeout` covers the whole exchange of a non-streamed call: `java.net.http`'s own
+ *     `HttpRequest.timeout` stops at the response headers, so the engine also bounds the body
+ *     (`DeadlineBodySubscriber` - up to 1.1.4 a body that stalled after the headers hung the
+ *     call forever). A stream fails once it delivers nothing for `readTimeout` (default: the
+ *     request timeout) while its subscriber waits for data (`IdleTimeoutPublisher`) - a
+ *     healthy long-lived SSE stream is not cut off. `pooledConnectionIdleTimeout` is ignored
  *   - `close()` is a no-op - `java.net.http.HttpClient` needs no explicit teardown - but is
  *     trivially idempotent, for consistency with the other backends
  */
@@ -87,6 +89,13 @@ final class JdkWSClientEngine private[ws] (
     transportSettings.timeouts,
     Timeouts(requestTimeout = Some(EngineSupport.DefaultRequestTimeoutMs))
   )
+
+  private val requestTimeoutMs: Long =
+    timeouts.requestTimeout.getOrElse(EngineSupport.DefaultRequestTimeoutMs).toLong
+
+  // a stream delivering nothing for this long (while its subscriber waits for data) fails
+  private val streamIdleTimeoutMs: Long =
+    timeouts.readTimeout.map(_.toLong).getOrElse(requestTimeoutMs)
 
   // deadline for reading a non-2xx stream's body (for the error message only)
   private val errorBodyReadTimeoutMs: Long = math
@@ -472,7 +481,12 @@ final class JdkWSClientEngine private[ws] (
 
       new ErrorMappedPublisher(
         new TransformPublisher(
-          new FuturePublisher(bodyPublisher),
+          // nothing bounds a stream's body after the headers but this idle timeout
+          new IdleTimeoutPublisher(
+            new FuturePublisher(bodyPublisher),
+            streamIdleTimeoutMs,
+            s"no stream data received for $streamIdleTimeoutMs ms"
+          ),
           () => new StreamTransformers.ByteBufferListFlatten
         ),
         mapStreamError(site, endPoint)
@@ -650,7 +664,17 @@ final class JdkWSClientEngine private[ws] (
   ): Future[RichResponse] = {
     val promise = Promise[HttpResponse[String]]()
 
-    client.sendAsync(request.build(), BodyHandlers.ofString()).whenComplete {
+    // HttpRequest.timeout covers the wait for the headers only - bound the body by the rest of
+    // the same budget
+    val startNanos = System.nanoTime()
+    val handler: HttpResponse.BodyHandler[String] = responseInfo =>
+      new DeadlineBodySubscriber(
+        BodyHandlers.ofString().apply(responseInfo),
+        requestTimeoutMs - (System.nanoTime() - startNanos) / 1000000L,
+        s"response body not received within $requestTimeoutMs ms"
+      )
+
+    client.sendAsync(request.build(), handler).whenComplete {
       (
         response,
         error
