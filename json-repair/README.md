@@ -33,7 +33,7 @@ Note that all the tests (around 150) from the original Python library with some 
 Add the following dependency to your build.sbt:
 
 ```scala
-libraryDependencies += "io.cequence" %% "json-repair" % "0.7.3"
+libraryDependencies += "io.cequence" %% "json-repair" % "1.1.5"
 ```
 
 ## Usage
@@ -59,7 +59,6 @@ val jsValueFromFile = JsonRepair.fromFile("path/to/file.json")
 
 ```scala
 import io.cequence.jsonrepair.JsonRepair
-import java.io.File
 
 // Skip standard JSON parsing for performance
 val jsValue = JsonRepair.loads(
@@ -73,16 +72,18 @@ val jsValue = JsonRepair.loads(
   logging = true
 )
 
-// Load from a file with custom chunk size
-val jsValueFromFile = JsonRepair.load(
-  new File("path/to/file.json"),
-  chunkLength = 2000000
+// Load from a file, skipping the standard JSON parser
+val jsValueFromFile = JsonRepair.fromFile(
+  "path/to/file.json",
+  skipJsonParse = true
 )
 ```
 
 ## How it works
 
-This module will parse the JSON file following the BNF definition:
+Input that is exactly one valid JSON value is decoded with the standard JSON parser. Since 1.1.5 this includes nested documents, which earlier versions sent through the repair parser, where string content could change their structure; the repair path's coercions still apply to them (the strings `"true"`, `"false"` and `"null"` become literals, and numeric strings become numbers with `convertNumbers`).
+
+Everything else is repaired by a parser that follows the BNF definition:
 
 ```
 <json> ::= <primitive> | <container>
