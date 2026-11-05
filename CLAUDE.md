@@ -478,6 +478,15 @@ val loggedService = log(service, "MyService")
   `EngineSupport.deadlineScheduler`. Covered on every engine by `TestServers.stalledBody`
   (pekko-http: the stream part is not checked - pekko's own client idle-timeout, 60 s, bounds
   it, not `readTimeout`)
+- pekko-http: a response that arrives after `requestTimeout` is ABORTED (entity cancelled,
+  connection closed), not drained (up to 1.1.4 `discardBytes` read a late SSE generation to
+  its end, holding the pool slot). The per-host pool is sized for a shared multi-site engine
+  (`PekkoHttpWSClientEngine.sizedForApiUse`: max-connections 1024 / max-open-requests 2048,
+  each only while still at pekko-http's reference default - pekko's 4 let one site's slow
+  calls queue every other site). Residual, by pekko-http's design: a request still queued for
+  a connection (beyond max-connections in flight to one host) cannot be withdrawn and is sent
+  after its caller timed out. Same-system copies share per-host pools (keyed by host +
+  settings)
 - A proxy's non-200 reply to CONNECT fails the request on the Play engines
   (`PlayWSClientEngine.ConnectReplyGuard`, added to every AHC channel by `channelInitializer`
   together with the bounded inflater - both flavors). Only a 200 establishes a tunnel; up to

@@ -184,7 +184,7 @@ engine.close()  // the one teardown - close it once, when done with all sites/se
 
 Services built on `WSClientWithEngineBase` hold their `SiteBinding` once and the base threads it into every call; a service closes the engine only when it owns it (`ownsEngine` - false for shared, caller-supplied engines).
 
-Need different client-level settings (timeouts, proxy) for one consumer? **Copy the engine** - the copy always builds its OWN HTTP client from the (optionally overridden) settings and is closed independently:
+Need different client-level settings (timeouts, proxy) for one consumer? **Copy the engine** - the copy builds its OWN HTTP client from the (optionally overridden) settings and is closed independently (on `pekko-http` a copy on the same actor system shares that system's per-host connection pools - pekko-http keeps them per system, keyed by host and pool settings):
 
 ```scala
 val slow = engine.copy(TransportSettings(timeouts = Timeouts(requestTimeout = Some(600000))))

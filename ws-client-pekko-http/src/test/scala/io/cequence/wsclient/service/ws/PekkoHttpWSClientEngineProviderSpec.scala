@@ -155,6 +155,93 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       result.streamedMs.foreach(_ should be < 6000L)
     }
 
+    "not queue other sites' calls behind one site's slow calls (pekko-http's 4-connection pool)" in {
+      // up to 1.1.4 the engine kept pekko-http's default of 4 connections per host: a 5th call
+      // to the host waited for one of the first four to finish
+      val arrivals = new java.util.concurrent.ConcurrentLinkedQueue[java.lang.Long]()
+      val slow: HttpExchange => Unit = { exchange =>
+        arrivals.add(System.nanoTime())
+        Thread.sleep(2000)
+        respond(exchange, 200, "{}")
+      }
+      withServer("/" -> slow) { port =>
+        val engine = WSClientEngineRegistry(
+          TransportSettings(Timeouts(requestTimeout = Some(20000))),
+          Some(expectedEngineId)
+        )
+        try {
+          val siteA =
+            SiteBinding(s"http://localhost:$port", WsRequestContext(Seq("X-Site" -> "a")))
+          val siteB =
+            SiteBinding(s"http://localhost:$port", WsRequestContext(Seq("X-Site" -> "b")))
+          val calls =
+            (1 to 5).map(i => engine.execGETRich(siteA, s"slow/a$i")) :+
+              engine.execGETRich(siteB, "slow/b1")
+          Await
+            .result(Future.sequence(calls), 30.seconds)
+            .map(_.status.code)
+            .toSet shouldBe Set(200)
+
+          val times = arrivals.toArray.map(_.asInstanceOf[java.lang.Long].longValue).sorted
+          times.length shouldBe 6
+          // all six in flight at once - not two waves 2 s apart
+          (times.last - times.head) / 1000000L should be < 1500L
+        } finally engine.close()
+      }
+    }
+
+    "abort a response that arrives after the request timeout instead of reading it to its end" in {
+      // up to 1.1.4 a late response was drained (discardBytes): an SSE generation the caller had
+      // given up on was read to its last event, holding a pooled connection meanwhile
+      val server = new java.net.ServerSocket(0)
+      val writeFailed = new java.util.concurrent.CountDownLatch(1)
+      val thread = new Thread(new Runnable {
+        override def run(): Unit = {
+          val socket = server.accept()
+          try {
+            val in = new java.io.BufferedReader(
+              new java.io.InputStreamReader(socket.getInputStream, "UTF-8")
+            )
+            var line = in.readLine()
+            while (line != null && line.nonEmpty) line = in.readLine()
+            Thread.sleep(1500) // headers only after the client's 1 s request timeout
+            val out = socket.getOutputStream
+            out.write(
+              "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+                .getBytes("UTF-8")
+            )
+            (1 to 80).foreach { _ =>
+              out.write("9\r\ndata: x\n\n\r\n".getBytes("UTF-8"))
+              out.flush()
+              Thread.sleep(100)
+            }
+          } catch {
+            case _: java.io.IOException => writeFailed.countDown()
+          } finally socket.close()
+        }
+      })
+      thread.setDaemon(true)
+      thread.start()
+
+      val engine = WSClientEngineRegistry(
+        TransportSettings(Timeouts(requestTimeout = Some(1000))),
+        Some(expectedEngineId)
+      )
+      try {
+        val result = Await.ready(
+          engine.execGETRich(SiteBinding(s"http://localhost:${server.getLocalPort}"), "late"),
+          30.seconds
+        )
+        result.value.get.failed.get shouldBe a[CequenceWSTimeoutException]
+        // the client closed the connection soon after the late headers (the server would
+        // otherwise write for 8 s)
+        writeFailed.await(5, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+      } finally {
+        engine.close()
+        server.close()
+      }
+    }
+
     "merge query params with a query already embedded in the endpoint" in {
       withEchoServer { port =>
         val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
