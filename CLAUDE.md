@@ -15,7 +15,7 @@ The project includes:
 - Streaming support for large payloads
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 1.1.4
+Current version: 1.1.5
 
 ## Build Commands
 
@@ -403,8 +403,8 @@ val loggedService = log(service, "MyService")
   fields fall back to defaults - a partially-specified `Timeouts` never disables the request
   timeout)
 - Query-param encoding contract: every engine takes raw keys and values (`params` and
-  `WsRequestContext.extraParams`) and percent-encodes them - the Play engines since the release
-  after 1.1.4 (`PlayWSClientEngine.encodeQueryComponent`, RFC 3986: `%20` for a space; the jdk
+  `WsRequestContext.extraParams`) and percent-encodes them - the Play engines since 1.1.5
+  (`PlayWSClientEngine.encodeQueryComponent`, RFC 3986: `%20` for a space; the jdk
   engine writes form encoding, `+`). Up to 1.1.4 the Play engines passed them verbatim: a `#`
   cut the query off (Pinecone `fetch(ids)` with `doc#0` came back empty), `&` / `=` split a
   value. A query written into the endpoint string is not a parameter - the caller encodes it.
