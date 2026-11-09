@@ -146,15 +146,15 @@ class StreamPublishersSpec extends AnyWordSpec with Matchers {
       s.completed shouldBe true
     }
 
-    "fail with CequenceWSException when a frame exceeds maxFrameLength" in {
+    "fail with CequenceWSFrameTooLongException when a frame exceeds maxFrameLength" in {
       val s = framed(chunks("x" * 50), maxFrameLength = 10)
-      s.error.map(_.getClass.getSimpleName) shouldBe Some("CequenceWSException")
+      s.error.map(_.getClass.getSimpleName) shouldBe Some("CequenceWSFrameTooLongException")
       s.completed shouldBe false
     }
 
     "fail when an oversized frame IS terminated by a delimiter (akka Framing parity)" in {
       val s = framed(chunks(("x" * 50) + "\n\n"), maxFrameLength = 10)
-      s.error.map(_.getClass.getSimpleName) shouldBe Some("CequenceWSException")
+      s.error.map(_.getClass.getSimpleName) shouldBe Some("CequenceWSFrameTooLongException")
       s.received shouldBe empty
       s.completed shouldBe false
     }
@@ -228,6 +228,221 @@ class StreamPublishersSpec extends AnyWordSpec with Matchers {
   }
 
   "TransformPublisher" should {
+
+    "not deadlock when a downstream cancel races an element through two chained transforms" in {
+      // up to 1.1.5 the cancel took the inner transform's monitor, then the outer's; the
+      // upstream thread delivering an element held the outer's, then took the inner's
+      val executor = java.util.concurrent.Executors.newCachedThreadPool()
+      try {
+        (1 to 300).foreach { _ =>
+          // an endless upstream emitting on its own thread
+          val upstream = new Flow.Publisher[Int] {
+            override def subscribe(subscriber: Flow.Subscriber[_ >: Int]): Unit = {
+              val demand = new java.util.concurrent.atomic.AtomicLong()
+              val cancelled = new java.util.concurrent.atomic.AtomicBoolean(false)
+              subscriber.onSubscribe(new Flow.Subscription {
+                override def request(n: Long): Unit = { demand.addAndGet(n); () }
+                override def cancel(): Unit = cancelled.set(true)
+              })
+              executor.execute(new Runnable {
+                override def run(): Unit = {
+                  var i = 0
+                  while (!cancelled.get()) {
+                    if (demand.get() > 0) {
+                      demand.decrementAndGet()
+                      subscriber.onNext(i)
+                      i += 1
+                    } else Thread.onSpinWait()
+                  }
+                }
+              })
+            }
+          }
+          def identityTransform = () =>
+            new StreamTransformer[Int, Int] {
+              override def onInput(input: Int): StreamTransformer.Output[Int] =
+                StreamTransformer.Output(Seq(input))
+            }
+          val chained = new TransformPublisher(
+            new TransformPublisher(upstream, identityTransform),
+            identityTransform
+          )
+
+          val first = new java.util.concurrent.CountDownLatch(1)
+          val subscription =
+            new java.util.concurrent.atomic.AtomicReference[Flow.Subscription]()
+          chained.subscribe(new Flow.Subscriber[Int] {
+            override def onSubscribe(s: Flow.Subscription): Unit = {
+              subscription.set(s)
+              s.request(Long.MaxValue)
+            }
+            override def onNext(item: Int): Unit = first.countDown()
+            override def onError(throwable: Throwable): Unit = ()
+            override def onComplete(): Unit = ()
+          })
+          first.await(5, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+
+          val cancelled = executor.submit(new Runnable {
+            override def run(): Unit = subscription.get().cancel()
+          })
+          cancelled.get(5, java.util.concurrent.TimeUnit.SECONDS) // a deadlock times out here
+        }
+      } finally executor.shutdownNow()
+    }
+
+    "not deadlock when a downstream request races the upstream's completion (two transforms)" in {
+      // up to 1.2.0-SNAPSHOT the request took the outer transform's monitor, then (requesting
+      // its upstream) the inner's; the upstream completing held the inner's, then (completing
+      // downstream) took the outer's
+      val executor = java.util.concurrent.Executors.newCachedThreadPool()
+      try {
+        (1 to 500).foreach { _ =>
+          val upstreamSubscriber =
+            new java.util.concurrent.atomic.AtomicReference[Flow.Subscriber[_ >: Int]]()
+          val upstream = new Flow.Publisher[Int] {
+            override def subscribe(subscriber: Flow.Subscriber[_ >: Int]): Unit = {
+              upstreamSubscriber.set(subscriber)
+              subscriber.onSubscribe(new Flow.Subscription {
+                override def request(n: Long): Unit = ()
+                override def cancel(): Unit = ()
+              })
+            }
+          }
+          def identityTransform = () =>
+            new StreamTransformer[Int, Int] {
+              override def onInput(input: Int): StreamTransformer.Output[Int] =
+                StreamTransformer.Output(Seq(input))
+            }
+          val chained = new TransformPublisher(
+            new TransformPublisher(upstream, identityTransform),
+            identityTransform
+          )
+
+          val ended = new java.util.concurrent.CountDownLatch(1)
+          val subscription =
+            new java.util.concurrent.atomic.AtomicReference[Flow.Subscription]()
+          chained.subscribe(new Flow.Subscriber[Int] {
+            override def onSubscribe(s: Flow.Subscription): Unit = subscription.set(s)
+            override def onNext(item: Int): Unit = ()
+            override def onError(throwable: Throwable): Unit = ended.countDown()
+            override def onComplete(): Unit = ended.countDown()
+          })
+
+          val start = new java.util.concurrent.CountDownLatch(1)
+          executor.execute(new Runnable {
+            override def run(): Unit = { start.await(); subscription.get().request(1) }
+          })
+          executor.execute(new Runnable {
+            override def run(): Unit = { start.await(); upstreamSubscriber.get().onComplete() }
+          })
+          start.countDown()
+          // a deadlock times out here
+          ended.await(5, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+        }
+      } finally executor.shutdownNow()
+    }
+
+    "not deadlock when a re-entrant [DONE] cancel races the upstream's completion (three transforms)" in {
+      // the consumer's request makes the middle transform deliver a queued DONE, on which the
+      // last one terminates and cancels the middle one - re-entrantly, under the middle's
+      // monitor; up to 1.2.0-SNAPSHOT that cancel went upstream right there, while the source
+      // completing held the first transform's monitor and waited for the middle's
+      val executor = java.util.concurrent.Executors.newCachedThreadPool()
+      try {
+        (1 to 500).foreach { _ =>
+          val sourceSubscriber =
+            new java.util.concurrent.atomic.AtomicReference[Flow.Subscriber[_ >: String]]()
+          val requested = new java.util.concurrent.CountDownLatch(1)
+          val source = new Flow.Publisher[String] {
+            override def subscribe(subscriber: Flow.Subscriber[_ >: String]): Unit = {
+              sourceSubscriber.set(subscriber)
+              subscriber.onSubscribe(new Flow.Subscription {
+                override def request(n: Long): Unit = requested.countDown()
+                override def cancel(): Unit = ()
+              })
+            }
+          }
+          val identity = () =>
+            new StreamTransformer[String, String] {
+              override def onInput(input: String): StreamTransformer.Output[String] =
+                StreamTransformer.Output(Seq(input))
+            }
+          // one input, two outputs: "a" and the terminating "DONE"
+          val split = () =>
+            new StreamTransformer[String, String] {
+              override def onInput(input: String): StreamTransformer.Output[String] =
+                StreamTransformer.Output(Seq("a", "DONE"))
+            }
+          val untilDone = () =>
+            new StreamTransformer[String, String] {
+              override def onInput(input: String): StreamTransformer.Output[String] =
+                if (input == "DONE") StreamTransformer.Output(Nil, done = true)
+                else StreamTransformer.Output(Seq(input))
+            }
+          val chained = new TransformPublisher(
+            new TransformPublisher(new TransformPublisher(source, identity), split),
+            untilDone
+          )
+
+          val first = new java.util.concurrent.CountDownLatch(1)
+          val ended = new java.util.concurrent.CountDownLatch(1)
+          val subscription =
+            new java.util.concurrent.atomic.AtomicReference[Flow.Subscription]()
+          chained.subscribe(new Flow.Subscriber[String] {
+            override def onSubscribe(s: Flow.Subscription): Unit = {
+              subscription.set(s)
+              s.request(1)
+            }
+            override def onNext(item: String): Unit = first.countDown()
+            override def onError(throwable: Throwable): Unit = ended.countDown()
+            override def onComplete(): Unit = ended.countDown()
+          })
+          requested.await(5, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+          sourceSubscriber.get().onNext("x") // "a" goes out, "DONE" stays queued in the middle
+          first.await(5, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+
+          val start = new java.util.concurrent.CountDownLatch(1)
+          executor.execute(new Runnable {
+            override def run(): Unit = { start.await(); subscription.get().request(1) }
+          })
+          executor.execute(new Runnable {
+            override def run(): Unit = { start.await(); sourceSubscriber.get().onComplete() }
+          })
+          start.countDown()
+          // a deadlock times out here
+          ended.await(5, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+        }
+      } finally executor.shutdownNow()
+    }
+
+    "treat a subscriber that throws as cancelled - the cancel reaches the upstream" in {
+      val upstreamCancelled = new java.util.concurrent.CountDownLatch(1)
+      val upstream = new Flow.Publisher[Int] {
+        override def subscribe(subscriber: Flow.Subscriber[_ >: Int]): Unit =
+          subscriber.onSubscribe(new Flow.Subscription {
+            private val sent = new java.util.concurrent.atomic.AtomicBoolean(false)
+            override def request(n: Long): Unit =
+              if (sent.compareAndSet(false, true)) subscriber.onNext(1)
+            override def cancel(): Unit = upstreamCancelled.countDown()
+          })
+      }
+      def identityTransform = () =>
+        new StreamTransformer[Int, Int] {
+          override def onInput(input: Int): StreamTransformer.Output[Int] =
+            StreamTransformer.Output(Seq(input))
+        }
+      new TransformPublisher(
+        new TransformPublisher(upstream, identityTransform),
+        identityTransform
+      ).subscribe(new Flow.Subscriber[Int] {
+        override def onSubscribe(s: Flow.Subscription): Unit = s.request(1)
+        override def onNext(item: Int): Unit =
+          throw new IllegalStateException("subscriber bug")
+        override def onError(throwable: Throwable): Unit = ()
+        override def onComplete(): Unit = ()
+      })
+      upstreamCancelled.await(5, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+    }
 
     "stop delivering after downstream cancellation" in {
       val publisher = new TransformPublisher[Int, Int](

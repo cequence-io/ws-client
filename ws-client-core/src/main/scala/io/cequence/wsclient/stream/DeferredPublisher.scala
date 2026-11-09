@@ -8,22 +8,27 @@ import scala.util.control.NonFatal
  * A COLD, SINGLE-SHOT `Flow.Publisher`: the underlying publisher is created by `factory` only
  * when the first subscriber arrives - so for HTTP-backed publishers no request is fired until
  * `subscribe` (mirroring the laziness of an akka/pekko `Source` blueprint, where the request
- * fires at materialization).
+ * fires at materialization). A `factory` that throws signals the failure as `onError`.
  *
  * A second subscription is rejected with `onError(IllegalStateException)` (after the mandatory
  * `onSubscribe`, per Reactive Streams rule 1.9), matching the single-materialization semantics
  * of the historical `Source`-typed streaming API.
+ *
+ * Public since 1.2.0 - e.g. for engine decorators (a request signer that signs on subscribe).
  */
-private[wsclient] final class DeferredPublisher[T](factory: () => Flow.Publisher[T])
-    extends Flow.Publisher[T] {
+final class DeferredPublisher[T](factory: () => Flow.Publisher[T]) extends Flow.Publisher[T] {
 
   private val subscribed = new AtomicBoolean(false)
 
   override def subscribe(subscriber: Flow.Subscriber[_ >: T]): Unit =
     DeferredPublisher.subscribeOnce(subscribed, subscriber) {
       val underlying =
-        try Some(factory())
-        catch {
+        try {
+          val publisher = factory()
+          if (publisher == null)
+            throw new NullPointerException("The DeferredPublisher factory returned null")
+          Some(publisher)
+        } catch {
           case NonFatal(e) =>
             DeferredPublisher.signalErrorTo(subscriber, e)
             None

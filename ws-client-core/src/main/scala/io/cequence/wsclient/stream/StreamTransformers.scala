@@ -1,6 +1,6 @@
 package io.cequence.wsclient.stream
 
-import io.cequence.wsclient.domain.CequenceWSException
+import io.cequence.wsclient.domain.CequenceWSFrameTooLongException
 import io.cequence.wsclient.service.JsonStreamFrames
 import play.api.libs.json.JsValue
 
@@ -57,9 +57,10 @@ private[wsclient] object StreamTransformers {
         // bound EVERY frame, not just the unterminated remainder below - akka's
         // Framing.delimiter fails an oversized frame even when its delimiter arrives
         if (frameLength > maxFrameLength)
-          throw new CequenceWSException(
+          throw new CequenceWSFrameTooLongException(
             s"Stream framing problem occurred. A frame of $frameLength bytes " +
-              s"exceeds the maximum frame length of $maxFrameLength."
+              s"exceeds the maximum frame length of $maxFrameLength.",
+            maxFrameLength
           )
         frames += ByteBuffer.wrap(java.util.Arrays.copyOfRange(buffer, start, delimiterIndex))
         start = delimiterIndex + delimiter.length
@@ -72,9 +73,10 @@ private[wsclient] object StreamTransformers {
       }
 
       if (buffer.length > maxFrameLength)
-        throw new CequenceWSException(
+        throw new CequenceWSFrameTooLongException(
           s"Stream framing problem occurred. Read ${buffer.length} bytes " +
-            s"which is more than $maxFrameLength without seeing a line terminator."
+            s"which is more than $maxFrameLength without seeing a line terminator.",
+          maxFrameLength
         )
 
       StreamTransformer.Output(frames.result())

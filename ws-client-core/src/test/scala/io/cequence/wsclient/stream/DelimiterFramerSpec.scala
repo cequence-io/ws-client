@@ -101,7 +101,16 @@ class DelimiterFramerSpec extends AnyWordSpec with Matchers {
     val results = Seq.newBuilder[Either[String, Seq[String]]]
     val failed = chunks.exists { chunk =>
       Try(framer.onInput(ByteBuffer.wrap(chunk))).fold(
-        e => { results += Left(s"${e.getClass.getName}: ${e.getMessage}"); true },
+        // since 1.2.0 the current framer throws the typed CequenceWSFrameTooLongException (a
+        // CequenceWSException) where the 1.1.2 one threw a plain CequenceWSException - same message
+        e => {
+          val kind = e match {
+            case _: CequenceWSException => "CequenceWSException"
+            case other                  => other.getClass.getName
+          }
+          results += Left(s"$kind: ${e.getMessage}")
+          true
+        },
         output => { results += Right(output.elements.map(text)); false }
       )
     }
