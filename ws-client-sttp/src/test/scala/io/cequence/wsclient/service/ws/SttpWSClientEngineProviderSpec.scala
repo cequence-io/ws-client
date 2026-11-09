@@ -1,5 +1,6 @@
 package io.cequence.wsclient.service.ws
 
+import scala.concurrent.ExecutionContext
 import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
 import io.cequence.wsclient.domain.{
   CequenceWSException,
@@ -45,6 +46,46 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
   private val expectedEngineId = "sttp"
 
   s"$expectedEngineId provider" should {
+
+    "send (or, on java.net.http, drop) caller-set Host / Connection headers - never fail" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        io.cequence.wsclient.testkit.TestServers
+          .restrictedHeaders(engine) shouldBe a[Right[_, _]]
+      finally engine.close()
+    }
+
+    "drop the restricted headers on copies of its own backend, never on a caller's backend" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      val copy = engine.copy()
+      try
+        io.cequence.wsclient.testkit.TestServers
+          .restrictedHeaders(copy) shouldBe a[Right[_, _]]
+      finally {
+        copy.close()
+        engine.close()
+      }
+
+      // a caller-supplied backend is used as given: java.net.http itself refuses the header
+      val callerBackend = SttpWSClientEngine.buildBackend(TransportSettings())
+      val callers =
+        SttpWSClientEngine(TransportSettings())(callerBackend, ExecutionContext.global)
+      try
+        io.cequence.wsclient.testkit.TestServers.restrictedHeaders(callers) match {
+          case Left(problem) => problem.toLowerCase should include("restricted")
+          case Right(host)   => fail(s"the caller's backend was filtered (host: $host)")
+        }
+      finally callers.close()
+    }
+
+    "keep a buffered response's raw bytes (Response.bytes)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try {
+        val (intact, latin1) = io.cequence.wsclient.testkit.TestServers.bufferedBytes(engine)
+        intact shouldBe true
+        info(s"Latin-1 text decoded as: $latin1")
+      } finally engine.close()
+    }
 
     "be discovered via ServiceLoader with the expected id and capabilities" in {
       val providers = WSClientEngineRegistry.providers

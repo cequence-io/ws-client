@@ -14,8 +14,9 @@ import io.cequence.wsclient.service.spi.{
   TransportSettings,
   WSClientEngineRegistry
 }
-import io.cequence.wsclient.testkit.LatchedSubscriber
+import io.cequence.wsclient.testkit.{AsyncStreamContract, LatchedSubscriber}
 import io.cequence.wsclient.testkit.TestServers.{
+  asyncStreamContract,
   CookieIsolation,
   cookieIsolation,
   MultipartInjection,
@@ -75,6 +76,23 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
   s"$expectedEngineId provider" should {
 
+    "send (or, on java.net.http, drop) caller-set Host / Connection headers - never fail" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        io.cequence.wsclient.testkit.TestServers
+          .restrictedHeaders(engine) shouldBe a[Right[_, _]]
+      finally engine.close()
+    }
+
+    "keep a buffered response's raw bytes (Response.bytes)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try {
+        val (intact, latin1) = io.cequence.wsclient.testkit.TestServers.bufferedBytes(engine)
+        intact shouldBe true
+        info(s"Latin-1 text decoded as: $latin1")
+      } finally engine.close()
+    }
+
     "be discovered via ServiceLoader with the expected id and capabilities" in {
       val providers = WSClientEngineRegistry.providers
 
@@ -127,6 +145,17 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       // read as a space
       val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
       try queryEncoding(engine) shouldBe QueryEncoding.expected
+      finally engine.close()
+    }
+
+    "honor the AsyncStream contract (cold, framing, cancel, downloads, wire format)" in {
+      val engine =
+        WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+      // zio-http re-renders the URL: the endpoint string's own query is re-encoded (pre-existing)
+      // - wireUrl reports that rendering
+      try
+        asyncStreamContract(engine) shouldBe AsyncStreamContract.expected
+          .copy(endpointQueryVerbatim = false)
       finally engine.close()
     }
 

@@ -11,13 +11,15 @@ import io.cequence.wsclient.domain.{
 }
 import io.cequence.wsclient.service.spi.{
   EngineCapability,
+  HttpVersion,
   TransportSettings,
   WSClientEngineRegistry
 }
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
-import io.cequence.wsclient.testkit.LatchedSubscriber
+import io.cequence.wsclient.testkit.{AsyncStreamContract, LatchedSubscriber}
 import io.cequence.wsclient.testkit.TestServers.{
+  asyncStreamContract,
   CookieIsolation,
   cookieIsolation,
   MultipartInjection,
@@ -47,6 +49,35 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
   private val expectedEngineId = "jdk"
 
   s"$expectedEngineId provider" should {
+
+    "drop only the refused headers java.net.http derives itself (never e.g. Referer)" in {
+
+      JdkRestrictedHeaders.isRestricted("Host") shouldBe true
+
+      JdkRestrictedHeaders.isRestricted("content-length") shouldBe true
+
+      JdkRestrictedHeaders.isRestricted("Referer") shouldBe false
+
+      JdkRestrictedHeaders.isRestricted("X-Api-Key") shouldBe false
+
+    }
+
+    "send (or, on java.net.http, drop) caller-set Host / Connection headers - never fail" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        io.cequence.wsclient.testkit.TestServers
+          .restrictedHeaders(engine) shouldBe a[Right[_, _]]
+      finally engine.close()
+    }
+
+    "keep a buffered response's raw bytes (Response.bytes)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try {
+        val (intact, latin1) = io.cequence.wsclient.testkit.TestServers.bufferedBytes(engine)
+        intact shouldBe true
+        info(s"Latin-1 text decoded as: $latin1")
+      } finally engine.close()
+    }
 
     "be discovered via ServiceLoader with the expected id and capabilities" in {
       val providers = WSClientEngineRegistry.providers
@@ -101,6 +132,39 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
       try queryEncoding(engine) shouldBe QueryEncoding.expected
       finally engine.close()
+    }
+
+    "honor the AsyncStream contract (cold, framing, cancel, downloads, wire format)" in {
+      val engine =
+        WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+      try asyncStreamContract(engine) shouldBe AsyncStreamContract.expected
+      finally engine.close()
+    }
+
+    "speak the configured HTTP version" in {
+      // java.net.http defaults to HTTP/2: over plain http it offers an h2c upgrade
+      def upgradeHeaderSent(settings: TransportSettings): Boolean = {
+        val upgrade = new java.util.concurrent.atomic.AtomicReference[String]("")
+        withServer("/" -> { (exchange: HttpExchange) =>
+          upgrade.set(Option(exchange.getRequestHeaders.getFirst("Upgrade")).getOrElse(""))
+          respond(exchange, 200, "{}")
+        }) { port =>
+          val engine = WSClientEngineRegistry(settings, Some(expectedEngineId))
+          try
+            Await.result(
+              engine.execGETRich(SiteBinding(s"http://localhost:$port"), "v"),
+              10.seconds
+            )
+          finally engine.close()
+        }
+        upgrade.get().contains("h2c")
+      }
+
+      upgradeHeaderSent(TransportSettings()) shouldBe true
+      upgradeHeaderSent(TransportSettings(httpVersion = Some(HttpVersion.Http2))) shouldBe true
+      upgradeHeaderSent(
+        TransportSettings(httpVersion = Some(HttpVersion.Http11))
+      ) shouldBe false
     }
 
     "fail a call whose response stalls after the headers within the request / read timeout" in {

@@ -558,8 +558,10 @@ final class ZioHttpWSClientEngine private[ws] (
         body
       )
       response <- ZClient.batched(request).provideEnvironment(ZEnvironment[Client](client))
-      text <- response.body.asString
-    } yield toRichResponse(site, endPoint, response, text, acceptableStatusCodes)
+      // a batched response's body is in memory: read once - the text UTF-8, as zio-http's
+      // `asString` decodes it, the raw bytes kept where they differ (binary-safe `bytes`)
+      bytes <- response.body.asArray
+    } yield toRichResponse(site, endPoint, response, bytes, acceptableStatusCodes)
 
     run(effect.timeoutFail(timeoutException(label))(requestTimeout))
       .recover(recoverErrors(site)(label))
@@ -580,21 +582,8 @@ final class ZioHttpWSClientEngine private[ws] (
     val headers = requestContext.authHeaders ++ extraHeaders
     val callerContentType = headers.exists { case (name, _) => isContentType(name) }
 
-    val queryParams = (params ++ requestContext.extraParams.map { case (key, value) =>
-      (key, Some(value))
-    }).collect { case (key, Some(value)) => (key, value.toString) }
-
     for {
-      baseUrl <- ZIO.fromEither(URL.decode(site.createURL(Some(endPoint), endPointParam)))
-      // appended to (never replacing) a query already embedded in coreUrl/endPoint
-      url =
-        if (queryParams.isEmpty) baseUrl
-        else
-          baseUrl.addQueryParams(
-            QueryParams(queryParams.map { case (key, value) =>
-              key -> Chunk.single(value)
-            }: _*)
-          )
+      url <- ZIO.fromEither(requestUrl(site, requestContext, endPoint, endPointParam, params))
       requestBody <- body(callerContentType)
     } yield Request(
       method = method,
@@ -608,20 +597,57 @@ final class ZioHttpWSClientEngine private[ws] (
     site: SiteBinding,
     endPoint: String,
     response: Response,
-    body: String,
+    bytes: Array[Byte],
     acceptableStatusCodes: Seq[Int]
   ): RichResponse = {
     val code = response.status.code
+    val body =
+      ResponseBodies(bytes, StandardCharsets.UTF_8, serviceName(site), Some(endPoint))
 
     SimpleRichResponse(
       if (acceptableStatusCodes.contains(code))
-        Some(StringBackedResponse(body, serviceName(site), Some(endPoint)))
+        Some(body)
       else None,
-      status = StatusData(code, body),
+      status = StatusData(code, body.string),
       headers = response.headers.toList.groupBy(_.headerName).map { case (name, headers) =>
         name -> headers.map(_.renderedValue)
       }
     )
+  }
+
+  // zio-http parses and re-renders the URL: the wire form is zio-http's rendering of it
+  override def wireUrl(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil
+  ): String =
+    requestUrl(site, site.requestContextFn(), endPoint, endPointParam, params) match {
+      case Right(url) => url.encode
+      case Left(e)    => throw e
+    }
+
+  private def requestUrl(
+    site: SiteBinding,
+    requestContext: WsRequestContext,
+    endPoint: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])]
+  ): Either[Exception, URL] = {
+    val queryParams = (params ++ requestContext.extraParams.map { case (key, value) =>
+      (key, Some(value))
+    }).collect { case (key, Some(value)) => (key, value.toString) }
+
+    URL.decode(site.createURL(Some(endPoint), endPointParam)).map { baseUrl =>
+      // appended to (never replacing) a query already embedded in coreUrl/endPoint
+      if (queryParams.isEmpty) baseUrl
+      else
+        baseUrl.addQueryParams(
+          QueryParams(queryParams.map { case (key, value) =>
+            key -> Chunk.single(value)
+          }: _*)
+        )
+    }
   }
 
   // a body, given whether the CALLER already supplies a Content-Type header: zio-http lets a
@@ -632,7 +658,7 @@ final class ZioHttpWSClientEngine private[ws] (
   private val noBody: BodyFactory = _ => ZIO.succeed(Body.empty)
 
   private def jsonBody(json: JsValue): BodyFactory = callerContentType => {
-    val body = Body.fromString(Json.stringify(json))
+    val body = Body.fromString(renderJsonBody(json))
     ZIO.succeed(if (callerContentType) body else body.contentType(MediaType.application.json))
   }
 

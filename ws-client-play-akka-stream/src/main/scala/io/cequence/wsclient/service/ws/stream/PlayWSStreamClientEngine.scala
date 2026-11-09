@@ -16,6 +16,7 @@ import io.cequence.wsclient.service.{
 }
 import io.cequence.wsclient.service.spi.TransportSettings
 import io.cequence.wsclient.service.ws.{EngineSupport, PlayWSClientEngine}
+import io.cequence.wsclient.stream.{AsyncStream, Bytes, SourceInterop}
 import org.slf4j.LoggerFactory
 import play.api.libs.json.JsValue
 import play.api.libs.ws.JsonBodyWritables._
@@ -84,8 +85,6 @@ class PlayWSStreamClientEngine(
     Unmarshaller.strict[ByteString, JsonStreamFrames.FrameResult] { byteString =>
       val string = byteString.utf8String
 
-      logger.debug(s"Unmarshalling JSON: $string")
-
       JsonStreamFrames.parseFrame(string, stripPrefix, stripSuffix)
     }
 
@@ -118,6 +117,8 @@ class PlayWSStreamClientEngine(
         maxFrameLength.getOrElse(defaultMaxFrameLength),
         allowTruncation = true
       )
+    ).mapError(
+      typedFrameTooLong(site, endPoint, maxFrameLength.getOrElse(defaultMaxFrameLength))
     ).recover(handleException(site, endPoint))
       // take until the end of stream marked with the structural [DONE] sentinel
       .takeWhile(_ != JsonStreamFrames.EndOfStream)
@@ -129,6 +130,77 @@ class PlayWSStreamClientEngine(
     endPoint: String
   ): PartialFunction[Throwable, T] =
     StreamFailures.handle(serviceAndEndpoint(site, Some(endPoint)), logger)
+
+  // an oversized frame fails with the typed exception (since 1.2.0; the message is unchanged)
+  private def typedFrameTooLong(
+    site: SiteBinding,
+    endPoint: String,
+    maxFrameLength: Int
+  ): PartialFunction[Throwable, Throwable] =
+    StreamFailures.frameTooLong(serviceAndEndpoint(site, Some(endPoint)), maxFrameLength)
+
+  // backend-neutral streams as NATIVE leaves (since 1.2.0): an Akka consumer gets this engine's
+  // own Source back - no bridge; any other consumer runs it on this engine's materializer. The
+  // request fires per run (`lazySource`), not when the method is called
+  override def execJsonAsyncStream(
+    site: SiteBinding,
+    endPoint: String,
+    method: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])],
+    bodyParams: Seq[(String, Option[JsValue])],
+    extraHeaders: Seq[(String, String)],
+    framingDelimiter: String,
+    maxFrameLength: Option[Int],
+    stripPrefix: Option[String],
+    stripSuffix: Option[String]
+  ): AsyncStream[JsValue] =
+    SourceInterop.engineLeaf(
+      Source
+        .lazySource(() =>
+          execJsonStream(
+            site,
+            endPoint,
+            method,
+            endPointParam,
+            params,
+            bodyParams,
+            extraHeaders,
+            framingDelimiter,
+            maxFrameLength,
+            stripPrefix,
+            stripSuffix
+          )
+        )
+        .mapMaterializedValue(_ => NotUsed)
+    )(materializer)
+
+  override def execRawAsyncStream(
+    site: SiteBinding,
+    endPoint: String,
+    method: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])],
+    bodyParams: Seq[(String, Option[JsValue])],
+    extraHeaders: Seq[(String, String)]
+  ): AsyncStream[Bytes] =
+    SourceInterop.byteStringEngineLeaf(
+      Source
+        .lazySource(() =>
+          execRawStream(
+            site,
+            endPoint,
+            method,
+            endPointParam,
+            params,
+            bodyParams,
+            extraHeaders
+          )
+            // the Cequence taxonomy, as on the publisher path
+            .recover(handleException[ByteString](site, endPoint))
+        )
+        .mapMaterializedValue(_ => NotUsed)
+    )(materializer)
 
   protected def execFramedStream[T](
     site: SiteBinding,
@@ -234,11 +306,16 @@ class PlayWSStreamClientEngine(
       }
 
     // keep it like this because of older version of akka-stream (futureSource vs fromFutureSource)
+    // a failure is logged once, by its kind (`StreamFailures.log`: a non-2xx status at DEBUG,
+    // anything else at ERROR) - no `.log` stage: it would log every body chunk at DEBUG
     Source
       .fromFutureSource(source)
-      .log(s"$prefix: execStreamRequestAux failed")
       .recover { case e: Throwable =>
-        logger.error(s"$prefix: execStreamRequestAux failed: ${e.getMessage}.")
+        StreamFailures.log(
+          logger,
+          s"$prefix: execStreamRequestAux failed: ${e.getMessage}.",
+          e
+        )
         throw e
       }
       .mapMaterializedValue(_ => NotUsed)

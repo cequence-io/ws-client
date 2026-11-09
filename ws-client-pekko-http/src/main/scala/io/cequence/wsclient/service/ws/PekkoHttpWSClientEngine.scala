@@ -11,6 +11,7 @@ import io.cequence.wsclient.service.{
   WSClientOutputStreamExtraPekko
 }
 import io.cequence.wsclient.service.spi.TransportSettings
+import io.cequence.wsclient.stream.{AsyncStream, Bytes, SourceInterop}
 import org.apache.pekko.NotUsed
 import org.apache.pekko.actor.ActorSystem
 import org.apache.pekko.http.scaladsl.Http
@@ -25,7 +26,7 @@ import org.apache.pekko.stream.scaladsl.{Framing, Sink, Source}
 import org.apache.pekko.stream.{Materializer, SystemMaterializer}
 import org.apache.pekko.util.ByteString
 import org.slf4j.LoggerFactory
-import play.api.libs.json.{JsValue, Json}
+import play.api.libs.json.JsValue
 
 import java.io.File
 import java.net.UnknownHostException
@@ -540,6 +541,13 @@ class PekkoHttpWSClientEngine(
         allowTruncation = true
       )
     ).map(parseFrame(stripPrefix, stripSuffix))
+      // an oversized frame fails with the typed exception (since 1.2.0; the message is unchanged)
+      .mapError(
+        StreamFailures.frameTooLong(
+          serviceAndEndpoint(site, Some(endPoint)),
+          maxFrameLength.getOrElse(defaultMaxFrameLength)
+        )
+      )
       .recover(handleException(site, endPoint))
 
     // take until the end of stream marked with the structural [DONE] sentinel
@@ -547,6 +555,69 @@ class PekkoHttpWSClientEngine(
       case JsonStreamFrames.JsonFrame(json) => json
     }
   }
+
+  // backend-neutral streams as NATIVE leaves (since 1.2.0): an Akka consumer gets this engine's
+  // own Source back - no bridge; any other consumer runs it on this engine's materializer. The
+  // request fires per run (`lazySource`), not when the method is called
+  override def execJsonAsyncStream(
+    site: SiteBinding,
+    endPoint: String,
+    method: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])],
+    bodyParams: Seq[(String, Option[JsValue])],
+    extraHeaders: Seq[(String, String)],
+    framingDelimiter: String,
+    maxFrameLength: Option[Int],
+    stripPrefix: Option[String],
+    stripSuffix: Option[String]
+  ): AsyncStream[JsValue] =
+    SourceInterop.engineLeaf(
+      Source
+        .lazySource(() =>
+          execJsonStream(
+            site,
+            endPoint,
+            method,
+            endPointParam,
+            params,
+            bodyParams,
+            extraHeaders,
+            framingDelimiter,
+            maxFrameLength,
+            stripPrefix,
+            stripSuffix
+          )
+        )
+        .mapMaterializedValue(_ => NotUsed)
+    )(materializer)
+
+  override def execRawAsyncStream(
+    site: SiteBinding,
+    endPoint: String,
+    method: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])],
+    bodyParams: Seq[(String, Option[JsValue])],
+    extraHeaders: Seq[(String, String)]
+  ): AsyncStream[Bytes] =
+    SourceInterop.byteStringEngineLeaf(
+      Source
+        .lazySource(() =>
+          execRawStream(
+            site,
+            endPoint,
+            method,
+            endPointParam,
+            params,
+            bodyParams,
+            extraHeaders
+          )
+            // the Cequence taxonomy, as on the publisher path
+            .recover(handleException[ByteString](site, endPoint))
+        )
+        .mapMaterializedValue(_ => NotUsed)
+    )(materializer)
 
   override def execRawStream(
     site: SiteBinding,
@@ -583,11 +654,12 @@ class PekkoHttpWSClientEngine(
           )
     }
 
+    // a failure is logged once, by its kind (`StreamFailures.log`: a non-2xx status at DEBUG,
+    // anything else at ERROR) - no `.log` stage: it would log every body chunk at DEBUG
     Source
       .futureSource(source)
-      .log(s"$svc: execRawStream failed")
       .recover { case e: Throwable =>
-        streamLogger.error(s"$svc: execRawStream failed: ${e.getMessage}.")
+        StreamFailures.log(streamLogger, s"$svc: execRawStream failed: ${e.getMessage}.", e)
         throw e
       }
       .mapMaterializedValue(_ => NotUsed)
@@ -605,8 +677,6 @@ class PekkoHttpWSClientEngine(
   ): JsonStreamFrames.FrameResult = {
     val string = byteString.utf8String
 
-    streamLogger.debug(s"Unmarshalling JSON: $string")
-
     JsonStreamFrames.parseFrame(string, stripPrefix, stripSuffix)
   }
 
@@ -616,12 +686,42 @@ class PekkoHttpWSClientEngine(
   ): PartialFunction[Throwable, T] =
     StreamFailures.handle(serviceAndEndpoint(site, Some(endPoint)), streamLogger)
 
+  // pekko-http parses and re-renders the URL: the wire form is pekko-http's rendering of it
+  override def wireUrl(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil
+  ): String =
+    requestUri(site, site.requestContextFn(), endPoint, endPointParam, params).toString
+
+  private def requestUri(
+    site: SiteBinding,
+    requestContext: WsRequestContext,
+    endPoint: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])]
+  ): Uri = {
+    val extraStringParams = requestContext.extraParams.map { case (tag, value) =>
+      (tag, Some(value))
+    }
+    val definedParams = (params ++ extraStringParams).collect { case (key, Some(value)) =>
+      (key, value.toString)
+    }
+
+    // merge with any query already embedded in coreUrl/endPoint (e.g. ?api-version=...) -
+    // withQuery alone would REPLACE it
+    val baseUri = Uri(site.createURL(Some(endPoint), endPointParam))
+    if (definedParams.isEmpty) baseUri
+    else baseUri.withQuery(Uri.Query(baseUri.query() ++ definedParams: _*))
+  }
+
   /////////
   // Aux //
   /////////
 
   private def jsonEntity(body: JsValue): RequestEntity =
-    HttpEntity(ContentTypes.`application/json`, Json.stringify(body))
+    HttpEntity(ContentTypes.`application/json`, renderJsonBody(body))
 
   private def multipartEntity(
     fileParams: Seq[(String, File, Option[String])],
@@ -671,7 +771,7 @@ class PekkoHttpWSClientEngine(
         )
       }
 
-      Multipart.FormData((dataParts ++ fileParts): _*).toEntity()
+      Multipart.FormData((dataParts ++ fileParts): _*).toEntity
     }
   }
 
@@ -690,20 +790,7 @@ class PekkoHttpWSClientEngine(
     entity: RequestEntity
   ): HttpRequest = {
     val requestContext = site.requestContextFn()
-
-    val extraStringParams = requestContext.extraParams.map { case (tag, value) =>
-      (tag, Some(value))
-    }
-    val definedParams = (params ++ extraStringParams).collect { case (key, Some(value)) =>
-      (key, value.toString)
-    }
-
-    // merge with any query already embedded in coreUrl/endPoint (e.g. ?api-version=...) -
-    // withQuery alone would REPLACE it
-    val baseUri = Uri(site.createURL(Some(endPoint), endPointParam))
-    val uri =
-      if (definedParams.isEmpty) baseUri
-      else baseUri.withQuery(Uri.Query(baseUri.query() ++ definedParams: _*))
+    val uri = requestUri(site, requestContext, endPoint, endPointParam, params)
 
     val allHeaders = requestContext.authHeaders ++ extraHeaders
 
@@ -765,16 +852,22 @@ class PekkoHttpWSClientEngine(
       val readTimeout = timeouts.readTimeout.getOrElse(defaultReadoutTimeout)
 
       rawResponse.entity.toStrict(readTimeout.millis).map { strictEntity =>
-        val body = strictEntity.data.utf8String
+        // the text is UTF-8, as before; the raw bytes kept where they differ (binary-safe `bytes`)
+        val body = ResponseBodies(
+          strictEntity.data.toArrayUnsafe(),
+          java.nio.charset.StandardCharsets.UTF_8,
+          serviceName(site),
+          Some(endPoint)
+        )
 
         val response =
           if (acceptableStatusCodes.contains(rawResponse.status.intValue))
-            Some(StringBackedResponse(body, serviceName(site), Some(endPoint)))
+            Some(body)
           else None
 
         SimpleRichResponse(
           response,
-          status = StatusData(rawResponse.status.intValue, body),
+          status = StatusData(rawResponse.status.intValue, body.string),
           headers = rawResponse.headers.groupBy(_.name).map { case (name, headers) =>
             name -> headers.map(_.value)
           }

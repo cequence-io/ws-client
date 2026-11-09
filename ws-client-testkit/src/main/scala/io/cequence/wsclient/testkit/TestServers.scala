@@ -986,6 +986,107 @@ object TestServers {
   }
 
   /**
+   * Whether a buffered (non-streamed) GET of a binary body - every byte value, invalid UTF-8
+   * included - comes back intact through `Response.bytes`, and the text `Response.string`
+   * decodes from a Latin-1 body declared by its Content-Type charset (since 1.2.0).
+   */
+  def bufferedBytes(engine: io.cequence.wsclient.service.WSClientEngine): (Boolean, String) = {
+    val binary: Array[Byte] = (0 until 256).map(_.toByte).toArray ++
+      Array[Byte](0xc3.toByte, 0x28, 0xa0.toByte, 0xa1.toByte)
+    val latin1 = "caf" + 0xe9.toChar
+    def send(
+      exchange: HttpExchange,
+      bytes: Array[Byte],
+      contentType: String
+    ): Unit = {
+      exchange.getResponseHeaders.add("Content-Type", contentType)
+      exchange.sendResponseHeaders(200, bytes.length.toLong)
+      val out = exchange.getResponseBody
+      out.write(bytes)
+      out.close()
+    }
+    withServer(
+      "/binary" -> { (exchange: HttpExchange) =>
+        send(exchange, binary, "application/octet-stream")
+      },
+      "/latin1" -> { (exchange: HttpExchange) =>
+        send(exchange, latin1.getBytes("ISO-8859-1"), "text/plain; charset=ISO-8859-1")
+      }
+    ) { port =>
+      val site = SiteBinding(s"http://localhost:$port")
+      def get(endPoint: String) =
+        engine.getResponseOrError(Await.result(engine.execGETRich(site, endPoint), 30.seconds))
+      (get("binary").bytes.toArray.toSeq == binary.toSeq, get("latin1").string)
+    }
+  }
+
+  /**
+   * What a GET with caller-set connection-level headers (`Host`, `Connection` - which some
+   * HTTP clients reserve for themselves) did: `Right(the Host header the server received)` or
+   * `Left(the failure)`.
+   */
+  def restrictedHeaders(engine: io.cequence.wsclient.service.WSClientEngine)
+    : Either[String, String] =
+    withServer("/" -> { (exchange: HttpExchange) =>
+      val host = Option(exchange.getRequestHeaders.getFirst("Host")).getOrElse("")
+      respond(exchange, 200, Json.obj("host" -> host).toString)
+    }) { port =>
+      Try(
+        Await.result(
+          engine.execGETRich(
+            SiteBinding(s"http://localhost:$port"),
+            "resource",
+            extraHeaders = Seq("Host" -> s"localhost:$port", "Connection" -> "keep-alive")
+          ),
+          30.seconds
+        )
+      ) match {
+        case Success(rich) if rich.status.code == 200 =>
+          Right((engine.getResponseOrError(rich).json \ "host").as[String])
+        case Success(rich) => Left(s"HTTP ${rich.status.code}")
+        case Failure(e)    => Left(s"${e.getClass.getSimpleName}: ${e.getMessage}")
+      }
+    }
+
+  /**
+   * A large non-JSON 200 body (since 1.2.0): `json` fails with a `CequenceWSException` whose
+   * message carries a bounded excerpt - a remote value never enters a message whole - and
+   * whose cause is set. Right(message length) or Left(what went wrong).
+   */
+  def nonJsonBodyError(engine: io.cequence.wsclient.service.WSClientEngine)
+    : Either[String, Int] =
+    withServer("/" -> { (exchange: HttpExchange) =>
+      respond(exchange, 200, "<html>" + ("x" * 10000) + "</html>", "text/html")
+    }) { port =>
+      Try(
+        Await.result(
+          engine.execGETRich(SiteBinding(s"http://localhost:$port"), "page"),
+          30.seconds
+        )
+      ) match {
+        case Success(rich) =>
+          Try(engine.getResponseOrError(rich).json) match {
+            case Failure(e: io.cequence.wsclient.domain.CequenceWSException)
+                if e.getCause != null =>
+              Right(e.getMessage.length)
+            case other => Left(s"unexpected: $other")
+          }
+        case Failure(e) => Left(s"${e.getClass.getSimpleName}: ${e.getMessage}")
+      }
+    }
+
+  /**
+   * The `AsyncStream` contract of a streaming engine (since 1.2.0) - see
+   * [[AsyncStreamContract]]: cold and re-runnable streams, SSE framing, status failures,
+   * cancellation, binary-safe downloads, and the wire format (`wireUrl`, `renderJsonBody`).
+   */
+  def asyncStreamContract(
+    engine: io.cequence.wsclient.service.WSClientEngine
+      with io.cequence.wsclient.service.WSClientOutputStreamCore
+  ): AsyncStreamContract =
+    AsyncStreamContract.run(engine)
+
+  /**
    * GETs `items?`[[QueryEncoding.EndpointQuery]] with [[QueryEncoding.Params]] and an extra
    * param from the site's request context, and returns the query as the server received it.
    */

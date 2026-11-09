@@ -48,7 +48,7 @@ import play.shaded.ahc.org.asynchttpclient.config.{
 import play.shaded.ahc.org.asynchttpclient.netty.channel.ChannelManager
 
 import java.io.File
-import java.net.{URLEncoder, UnknownHostException}
+import java.net.UnknownHostException
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.{SSLContext, TrustManager}
@@ -726,11 +726,7 @@ object PlayWSClientEngine {
    * form encoding, whose `+` for a space an RFC 3986 server reads as a literal `+`.
    */
   private[ws] def encodeQueryComponent(value: String): String =
-    URLEncoder
-      .encode(value, "UTF-8")
-      .replace("+", "%20")
-      .replace("*", "%2A")
-      .replace("%7E", "~")
+    WireFormat.encodeQueryComponent(value)
 
   /**
    * The TLS protocols the engine's client offers - or `None` to leave the shaded AHC's own

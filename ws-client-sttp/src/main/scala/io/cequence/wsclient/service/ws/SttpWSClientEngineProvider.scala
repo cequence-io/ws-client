@@ -27,6 +27,10 @@ class SttpWSClientEngineProvider extends WSClientEngineProvider {
   override def newEngine(settings: TransportSettings): WSClientEngine = {
     implicit val ec: ExecutionContext = ExecutionContext.global
 
-    new SttpWSClientEngine(SttpWSClientEngine.buildBackend(settings), settings)
+    new SttpWSClientEngine(
+      SttpWSClientEngine.buildBackend(settings),
+      settings,
+      filterRestrictedHeaders = true
+    )
   }
 }

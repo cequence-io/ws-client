@@ -16,8 +16,9 @@ import io.cequence.wsclient.service.spi.{
   WSClientEngineRegistry
 }
 import io.cequence.wsclient.service.ws.Timeouts
-import io.cequence.wsclient.testkit.LatchedSubscriber
+import io.cequence.wsclient.testkit.{AsyncStreamContract, LatchedSubscriber}
 import io.cequence.wsclient.testkit.TestServers.{
+  asyncStreamContract,
   CookieIsolation,
   cookieIsolation,
   MultipartInjection,
@@ -60,6 +61,100 @@ class PlayAkkaStreamWSClientEngineProviderSpec extends AnyWordSpec with Matchers
   }
 
   s"$expectedEngineId provider" should {
+
+    "send (or, on java.net.http, drop) caller-set Host / Connection headers - never fail" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        io.cequence.wsclient.testkit.TestServers
+          .restrictedHeaders(engine) shouldBe a[Right[_, _]]
+      finally engine.close()
+    }
+
+    "keep a buffered response's raw bytes (Response.bytes)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try {
+        val (intact, latin1) = io.cequence.wsclient.testkit.TestServers.bufferedBytes(engine)
+        intact shouldBe true
+        info(s"Latin-1 text decoded as: $latin1")
+      } finally engine.close()
+    }
+
+    "serve its AsyncStreams as native Sources: cold, no bridge, typed frame overflow" in {
+      val requests = new java.util.concurrent.atomic.AtomicInteger()
+      io.cequence.wsclient.testkit.TestServers.withServer(
+        "/sse" -> io.cequence.wsclient.testkit.TestServers
+          .sse("data: {\"n\":1}\n\ndata: {\"n\":2}\n\ndata: [DONE]\n\n", requests),
+        "/big" -> io.cequence.wsclient.testkit.TestServers.sse("data: " + "1" * 300 + "\n\n")
+      ) { port =>
+        val engine =
+          WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+        val runSystem = akka.actor.ActorSystem("native-leaf-spec")
+        implicit val runMaterializer: akka.stream.Materializer =
+          akka.stream.Materializer(runSystem)
+        try {
+          import io.cequence.wsclient.stream.SourceInterop._
+          import io.cequence.wsclient.stream.StreamDiagnostics.counted
+          import scala.concurrent.Await
+          import scala.concurrent.duration._
+
+          val site = io.cequence.wsclient.domain.SiteBinding(s"http://localhost:$port")
+          val stream =
+            engine.execJsonAsyncStream(site, "sse", "GET").map(json => (json \ "n").as[Int])
+          stream.describe should startWith("native(akka)")
+          Thread.sleep(100)
+          requests.get() shouldBe 0 // cold
+
+          val (source, bridges) = counted(stream.toSource)
+          Await.result(source.runWith(akka.stream.scaladsl.Sink.seq), 30.seconds) shouldBe Seq(
+            1,
+            2
+          )
+          Await.result(source.runWith(akka.stream.scaladsl.Sink.seq), 30.seconds) shouldBe Seq(
+            1,
+            2
+          )
+          bridges.get shouldBe 0
+          requests.get() shouldBe 2 // a request per run
+
+          // raw bytes: the engine's own ByteString source, without a bridge
+          val (raw, rawBridges) =
+            counted(engine.execRawAsyncStream(site, "sse", "GET").toByteStringSource)
+          Await.result(
+            raw.runWith(akka.stream.scaladsl.Sink.fold(0)(_ + _.length)),
+            30.seconds
+          ) should be > 0
+          rawBridges.get shouldBe 0
+
+          // consumed outside the backend: the engine's materializer runs it (one bridge)
+          val (neutral, neutralBridges) = counted(stream.runToSeq)
+          Await.result(neutral, 30.seconds) shouldBe Seq(1, 2)
+          neutralBridges.get shouldBe 1
+
+          // an oversized frame fails with the typed exception
+          val oversized =
+            engine.execJsonAsyncStream(site, "big", "GET", maxFrameLength = Some(100))
+          val failure = scala.util.Try(Await.result(oversized.runToSeq, 30.seconds)).failed.get
+          failure shouldBe a[io.cequence.wsclient.domain.CequenceWSFrameTooLongException]
+          failure
+            .asInstanceOf[io.cequence.wsclient.domain.CequenceWSFrameTooLongException]
+            .maxFrameLength shouldBe 100
+        } finally {
+          engine.close()
+          runSystem.terminate()
+          ()
+        }
+      }
+    }
+
+    "honor the AsyncStream contract (cold, framing, cancel, downloads, wire format)" in {
+      val engine =
+        WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+      // the engine's streams are native leaves: a neutral consumer bridges once per stream
+      try
+        asyncStreamContract(engine) shouldBe AsyncStreamContract.expected
+          .copy(neutralBridges = 2)
+      finally engine.close()
+    }
 
     "be discovered alongside the base engine and win auto-selection" in {
       val providers = WSClientEngineRegistry.providers

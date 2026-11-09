@@ -9,6 +9,7 @@ import sttp.client4.httpclient.HttpClientFutureBackend
 import sttp.model.{MediaType, Method, Uri}
 
 import java.io.File
+import java.nio.charset.Charset
 import java.net.UnknownHostException
 import java.nio.channels.UnresolvedAddressException
 import java.util.concurrent.TimeoutException
@@ -40,11 +41,22 @@ import scala.concurrent.{ExecutionContext, Future}
  */
 final class SttpWSClientEngine private[ws] (
   private[ws] val backend: Backend[Future],
-  override val transportSettings: TransportSettings
+  override val transportSettings: TransportSettings,
+  // sttp on its own java.net.http backend (the provider, copy): drop the headers java.net.http
+  // refuses; a caller-supplied backend is never filtered
+  filterRestrictedHeaders: Boolean
 )(
   implicit override protected val ec: ExecutionContext
 ) extends WSClientEngine
     with EngineSupport {
+
+  // the 1.1.x constructor (binary compatibility): a caller-supplied backend
+  private[ws] def this(
+    backend: Backend[Future],
+    transportSettings: TransportSettings
+  )(
+    implicit ec: ExecutionContext
+  ) = this(backend, transportSettings, false)
 
   // the copy always builds its own OWNED backend from the given settings (via
   // SttpWSClientEngine.buildBackend) and closes it independently of this engine - the
@@ -58,7 +70,8 @@ final class SttpWSClientEngine private[ws] (
   ): SttpWSClientEngine =
     new SttpWSClientEngine(
       SttpWSClientEngine.buildBackend(transportSettings),
-      transportSettings
+      transportSettings,
+      filterRestrictedHeaders = true
     )(ec)
 
   // sttp maps only the request timeout (per request); a partially-specified Timeouts falls
@@ -345,8 +358,13 @@ final class SttpWSClientEngine private[ws] (
     requestContext: WsRequestContext,
     extraHeaders: Seq[(String, String)]
   ) = {
-    val withHeaders = (requestContext.authHeaders ++ extraHeaders).foldLeft(basicRequest) {
-      case (request, (key, value)) => request.header(key, value)
+    // the engine's own backend runs on java.net.http, which refuses Host, Connection,
+    // Content-Length, Expect, Upgrade from a caller; a caller-supplied backend gets every header
+    val allHeaders = requestContext.authHeaders ++ extraHeaders
+    val headers =
+      if (filterRestrictedHeaders) JdkRestrictedHeaders.filter(allHeaders) else allHeaders
+    val withHeaders = headers.foldLeft(basicRequest) { case (request, (key, value)) =>
+      request.header(key, value)
     }
 
     withHeaders
@@ -357,13 +375,13 @@ final class SttpWSClientEngine private[ws] (
       .response(asStringAlways)
   }
 
-  // the body as a String (charset from Content-Type, else UTF-8 - as asStringAlways), read
+  // the body bytes and their charset (from Content-Type, else UTF-8 - as asStringAlways), read
   // under the request deadline: java.net.http's HttpRequest.timeout (sttp's readTimeout) stops
   // at the response headers. At the deadline the stream is closed - which unblocks the read
   // and makes java.net.http close the connection - and the call fails with an
   // HttpTimeoutException (-> CequenceWSTimeoutException). sttp evaluates the function in a
   // plain Future: the read is marked `blocking` here
-  private def asStringWithDeadline(deadlineNanos: Long): ResponseAs[String] =
+  private def asBytesWithDeadline(deadlineNanos: Long): ResponseAs[(Array[Byte], Charset)] =
     asInputStreamAlways { stream =>
       val expired = new java.util.concurrent.atomic.AtomicBoolean(false)
       val timer = EngineSupport.deadlineScheduler.schedule(
@@ -391,8 +409,17 @@ final class SttpWSClientEngine private[ws] (
         bytes,
         metadata
       ) =>
-        new String(bytes, SttpWSClientEngine.charsetOf(metadata.contentType))
+        (bytes, SttpWSClientEngine.charsetOf(metadata.contentType))
     }
+
+  // sttp parses and re-renders the URL: the wire form is sttp's rendering of it
+  override def wireUrl(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil
+  ): String =
+    uri(site, site.requestContextFn(), endPoint, endPointParam, params).toString
 
   private def uri(
     site: SiteBinding,
@@ -415,7 +442,7 @@ final class SttpWSClientEngine private[ws] (
     request: Request[String],
     body: JsValue
   ): Request[String] =
-    request.body(Json.stringify(body)).contentType(MediaType.ApplicationJson)
+    request.body(renderJsonBody(body)).contentType(MediaType.ApplicationJson)
 
   private def withMultipartBody(
     request: Request[String],
@@ -480,17 +507,20 @@ final class SttpWSClientEngine private[ws] (
     acceptableStatusCodes: Seq[Int]
   ): Future[RichResponse] =
     request
-      .response(asStringWithDeadline(System.nanoTime() + requestTimeoutMs * 1000000L))
+      .response(asBytesWithDeadline(System.nanoTime() + requestTimeoutMs * 1000000L))
       .send(backend)
       .map { rawResponse =>
+        // the text decoded as before, the raw bytes kept where they differ (binary-safe `bytes`)
+        val (bytes, charset) = rawResponse.body
+        val body = ResponseBodies(bytes, charset, serviceName(site), endPointForLogging)
         val response =
           if (acceptableStatusCodes.contains(rawResponse.code.code))
-            Some(StringBackedResponse(rawResponse.body, serviceName(site), endPointForLogging))
+            Some(body)
           else None
 
         SimpleRichResponse(
           response,
-          status = StatusData(rawResponse.code.code, rawResponse.body),
+          status = StatusData(rawResponse.code.code, body.string),
           headers = rawResponse.headers.groupBy(_.name).map { case (name, headers) =>
             name -> headers.map(_.value)
           }
