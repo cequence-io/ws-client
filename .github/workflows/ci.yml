@@ -22,6 +22,12 @@ jobs:
       - uses: sbt/setup-sbt@v1
       - name: Check formatting
         run: sbt scalafmtCheckAll scalafmtSbtCheck
-      # cross-builds every module for each of its Scala versions (2.12 / 2.13 / 3.2)
+      # cross-builds every module for each of its Scala versions (2.12 / 2.13 / 3.2 / 3.3)
       - name: Test
         run: sbt +test
+      # binary compatibility against the previous release (project/ReleaseChecks.scala)
+      - name: Binary compatibility
+        run: sbt +mimaReportBinaryIssues
+      # the published Scala 3 jars of the 3.2-line modules must stay TASTy 28.2
+      - name: TASTy versions
+        run: sbt +tastyCheck

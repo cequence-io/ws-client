@@ -5,6 +5,9 @@ addSbtPlugin("com.github.sbt" % "sbt-pgp" % "2.2.1")
 addSbtPlugin("ch.epfl.scala" % "sbt-scalafix" % "0.12.1")
 addSbtPlugin("org.scalameta" % "sbt-scalafmt" % "2.5.2")
 
+// binary compatibility against the previous release (see project/ReleaseChecks.scala)
+addSbtPlugin("com.typesafe" % "sbt-mima-plugin" % "1.1.4")
+
 // Test Coverage plugin.
 // ~
 // sbt-scoverage is a plugin for SBT that integrates the scoverage code coverage library.

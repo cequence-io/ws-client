@@ -44,10 +44,27 @@ object PekkoGenerator {
    * Settings adding a `Compile / sourceGenerators` task that mirrors `fromProject`'s Scala
    * sources into this project as Pekko-based ones.
    */
-  def generatorSettings(fromProject: Project): Seq[Setting[_]] = Seq(
-    Compile / sourceGenerators += Def.task {
-      val srcDirs = (fromProject / Compile / unmanagedSourceDirectories).value
-      val outBase = (Compile / sourceManaged).value / "pekko"
+  def generatorSettings(fromProject: Project): Seq[Setting[_]] = mirror(fromProject, Compile)
+
+  /**
+   * The same for `fromProject`'s TEST sources - for a module whose specs have no
+   * Akka-/Pekko-specific parts (engine ids, provider names): its Pekko twin runs the same
+   * specs.
+   */
+  def testGeneratorSettings(fromProject: Project): Seq[Setting[_]] = mirror(fromProject, Test)
+
+  private def mirror(
+    fromProject: Project,
+    config: Configuration
+  ): Seq[Setting[_]] = Seq(
+    config / sourceGenerators += Def.task {
+      // `src/<config>/scala` plus the Scala 2 variants, whatever Scala version the Akka module
+      // is at: the Pekko flavor runs on Play WS 3.x, which behaves like Play WS 2.1.x on every
+      // Scala version - the `scala-3` sources work around Play WS 2.2.0-M2 (Akka, Scala 3.2)
+      val srcBase =
+        (fromProject / baseDirectory).value / "src" / Defaults.nameForSrc(config.name)
+      val srcDirs = Seq(srcBase / "scala", srcBase / "scala-2").filter(_.isDirectory)
+      val outBase = (config / sourceManaged).value / "pekko"
       val log = streams.value.log
 
       val inputs = srcDirs.flatMap(dir => (dir ** "*.scala").get.map(file => (dir, file)))

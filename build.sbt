@@ -4,13 +4,18 @@ import sbt.Keys.scalaVersion
 val scala212 = "2.12.18"
 val scala213 = "2.13.11"
 val scala32 = "3.2.2"
+// Scala 3.3 LTS: only for the modules whose own dependencies are built with 3.3 (Pekko, play-ws
+// 3.x, fs2, ZIO). Every other module's `_3` artifact stays compiled with 3.2.2 (TASTy 28.2), so
+// it serves Scala 3.2 and 3.3+ users alike - see `tastyCheck`. 3.3.8 >= the 3.3.x each of
+// those dependencies is built with (play-ws 3.0.14: 3.3.8)
+val scala33 = "3.3.8"
 
 ThisBuild / description := "Generic WebServices client library for Scala with pluggable, auto-discovered HTTP engines: Play WS (Akka / Pekko), pekko-http, JDK HttpClient, sttp and zio-http"
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala213
-ThisBuild / version := "1.1.5"
-ThisBuild / isSnapshot := false
+ThisBuild / version := "1.2.0-SNAPSHOT"
+ThisBuild / isSnapshot := version.value.endsWith("-SNAPSHOT")
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 
 // POM settings for Sonatype
@@ -56,6 +61,19 @@ inThisBuild(
     semanticdbVersion := scalafixSemanticdb.revision
   )
 )
+
+// A 3.2-line module (its `_3` artifact compiled with 3.2.2) that also builds with 3.3: an sbt
+// project dependency needs one Scala line on both sides, so the 3.3-line modules (Pekko, fs2,
+// ZIO) depend on a 3.3 build of it. That build stays in the build - never published, or
+// `ws-client-core_3` would be published twice (`tastyCheck` guards it)
+lazy val publishedExceptOnScala33 = {
+  val onScala33 = Def.setting(scalaVersion.value == scala33)
+  Seq(
+    publish / skip := onScala33.value,
+    publishLocal / skip := onScala33.value,
+    publishM2 / skip := onScala33.value // sbt-pgp's publishSigned honors `publish / skip`
+  )
+}
 
 // JSON
 // a Def.setting (not an inThisBuild settingKey) so it follows each project's own scalaVersion
@@ -142,8 +160,9 @@ val akkaHttpVersion = "10.5.3" // 10.5.1 has CVE-2023-44487 (HTTP/2 server - unu
 val pekkoVersion = "1.6.0"
 val pekkoHttpVersion = "1.3.0"
 
-// play-ws 3.x (org.playframework, Pekko-based) is published for Scala 2.13 and 3.3+ only
-lazy val pekkoScalaVersions = List(scala213)
+// play-ws 3.x (org.playframework, Pekko-based) is published for Scala 2.13 and 3.3+ only: the
+// Pekko modules build their Scala 3 artifact with 3.3 (since 1.2.0)
+lazy val pekkoScalaVersions = List(scala213, scala33)
 
 // Play WS
 
@@ -186,19 +205,35 @@ lazy val playWsPekkoDependencies = Def.setting {
   )
 }
 
+// forked tests, run in target/: TestNG (the Reactive Streams TCK) writes its report files into
+// the working directory
+lazy val forkedTestsInTarget = Seq(
+  Test / fork := true,
+  Test / forkOptions := (Test / forkOptions).value.withWorkingDirectory(target.value)
+)
+
+// Reactive Streams TCK (TestNG-based) for the AsyncStream <-> Flow.Publisher bridges, run
+// through ScalaTest's TestNG integration (the scalatestplus line matching ScalaTest 3.2.16)
+lazy val reactiveStreamsTckLibs = Seq(
+  "org.reactivestreams" % "reactive-streams-tck-flow" % "1.0.4" % Test,
+  "org.scalatestplus" %% "testng-7-5" % "3.2.16.0" % Test
+)
+
 lazy val `ws-client-core` =
   (project in file("ws-client-core")).settings(
     name := "ws-client-core",
+    crossScalaVersions := List(scala212, scala213, scala32, scala33),
     libraryDependencies += "com.typesafe.play" %% "play-json" % playJsonVersion.value,
     libraryDependencies ++= jacksonLibs,
     libraryDependencies += "com.typesafe" % "config" % "1.4.3",
     libraryDependencies ++= loggingLibs.value,
     libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+    libraryDependencies ++= reactiveStreamsTckLibs,
     testLoggingSettings,
     // WSClientEngineRegistrySpec mutates the JVM-global 'ws-client.engine' system property;
     // fork so it cannot race the other modules' registry-based suites in the shared sbt JVM
-    Test / fork := true,
-    publish / skip := false
+    forkedTestsInTarget,
+    publishedExceptOnScala33
   )
 
 lazy val `ws-client-core-akka` =
@@ -206,6 +241,12 @@ lazy val `ws-client-core-akka` =
     .settings(
       name := "ws-client-core-akka",
       libraryDependencies ++= akkaStreamLibs.value,
+      libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      libraryDependencies ++= reactiveStreamsTckLibs,
+      testLoggingSettings,
+      forkedTestsInTarget,
+      // the opt-in implicit conversions must compile warning-free under -feature
+      Test / scalacOptions ++= Seq("-feature", "-Wconf:cat=feature:e"),
       publish / skip := false
     )
     .dependsOn(`ws-client-core`)
@@ -258,7 +299,14 @@ lazy val `ws-client-core-pekko` =
       name := "ws-client-core-pekko",
       crossScalaVersions := pekkoScalaVersions,
       libraryDependencies += "org.apache.pekko" %% "pekko-stream" % pekkoVersion,
+      libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      libraryDependencies ++= reactiveStreamsTckLibs,
+      testLoggingSettings,
+      forkedTestsInTarget,
+      Test / scalacOptions ++= Seq("-feature", "-Wconf:cat=feature:e"),
       PekkoGenerator.generatorSettings(`ws-client-core-akka`),
+      // core-akka's specs have no Akka-specific parts: the Pekko twin runs them generated
+      PekkoGenerator.testGeneratorSettings(`ws-client-core-akka`),
       publish / skip := false
     )
     .dependsOn(`ws-client-core`)
@@ -299,6 +347,7 @@ lazy val `ws-client-testkit` =
   (project in file("ws-client-testkit"))
     .settings(
       name := "ws-client-testkit",
+      crossScalaVersions := List(scala212, scala213, scala32, scala33),
       publish / skip := true
     )
     .dependsOn(`ws-client-core`)
@@ -372,6 +421,37 @@ lazy val `ws-client-pekko-http` =
     )
     .dependsOn(`ws-client-core-pekko`, `ws-client-testkit` % Test)
 
+// Interop with fs2 and ZIO streams (AsyncStream compilers and conversions). Their Scala 3
+// artifacts are built with 3.3: fs2 / cats-effect and ZIO publish for Scala 3.3+ only
+val fs2Version = "3.12.2" // fs2.interop.flow; built with Scala 3.3.5
+val catsEffectVersion = "3.6.3" // IO / IORuntime for Fs2Runner.io (fs2 3.12.2 needs 3.6.x)
+val zioVersion = "2.1.26" // the version zio-http 3.11.6 (ws-client-zio-http) is built on
+
+lazy val `ws-client-fs2` =
+  (project in file("ws-client-fs2"))
+    .settings(
+      name := "ws-client-fs2",
+      crossScalaVersions := List(scala212, scala213, scala33),
+      libraryDependencies += "co.fs2" %% "fs2-core" % fs2Version,
+      libraryDependencies += "org.typelevel" %% "cats-effect" % catsEffectVersion,
+      libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      testLoggingSettings,
+      publish / skip := false
+    )
+    .dependsOn(`ws-client-core`, `ws-client-testkit` % Test)
+
+lazy val `ws-client-zio` =
+  (project in file("ws-client-zio"))
+    .settings(
+      name := "ws-client-zio",
+      crossScalaVersions := List(scala212, scala213, scala33),
+      libraryDependencies += "dev.zio" %% "zio-streams" % zioVersion,
+      libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      testLoggingSettings,
+      publish / skip := false
+    )
+    .dependsOn(`ws-client-core`, `ws-client-testkit` % Test)
+
 lazy val root = (project in file("."))
   .settings(
     name := "ws-client",
@@ -390,6 +470,8 @@ lazy val root = (project in file("."))
     `ws-client-sttp`,
     `ws-client-pekko-http`,
     `ws-client-zio-http`,
+    `ws-client-fs2`,
+    `ws-client-zio`,
     `ws-client-testkit`,
     `json-repair`
   )
