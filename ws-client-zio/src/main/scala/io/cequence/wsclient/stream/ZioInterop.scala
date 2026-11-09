@@ -52,6 +52,10 @@ private[wsclient] final class ZioPipe[A, B] private[wsclient] (
  *     is a failure, not a defect)
  *   - `zStream.toAsyncStream` keeps the stream native; the implicit `Runtime` is used only
  *     when the stream is consumed outside ZIO
+ *   - `bytes.toZByteStream` / `zByteStream.toAsyncByteStream` convert between
+ *     `AsyncStream[Bytes]` and `ZStream[Any, Throwable, Byte]` - chunks are shared, not
+ *     copied, towards ZIO; a converted ZIO byte stream (or the zio-http engine's raw stream)
+ *     comes back as its own chunks
  *   - `pipe.toZStreamFunction` / `ZioInterop.fromZPipeline(pipeline)` likewise for
  *     transformations
  */
@@ -69,6 +73,18 @@ object ZioInterop {
       AsyncStream.fromNative(new ZioLeaf(stream, runtime))
   }
 
+  implicit final class AsyncBytesToZio(private val stream: AsyncStream[Bytes]) extends AnyVal {
+    def toZByteStream: ZStream[Any, Throwable, Byte] = ZioCompiler.toZByteStream(stream)
+  }
+
+  implicit final class ZioByteStreamToAsync(private val stream: ZStream[Any, Throwable, Byte])
+      extends AnyVal {
+    def toAsyncByteStream(
+      implicit runtime: Runtime[Any]
+    ): AsyncStream[Bytes] =
+      byteChunkLeaf(stream.chunks, runtime)
+  }
+
   implicit final class AsyncPipeToZio[A, B](private val pipe: AsyncPipe[A, B]) extends AnyVal {
     def toZStreamFunction: ZStream[Any, Throwable, A] => ZStream[Any, Throwable, B] =
       ZioCompiler.toZStreamFunction(pipe)
@@ -80,6 +96,26 @@ object ZioInterop {
     implicit runtime: Runtime[Any]
   ): AsyncPipe[A, B] =
     AsyncPipe.fromNative(new ZioPipe(pipeline, runtime))
+
+  /** An engine's native stream (its fallback runs on the engine's own runtime). */
+  private[wsclient] def engineLeaf[A](
+    stream: ZStream[Any, Throwable, A],
+    runtime: Runtime[Any]
+  ): AsyncStream[A] =
+    AsyncStream.fromNative(new ZioLeaf(stream, runtime))
+
+  /** An engine's native byte stream - `toZByteStream` gives back `chunks`, flattened. */
+  private[wsclient] def byteChunkEngineLeaf(
+    chunks: ZStream[Any, Throwable, Chunk[Byte]],
+    runtime: Runtime[Any]
+  ): AsyncStream[Bytes] =
+    byteChunkLeaf(chunks, runtime)
+
+  private def byteChunkLeaf(
+    chunks: ZStream[Any, Throwable, Chunk[Byte]],
+    runtime: Runtime[Any]
+  ): AsyncStream[Bytes] =
+    AsyncStream.fromNative(new ZioLeaf(chunks, runtime)).map(ZioCompiler.FromChunk)
 
   /** ZIO's clock as a [[io.cequence.wsclient.concurrent.AsyncScheduler]]. */
   def scheduler(

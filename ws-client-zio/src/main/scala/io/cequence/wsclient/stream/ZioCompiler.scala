@@ -26,6 +26,28 @@ private[wsclient] object ZioCompiler {
   def toZStream[A](stream: AsyncStream[A]): ZStream[Any, Throwable, A] =
     new ZioCompiler(BridgeCounter.current()).compile(stream)
 
+  // Bytes are immutable and a Chunk never mutates its array: wrapping shares it, no copy
+  val ToChunk: Bytes => Chunk[Byte] = { bytes =>
+    val whole = Chunk.fromArray(bytes.unsafeArray)
+    if (bytes.unsafeOffset == 0 && bytes.length == bytes.unsafeArray.length) whole
+    else whole.slice(bytes.unsafeOffset, bytes.unsafeOffset + bytes.length)
+  }
+
+  // a Chunk's array is not reachable: one copy
+  val FromChunk: Chunk[Byte] => Bytes = chunk => Bytes.unsafeWrap(chunk.toArray)
+
+  /**
+   * `stream` as a ZIO byte stream; a ZIO byte-chunk leaf comes back as that stream, flattened
+   * (no bridge, no copy).
+   */
+  def toZByteStream(stream: AsyncStream[Bytes]): ZStream[Any, Throwable, Byte] =
+    stream match {
+      case Mapped(Native(leaf: ZioLeaf[_]), f) if f eq FromChunk =>
+        leaf.stream.asInstanceOf[ZStream[Any, Throwable, Chunk[Byte]]].flattenChunks
+      case other =>
+        toZStream(other).mapConcatChunk(ToChunk)
+    }
+
   /**
    * `pipe` as a ZIO stream function: a pipe that is exactly one ZIO pipeline applies it; any
    * other pipe is applied to the function's own input stream, natively.

@@ -407,7 +407,8 @@ lazy val `ws-client-zio-http` =
       testLoggingSettings,
       publish / skip := false
     )
-    .dependsOn(`ws-client-core`, `ws-client-testkit` % Test)
+    // ws-client-zio: the engine's AsyncStreams are native ZIO leaves (since 1.2.0)
+    .dependsOn(`ws-client-core`, `ws-client-zio`, `ws-client-testkit` % Test)
 
 lazy val `ws-client-pekko-http` =
   (project in file("ws-client-pekko-http"))

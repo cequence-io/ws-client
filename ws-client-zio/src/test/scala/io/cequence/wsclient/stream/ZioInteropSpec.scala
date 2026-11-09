@@ -72,6 +72,30 @@ class ZioInteropSpec extends AnyWordSpec with Matchers {
       bridges.get shouldBe 0
     }
 
+    "convert byte streams both ways without a bridge - a converted ZIO byte stream comes back as its own chunks" in {
+      val zBytes = ZStream.fromChunks(zio.Chunk[Byte](1, 2), zio.Chunk[Byte](3))
+      val async = zBytes.toAsyncByteStream
+
+      // neutrally: the chunks as received
+      Await.result(async.runToSeq, 10.seconds).map(_.toArray.toSeq) shouldBe
+        Seq(Seq[Byte](1, 2), Seq[Byte](3))
+
+      val (back, bridges) = StreamDiagnostics.counted(async.toZByteStream)
+      runZio(back) shouldBe Seq[Byte](1, 2, 3)
+      bridges.get shouldBe 0
+
+      // neutral Bytes, sliced ones included, share their arrays towards ZIO
+      val array = Array[Byte](9, 4, 5, 6, 9)
+      val neutral = AsyncStream(Bytes.unsafeWrap(array, 1, 3), Bytes.utf8("a"))
+      val (fromNeutral, neutralBridges) = StreamDiagnostics.counted(neutral.toZByteStream)
+      runZio(fromNeutral) shouldBe Seq[Byte](4, 5, 6, 'a'.toByte)
+      neutralBridges.get shouldBe 0
+
+      // an operator on the leaf: no shortcut, still native
+      runZio(async.map(b => Bytes.unsafeWrap(b.toArray.reverse)).toZByteStream) shouldBe
+        Seq[Byte](2, 1, 3)
+    }
+
     "bridge a foreign leaf once, and a native ZIO leaf consumed neutrally once" in {
       val (compiled, bridges) = StreamDiagnostics.counted(
         AsyncStream.fromPublisher(() => AsyncStream(1, 2).toPublisher[Int]).toZStream

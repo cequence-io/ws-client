@@ -161,10 +161,12 @@ The project is organized into 15 SBT modules (11 handwritten + 3 Pekko mirrors +
    - `ws-client-pekko-http`: direct pekko-http client engine (depends on ws-client-core-pekko;
      Scala 2.13 / 3.3). Supports input streaming (`execPOSTSource`) and native output (SSE) streaming.
      No Play WS / shaded AHC.
-   - `ws-client-zio-http`: engine on the zio-http (Netty) client + ZIO runtime (depends only on
-     ws-client-core; Scala 2.12/2.13 - zio-http's Scala 3 artifacts need 3.3+). Output (SSE)
-     streaming via `WSClientOutputStreamCore` (ZStream bridged with zio-interop-reactivestreams +
-     `FlowAdapters`, then the jdk engine's framing pipeline); the stream status is checked before
+   - `ws-client-zio-http`: engine on the zio-http (Netty) client + ZIO runtime (depends on
+     ws-client-core and, since 1.2.0, ws-client-zio; Scala 2.12/2.13 - zio-http's Scala 3
+     artifacts need 3.3+). Output (SSE) streaming via `WSClientOutputStreamCore` (publisher path:
+     ZStream bridged with zio-interop-reactivestreams + `FlowAdapters`, then the jdk engine's
+     framing pipeline; `execJsonAsyncStream` / `execRawAsyncStream` are native ZIO leaves over the
+     same body stream - `bodyChunks`); the stream status is checked before
      any byte is exposed. Discovery-created engines own a Netty driver + client (`close()`
      releases both); `copy(reuseExecContext = true)` shares the driver. `ZioHttpWSClientEngine(client)`
      / `.layer()` run on a caller-owned `Client` (never closed). Owned engines run Netty on
@@ -815,5 +817,10 @@ Style" and Odersky's "Lean Scala".
   (`StreamFailures.frameTooLong`); the message is unchanged
 - The Akka / Pekko stream engines return their `execJsonAsyncStream` / `execRawAsyncStream` as
   native leaves (`SourceInterop.engineLeaf` over `Source.lazySource` - Play and pekko-http fire
-  the request when `execJsonStream` is CALLED, the neutral stream must be cold); jdk / zio-http
-  inherit the publisher-wrapping defaults of `WSClientOutputStreamCore`
+  the request when `execJsonStream` is CALLED, the neutral stream must be cold). zio-http
+  returns native ZIO leaves (`ZioInterop.byteChunkEngineLeaf` over `ZStream.suspend` - the
+  request context and request are evaluated per run; the JSON stream is that leaf +
+  `JsonStreamPipes.jsonFrames`, compiled natively): `toZStream` / `toZByteStream` cost 0 bridges,
+  a neutral run 1 per stream. `toZByteStream` peepholes the `Mapped(ZioLeaf, FromChunk)` shape
+  back to the chunk stream (as `toByteStringSource` does for Akka). jdk inherits the
+  publisher-wrapping defaults of `WSClientOutputStreamCore`
