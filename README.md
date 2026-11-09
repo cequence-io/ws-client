@@ -5,13 +5,15 @@ This repository contains a simple and efficient Web Service client implemented i
 
 Pluggable HTTP engines - Play WS (Akka or Pekko), pekko-http, JDK HttpClient, sttp, and zio-http - picked up automatically from the classpath (see *Engine Self-Discovery* below).
 
-**🔥 New in 1.1**: the `ws-client-zio-http` engine (zio-http / Netty + ZIO runtime), consistent streaming errors across engines, and structured HTTP-status failures that services can classify via `handleErrorCodes`.
+**🔥 New in 1.2**: `AsyncStream` - one backend-neutral stream type for every engine, with native interop for Akka, Pekko, fs2 and ZIO (an engine's own `Source` comes back as itself, no bridge), binary-safe downloads on every streaming engine, a neutral `AsyncScheduler`, and Scala 3 artifacts for the Pekko modules (see *Backend-Neutral Streaming* below).
+
+**New in 1.1**: the `ws-client-zio-http` engine (zio-http / Netty + ZIO runtime), consistent streaming errors across engines, and structured HTTP-status failures that services can classify via `handleErrorCodes`.
 
 As a part of this suite we also provide the [json-repair](./json-repair/README.md) library that can be used to fix common JSON syntax errors, repair malformed JSON objects and arrays.
 
 ## Installation 🚀
 
-The currently supported Scala versions are **2.12, 2.13**, and **3** for the Akka-based modules, and **2.13** for the Pekko-based modules (Scala 3 support for Pekko is planned together with a Scala 3.3 LTS upgrade).
+The currently supported Scala versions are **2.12, 2.13** and **3** for the core and the Akka-based modules, and **2.13** and **3** for the Pekko-based modules. The Scala 3 artifacts of the core, Akka, `jdk` and `json-repair` modules are compiled with Scala 3.2, so they serve Scala 3.2 and 3.3+ projects alike; the Pekko, `fs2` and `zio` modules - whose own dependencies need it - build theirs with Scala 3.3 LTS.
 
 To install the library, add the following dependency to your *build.sbt*
 
@@ -44,6 +46,15 @@ If you only need the core abstractions without Akka/Pekko dependencies:
 > ⚠️ **The Akka and Pekko flavors are mutually exclusive on one classpath.** The Pekko modules are generated from the Akka ones and deliberately keep the same package and class names (the same trade-off Play made between 2.9 and 3.0), so downstream code compiles unchanged against either flavor - switch by swapping the artifact and your `Materializer` import. Never depend on both: which classes (implicits such as `asSafeSource` included) actually load then depends on jar order. `WSClientEngineRegistry` detects such duplicated classes at runtime and logs a warning naming the conflicting jars; set the config key `ws-client.strict-classpath = true` (or `-Dws-client.strict-classpath=true`) to fail engine resolution with an exception instead - recommended for CI.
 
 > ℹ️ **Logging:** the library logs through the SLF4J API only and ships no logging backend - bring your own (e.g. logback). Keep `play.shaded.ahc.org.asynchttpclient.netty.handler` at `INFO` or above: at `DEBUG` Play's shaded AsyncHttpClient logs complete request headers, including `Authorization`.
+
+> ℹ️ **1.2.0 - backend-neutral streaming.**
+> - **New:** `AsyncStream`, a stream type every streaming engine returns and every consumer runs: plain `Future`s, Akka, Pekko, fs2 (`ws-client-fs2`) or ZIO (`ws-client-zio`) - see *Backend-Neutral Streaming* below. Also new: binary-safe `Response.bytes` on every engine, download helpers on the service bases, `TransportSettings.httpVersion` (HTTP/1.1 or HTTP/2 on `jdk`), and the Pekko modules and `pekko-http` for Scala 3.3.
+> - **JSON request bodies** on `jdk`, `sttp`, `pekko-http` and `zio-http` are now rendered exactly as the Play engines render them (Play's `Json.toBytes`: characters outside the Basic Multilingual Plane, such as emoji, go out as `\uXXXX` escapes). The body bytes change for request signers; `engine.renderJsonBody` returns them.
+> - **`jdk` query parameters** are RFC 3986-encoded, like the Play engines': a space is sent as `%20` (was `+`).
+> - **Restricted headers:** `jdk` - and `sttp` on its own JDK backend - drop a header `java.net.http` sets itself (`Host`, `Connection`, `Content-Length`, `Expect`, `Upgrade`) with a one-time warning instead of failing the request.
+> - **Streams:** an oversized frame fails with the typed `CequenceWSFrameTooLongException` (a `CequenceWSException`; message unchanged); a stream's non-2xx failure is logged at DEBUG instead of ERROR (it still reaches the caller as `CequenceWSHttpStatusException`); a deadlock of `jdk` / `zio-http` streams - a downstream cancel or request racing the next element or the end of the response - is fixed.
+> - **`TransportSettings`** gained a field: code compiled against 1.1.x keeps working (construction, `copy`, accessors and pattern matches), except, on Scala 2, an explicit call of its synthetic `unapply`, whose result is now a three-element tuple.
+> - **Use one version for all ws-client artifacts** on a classpath: the interop modules call core internals.
 
 > ℹ️ **1.1.5 - security fixes.**
 > - **Query parameters on the Play engines** (`play-akka`, `play-pekko` and their `-stream` variants) are now percent-encoded, as on every other engine. Before, `params` and `extraParams` went into the URL verbatim: a `#` cut the query off (with every parameter after it, extra params included), `&` and `=` split a value, and `+` read as a space. **Behavior change:** if you pre-encoded values for the Play engines, stop - a pre-encoded `a%20b` is now sent as the literal text `a%20b`. A query written into the endpoint string itself is still sent byte for byte.
@@ -93,7 +104,7 @@ Akka flavor (Scala 2.12, 2.13, 3):
 - **ws-client-play-akka** - Play WS 2.x backend implementation (depends on core-akka); named `ws-client-play` before 1.0.0
 - **ws-client-play-akka-stream** - SSE/WebSocket streaming support (akka-http); named `ws-client-play-stream` before 1.0.0
 
-Pekko flavor (Scala 2.13; sources generated from the Akka modules at build time):
+Pekko flavor (Scala 2.13, 3; sources generated from the Akka modules at build time):
 
 - **ws-client-core-pekko** - Pekko-based streaming extensions
 - **ws-client-play-pekko** - Play WS 3.x (`org.playframework`) backend implementation
@@ -103,8 +114,14 @@ Other backends:
 
 - **ws-client-jdk** - backend on the JDK 11+ `java.net.http.HttpClient` (Scala 2.12, 2.13, 3); no Akka/Pekko/Play WS - it needs only `ws-client-core` (play-json, Jackson, Typesafe config, scala-logging)
 - **ws-client-sttp** - backend over [sttp client4](https://sttp.softwaremill.com) (Scala 2.12, 2.13), unlocking any sttp `Future` backend (OkHttp, Armeria, Pekko-HTTP, ...)
-- **ws-client-pekko-http** - direct pekko-http client backend (Scala 2.13), no Play WS / shaded AsyncHttpClient layer; supports input and output (SSE) streaming
+- **ws-client-pekko-http** - direct pekko-http client backend (Scala 2.13 / 3.3), no Play WS / shaded AsyncHttpClient layer; supports input and output (SSE) streaming
 - **ws-client-zio-http** - backend on the [zio-http](https://zio.dev/zio-http) (Netty) client and the ZIO runtime (Scala 2.12, 2.13); output (SSE) streaming via `Flow.Publisher`. Server certificates are verified against the JVM's default trust store (`ClientSSLConfig.FromSystemTrustStore`). A ZIO application can run it on its own `Client` via `ZioHttpWSClientEngine.layer()` - then configure that client's `.ssl(...)` yourself, as zio-http's default trusts any certificate. With a proxy, target host names are still resolved through local DNS
+
+Stream interop (see *Backend-Neutral Streaming*):
+
+- **ws-client-fs2** - `AsyncStream` <-> fs2 `Stream` / `Pipe` (Scala 2.12, 2.13, 3)
+- **ws-client-zio** - `AsyncStream` <-> ZIO `ZStream` / `ZPipeline` (Scala 2.12, 2.13, 3)
+- the Akka / Pekko interop lives in **ws-client-core-akka** / **ws-client-core-pekko**
 
 Independent:
 
@@ -137,16 +154,16 @@ Config keys:
 
 Available engines (auto-selection picks the highest priority present):
 
-| Engine id | Module | Priority | Capabilities |
-|---|---|---|---|
-| `play-pekko-stream` | ws-client-play-pekko-stream | 21 | input + output streaming, multipart |
-| `play-pekko` | ws-client-play-pekko | 20 | input streaming, multipart |
-| `pekko-http` | ws-client-pekko-http | 15 | input + output streaming, multipart |
-| `play-akka-stream` | ws-client-play-akka-stream | 11 | input + output streaming, multipart |
-| `play-akka` | ws-client-play-akka | 10 | input streaming, multipart |
-| `zio-http` | ws-client-zio-http | 7 | output streaming (`Flow.Publisher`), multipart |
-| `sttp` | ws-client-sttp | 5 | multipart |
-| `jdk` | ws-client-jdk | 0 | output streaming (`Flow.Publisher`), multipart (in-memory) |
+| Engine id | Module | Priority | Capabilities | `AsyncStream` (since 1.2) |
+|---|---|---|---|---|
+| `play-pekko-stream` | ws-client-play-pekko-stream | 21 | input + output streaming, multipart | native Pekko `Source` |
+| `play-pekko` | ws-client-play-pekko | 20 | input streaming, multipart | - |
+| `pekko-http` | ws-client-pekko-http | 15 | input + output streaming, multipart | native Pekko `Source` |
+| `play-akka-stream` | ws-client-play-akka-stream | 11 | input + output streaming, multipart | native Akka `Source` |
+| `play-akka` | ws-client-play-akka | 10 | input streaming, multipart | - |
+| `zio-http` | ws-client-zio-http | 7 | output streaming (`Flow.Publisher`), multipart | via `Flow.Publisher` |
+| `sttp` | ws-client-sttp | 5 | multipart | - |
+| `jdk` | ws-client-jdk | 0 | output streaming (`Flow.Publisher`), multipart (in-memory) | via `Flow.Publisher` |
 
 The stream engines are strict supersets of their base engines (same implementation plus SSE/JSON output streaming), hence the slightly higher priorities.
 
@@ -206,6 +223,8 @@ val island = engine.copy(reuseExecContext = false)
 
 **Cookies**: engines keep no cookie jar - a `Set-Cookie` response header is surfaced in `RichResponse.headers` but never stored or sent on a later request, so one site's (or tenant's) cookies can never reach another `SiteBinding`. A site that needs a cookie sends it itself, as a `Cookie` header in its `WsRequestContext` (or from `requestContextFun`).
 
+**Restricted headers**: `java.net.http` refuses a few headers it sets itself (`Host`, `Connection`, `Content-Length`, `Expect`, `Upgrade` on current JDKs). Since 1.2.0 the `jdk` engine - and `sttp` on its own JDK backend - drops such a header with a one-time warning instead of failing the request (up to 1.1.5 the request failed). Whatever the JDK lets through, including `-Djdk.httpclient.allowRestrictedHeaders`, is still sent, and any other header the JDK refuses (JDK 11 before 11.0.14 also refuses e.g. `Referer` and `Origin`) still fails the request. The other engines hand the header to their HTTP library, which may still set its own value (e.g. `Host` from the URL).
+
 **Proxy support**: `TransportSettings.proxyURL` (accepted forms: `host:port` or `scheme://host:port`; only the host and port are used - the proxy is always a plain HTTP proxy, even with an `https://` scheme (`https` targets are still tunnelled through it), and credentials, path or query in the URL are ignored: proxy authentication is not supported) is honored by the Play, `jdk`, `sttp`, and `zio-http` engines (`zio-http` tunnels via `CONNECT` and still resolves the target host through local DNS); the `pekko-http` engine logs a warning and ignores it (pekko-http only supports CONNECT-tunneling proxies).
 
 **Custom error recovery** (`SiteBinding.recoverErrors`) composes with the engine's built-in transport-failure normalization: your partial function sees the Cequence exception taxonomy (`CequenceWSTimeoutException`, `CequenceWSUnknownHostException`, ...) for failures the backend recognizes, so the same recovery logic is portable across engines.
@@ -213,6 +232,53 @@ val island = engine.copy(reuseExecContext = false)
 **Dynamic request context** (`SiteBinding.requestContextFun`): when set, the request context is re-evaluated on every request - e.g. to refresh an expiring auth token - on all engines. Client-level settings (`TransportSettings`: connect timeout, proxy; all timeouts on the Play engines) are captured once, at engine construction or first use.
 
 Note for sbt-assembly users: ServiceLoader registrations live in `META-INF/services`, so fat jars need `MergeStrategy.concat` (or `filterDistinctLines`) for that path.
+
+## Backend-Neutral Streaming 🌊
+
+Since 1.2.0 every streaming engine returns its SSE / JSON and raw byte streams also as an `AsyncStream` (`io.cequence.wsclient.stream`, in `ws-client-core` - no Akka, Pekko, fs2 or ZIO needed), and every consumer runs it: plain `Future`s, Akka, Pekko, fs2 or ZIO.
+
+```scala
+import io.cequence.wsclient.service.spi.WSClientEngineRegistry
+import io.cequence.wsclient.stream.AsyncStream
+
+val engine = WSClientEngineRegistry.outputStreamed()   // any engine with output streaming
+
+val texts: AsyncStream[String] =
+  engine
+    .execJsonAsyncStream(site, "chat/completions", "POST", bodyParams = body)
+    .map(json => (json \ "text").asOpt[String].getOrElse(""))
+    .filter(_.nonEmpty)
+
+texts.runForeach(println)           // runs on the given ExecutionContext - nothing else needed
+```
+
+**Semantics.**
+- **Cold and re-runnable:** building a stream does no I/O; each run is a new request (so a re-run is a new - possibly billed - call). Every thunk (`defer`, a `stateful` init, a publisher factory, `future`, a `concurrently` task, a blocking `open`) runs per run.
+- **Per-run state:** allocate mutable state only inside `AsyncStream.defer`, a `stateful` init or a `statefulMapConcat` create - never when building a stream or a pipe, or every run shares it.
+- **Back-pressured, one consumer per run;** fan-out goes through the hot `AsyncBroadcastHub`.
+- **Cancellation** travels to the leaf: it aborts the HTTP request, closes an `InputStream` or a blocking iterator. A downstream `take(n)` cancels the upstream after the n-th element.
+- **Failures** of user functions (and failed `evalMap` futures) fail the stream with that exception, unwrapped; there is no resume supervision. `guaranteeCase` / `onTerminate` hooks run exactly once per run (`Completed` / `Failed` / `Cancelled`), and a `stateful` end hook and a `Completed` hook finish before the completion goes downstream.
+
+**Operators:** `map`, `mapConcat`, `filter`, `filterNot`, `collect`, `evalMap` (one future at a time), `stateful` / `statefulMapConcat`, `scan`, `fold`, `zipWithIndex`, `take`, `takeWhile`, `drop`, `concat` / `++`, `flatMapConcat`, `via(pipe)`, `zipVia`, `mapError`, `recover`, `recoverWith`, `onTerminate` / `guaranteeCase`, `concurrently(task, awaitCompletion)`, `preflight`. **Running:** `runForeach`, `runFold`, `runToSeq`, `runHead(Option)`, `runLast(Option)`, `runDrain`, `run(f)` (cancellable), `toPublisher`; `describe` shows the plan (never elements). `AsyncPipe[A, B]` is a reusable transformation with the same operators (`AsyncPipe.of[A].map(...)`); `ByteFraming.delimiter` / `lines` and `JsonStreamPipes.jsonFrames` frame any byte stream exactly as the engines do. Byte streams carry the immutable `Bytes`.
+
+**Interop - native round trips.** A stream is a plan, so a backend runs its own streams natively: an Akka engine's stream consumed as an Akka `Source` is that engine's own `Source`, with every operator an Akka stage - `source.toAsyncStream.toSource eq source`. A bridge through `java.util.concurrent.Flow` is built only at a foreign leaf (once) or a foreign native pipe (twice).
+
+| Library | Module | Import | To | From |
+|---|---|---|---|---|
+| Akka | ws-client-core-akka | `io.cequence.wsclient.stream.SourceInterop._` | `.toSource`, `.toByteStringSource`, `.toFlow` | `.toAsyncStream`, `.toAsyncByteStream`, `.toAsyncPipe` |
+| Pekko | ws-client-core-pekko | the same names | the same | the same |
+| fs2 | ws-client-fs2 | `io.cequence.wsclient.stream.Fs2Interop._` | `.toFs2[F]`, `.toFs2Pipe[F]` | `.toAsyncStream` (needs an `Fs2Runner`, e.g. from an `IORuntime`), `Fs2Interop.fromFs2Pipe` |
+| ZIO | ws-client-zio | `io.cequence.wsclient.stream.ZioInterop._` | `.toZStream`, `.toZStreamFunction` | `.toAsyncStream` (needs a `Runtime`), `ZioInterop.fromZPipeline` |
+
+The `Materializer` / `Fs2Runner` / `Runtime` a conversion takes is used only when the stream is consumed outside its own library. For 1.x code written against Akka `Source`s, `import io.cequence.wsclient.stream.SourceConversions._` (likewise `Fs2Conversions._`, `ZioConversions._`) adds opt-in implicit conversions - e.g. `stream.runWith(Sink.foreach(println))` compiles unchanged; they are `implicit def`s, warning-free under `-feature` on Scala 2 and 3. Count bridges in a test with `StreamDiagnostics.counted(stream.toSource)` - scoped to the streams compiled or started inside it. Three differences between backends: on a failure, Akka's / Pekko's asynchronous stages (`flatMapConcat`, `mapAsync`) fail fast and may drop elements still in flight, where the neutral interpreter, fs2 and ZIO deliver them before the failure; and fs2 / ZIO read an iterator (`fromIterator`, a `mapConcat` result) up to 64 elements ahead, one chunk, where the neutral interpreter and Akka read one element per demand - an iterator with side effects can be advanced past an early stop there; and on ZIO, a ZIO stream that ends with an interruption it raised itself (e.g. joining an interrupted fiber) stays an interruption (`recover` / `mapError` do not apply, `onTerminate` sees `Cancelled`), where the other backends see a failure. A pipe turned into an Akka `Flow` (`toFlow`) reads the flow's input once: a pipe that reads its input twice fails there.
+
+**Services and downloads.** `WSClientWithEngineAsyncStreamingBase` is the backend-neutral counterpart of `WSClientWithEngineOutputStreamingBase` (same method names, so porting a service is a mixin swap): `execJsonStream` / `execRawStream` return `AsyncStream`s whose non-2xx failures go through the service's `handleErrorCodes`, and binary-safe downloads work on every streaming engine - `execGETBytes` / `execPOSTBytes` collect the body (at most `maxBytes`, 256 MiB by default), `execGETStream` / `execPOSTStream` complete once the body started - its first chunk arrived, or it ended (`None` for a 404) - with a single-run stream of the body. A service on the plain `WSClientWithEngineBase` gets the same downloads as the protected `execBytesDownload` / `execStreamDownload` (GET, POST, PUT, PATCH or DELETE; body parameters on POST / PUT / PATCH only) - on an engine without output streaming they buffer the response (a single-element stream). A collected streamed download is bounded per engine (the Play stream engines by the request timeout, `jdk` / `zio-http` only by the gaps between chunks): for a total bound, run the stream of `execStreamDownload` and cancel it on a timer. Buffered responses are binary-safe too: `Response.bytes` is the body exactly as received, on every engine (the text stays in `string`); `BytesBackedResponse` is the bytes-first `Response` for your own code. `DeferredPublisher` (a cold `Flow.Publisher` that calls its factory on subscription - single-shot: a second subscriber gets `onError(IllegalStateException)`; wrap it in `AsyncStream.fromPublisher(() => ...)` for a re-runnable stream) is public as well.
+
+**More:** `AsyncBroadcastHub(upstream, bufferSize, drain)` - a hot fan-out whose `source(prefix)` registers a consumer per run; `preflight` - start a run now and fail early (e.g. on a 404) before handing the stream on; `AsyncStream.fromInputStream` / `fromBlockingIterator` - blocking sources read on a dedicated pool; `io.cequence.wsclient.concurrent.AsyncScheduler` / `Futures.after` / `delay` / `timeout` - timers without an actor system (the default is in implicit scope; `ActorSchedulers._` adapts an Akka / Pekko scheduler, `ZioInterop.scheduler` ZIO's clock); `PollingHelperCore` and `ParallelServiceAdapters.parallelTakeFirst` - Akka-free polling and parallel calls.
+
+**Engine resolution.** `sttp`, `play-akka` and `play-pekko` have no output streaming: resolve streamed services through `WSClientEngineRegistry.outputStreamed`, which picks the highest-priority engine that streams - with `play-akka` and `jdk` on one classpath, streams then run on `jdk`.
+
+**Request signing** (e.g. AWS SigV4): `engine.renderJsonBody(json)` is the exact JSON text an engine sends - every engine renders bodies the same way, as Play WS does (`WireFormat.jsonBody`) - and `engine.wireUrl(site, endPoint, endPointParam, params)` the exact URL, query parameters included. The Play and `jdk` engines send a query written into the endpoint string byte for byte; `sttp`, `pekko-http` and `zio-http` re-render URLs, which `wireUrl` reflects. With a `requestContextFun`, `wireUrl` and the request each evaluate it - sign and send with one fixed binding: `site.copy(requestContext = site.requestContextFn(), requestContextFun = None)`. `TransportSettings.httpVersion` selects HTTP/1.1 or HTTP/2 on the `jdk` engine.
 
 ## License ⚖️
 
