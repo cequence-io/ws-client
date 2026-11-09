@@ -38,6 +38,19 @@ private[wsclient] trait EngineSupport { self: WSClientEngine =>
 
 private[wsclient] object EngineSupport {
 
+  /**
+   * The charset parameter of a Content-Type header value; UTF-8 when absent, malformed or
+   * unsupported (java.net.http's `BodyHandlers.ofString` rule).
+   */
+  def charsetOf(contentType: Option[String]): java.nio.charset.Charset =
+    contentType.flatMap { value =>
+      value.split(';').iterator.drop(1).map(_.trim).collectFirst {
+        case param if param.toLowerCase(java.util.Locale.ROOT).startsWith("charset=") =>
+          param.substring("charset=".length).trim.stripPrefix("\"").stripSuffix("\"")
+      }
+    }.flatMap(name => scala.util.Try(java.nio.charset.Charset.forName(name)).toOption)
+      .getOrElse(java.nio.charset.StandardCharsets.UTF_8)
+
   val DefaultRequestTimeoutMs: Int = 120 * 1000 // two minutes
   val DefaultConnectTimeoutMs: Int = 5 * 1000 // the Play engines' AHC default
 
