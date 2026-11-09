@@ -1,0 +1,369 @@
+package io.cequence.wsclient.stream
+
+import io.cequence.wsclient.stream.AsyncStream.Step
+import io.cequence.wsclient.stream.ZioInterop._
+import org.scalatest.matchers.should.Matchers
+import org.scalatest.wordspec.AnyWordSpec
+import zio.stream.{ZPipeline, ZStream}
+import zio.{Runtime, Unsafe, ZIO}
+
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.{ConcurrentLinkedQueue, TimeUnit}
+import scala.collection.JavaConverters._
+import scala.concurrent.duration._
+import scala.concurrent.{Await, ExecutionContext, Future, Promise}
+import scala.util.{Failure, Random, Success, Try}
+
+class ZioInteropSpec extends AnyWordSpec with Matchers {
+
+  implicit private val runtime: Runtime[Any] = Runtime.default
+  implicit private val ec: ExecutionContext = ExecutionContext.global
+
+  private def unsafeRun[T](effect: ZIO[Any, Throwable, T]): T =
+    Unsafe.unsafe { implicit unsafe =>
+      Await.result(runtime.unsafe.runToFuture(effect), 15.seconds)
+    }
+
+  private def runZio[A](stream: ZStream[Any, Throwable, A]): Seq[A] = unsafeRun(
+    stream.runCollect
+  )
+
+  private def eventually(assertion: => Unit): Unit = {
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+    var done = false
+    while (!done) {
+      try {
+        assertion
+        done = true
+      } catch { case _: Throwable if System.nanoTime() < deadline => Thread.sleep(10) }
+    }
+  }
+
+  "the ZIO interop" should {
+
+    "give back the same ZStream" in {
+      val stream = ZStream(1, 2, 3)
+      stream.toAsyncStream.toZStream should be theSameInstanceAs stream
+    }
+
+    "run operators on a native leaf natively - no bridge" in {
+      val stream = ZStream
+        .range(1, 11)
+        .toAsyncStream
+        .map(_ * 2)
+        .filter(_ % 3 != 0)
+        .stateful(() => 0)(
+          (
+            sum,
+            a
+          ) => Step(sum + a, List(a)),
+          sum => List(-sum)
+        )
+        .evalMap(a => Future.successful(a))
+        .flatMapConcat(a => AsyncStream(a))
+        .concat(AsyncStream.single(0))
+        .onTerminate(_ => ())
+        .concurrently(() => Future.unit)
+        .recover { case _ => -1 }
+        .via(ZioInterop.fromZPipeline(ZPipeline.map[Int, Int](identity)))
+
+      val (compiled, bridges) = StreamDiagnostics.counted(stream.toZStream)
+      runZio(compiled) shouldBe Seq(2, 4, 8, 10, 14, 16, 20, -74, 0)
+      bridges.get shouldBe 0
+    }
+
+    "bridge a foreign leaf once, and a native ZIO leaf consumed neutrally once" in {
+      val (compiled, bridges) = StreamDiagnostics.counted(
+        AsyncStream.fromPublisher(() => AsyncStream(1, 2).toPublisher[Int]).toZStream
+      )
+      runZio(compiled) shouldBe Seq(1, 2)
+      bridges.get shouldBe 1
+
+      val (neutral, neutralBridges) =
+        StreamDiagnostics.counted(ZStream(1, 2, 3).toAsyncStream.map(_ * 10).runToSeq)
+      Await.result(neutral, 15.seconds) shouldBe Seq(10, 20, 30)
+      neutralBridges.get shouldBe 1
+    }
+
+    "apply a non-native pipe to a ZStream without a bridge" in {
+      val pipe = AsyncPipe
+        .of[Int]
+        .map(_ + 1)
+        .stateful(() => 0)(
+          (
+            n,
+            a
+          ) => Step(n + 1, List(a * n))
+        )
+      val (function, bridges) = StreamDiagnostics.counted(pipe.toZStreamFunction)
+      runZio(function(ZStream(1, 2, 3, 4))) shouldBe Seq(0, 3, 8, 15)
+      runZio(function(ZStream(1, 2, 3, 4))) shouldBe Seq(0, 3, 8, 15)
+      bridges.get shouldBe 0
+    }
+
+    "be cold: thunks run per run, never at compile time" in {
+      val deferred, inits, tasks, opens = new AtomicInteger()
+      val compiled = AsyncStream.defer {
+        deferred.incrementAndGet(); AsyncStream(1, 2)
+      }.stateful { () => inits.incrementAndGet(); 0 }(
+        (
+          s,
+          a
+        ) => Step(s, List(a))
+      ).concat(AsyncStream.fromBlockingIterator { () => opens.incrementAndGet(); Iterator(3) })
+        .concurrently { () => tasks.incrementAndGet(); Future.unit }
+        .toZStream
+      Seq(deferred, inits, tasks, opens).map(_.get()) shouldBe Seq(0, 0, 0, 0)
+      runZio(compiled) shouldBe Seq(1, 2, 3)
+      runZio(compiled) shouldBe Seq(1, 2, 3)
+      Seq(deferred, inits, tasks, opens).map(_.get()) shouldBe Seq(2, 2, 2, 2)
+    }
+
+    "report termination causes once - a downstream stop is Cancelled" in {
+      val causes = new ConcurrentLinkedQueue[Termination]()
+      def tracked(s: AsyncStream[Int]) = s.onTerminate(t => causes.add(t)).toZStream
+
+      runZio(tracked(AsyncStream(1, 2))) shouldBe Seq(1, 2)
+      val boom = new RuntimeException("boom")
+      Try(
+        runZio(tracked(AsyncStream(1) ++ AsyncStream.failed(boom)))
+      ).failed.get shouldBe theSameInstanceAs(boom)
+      runZio(tracked(AsyncStream(1, 2, 3)).take(1)) shouldBe Seq(1)
+      eventually(causes.size shouldBe 3)
+      causes.asScala.toList shouldBe List(
+        Termination.Completed,
+        Termination.Failed(boom),
+        Termination.Cancelled
+      )
+    }
+
+    "fail with a user function's exception (a failure, not a defect), after the outputs before it" in {
+      val boom = new IllegalArgumentException("boom")
+      val compiled = AsyncStream(1, 2, 3, 4).map(i => if (i == 3) throw boom else i).toZStream
+      val seen = new ConcurrentLinkedQueue[Int]()
+      val result = unsafeRun(compiled.mapZIO(i => ZIO.succeed(seen.add(i))).runDrain.either)
+      result shouldBe Left(boom)
+      seen.asScala.toList shouldBe List(1, 2)
+
+      // recover sees it - it is a failure
+      runZio(
+        AsyncStream(1, 2)
+          .map(i => if (i == 2) throw boom else i)
+          .recover { case _ => -1 }
+          .toZStream
+      ) shouldBe
+        Seq(1, -1)
+    }
+
+    "fail on a concurrent task's failure, await it when asked" in {
+      val taskError = new RuntimeException("kickoff")
+      Try(
+        runZio(
+          AsyncStream
+            .future(Promise[Int]().future)
+            .concurrently(() => Future.failed(taskError))
+            .toZStream
+        )
+      ).failed.get shouldBe theSameInstanceAs(taskError)
+      runZio(
+        AsyncStream(1).concurrently(() => Future.unit, awaitCompletion = true).toZStream
+      ) shouldBe Seq(1)
+    }
+
+    "close blocking sources once, run ZIO's scheduler, stay stack-safe on recursive concats" in {
+      val closes = new AtomicInteger()
+      runZio(
+        AsyncStream
+          .fromBlockingIterator(() => Iterator(1, 2, 3), () => closes.incrementAndGet())
+          .toZStream
+          .take(2)
+      ) shouldBe Seq(1, 2)
+      eventually(closes.get() shouldBe 1)
+
+      val ran = Promise[Unit]()
+      ZioInterop.scheduler.scheduleOnce(10.millis)(() => ran.success(()))
+      Await.result(ran.future, 10.seconds) shouldBe (())
+
+      def ones: AsyncStream[Int] = AsyncStream.single(1) ++ ones
+      runZio(ones.take(100000).toZStream).size shouldBe 100000
+    }
+
+    "read a lazy or infinite expansion lazily - at most one chunk ahead" in {
+      val produced = new AtomicInteger()
+      val infinite = new scala.collection.immutable.Iterable[Int] {
+        def iterator: Iterator[Int] =
+          Iterator.from(0).map { i => produced.incrementAndGet(); i }
+      }
+      runZio(AsyncStream.single(0).mapConcat(_ => infinite).take(3).toZStream) shouldBe
+        Seq(0, 1, 2)
+      produced.get should be <= ZioCompiler.MaxOutputChunk
+      runZio(
+        AsyncStream(1, 2)
+          .stateful(() => 0)(
+            (
+              s,
+              a
+            ) => Step(s + a, List.fill(100)(a)),
+            _ => infinite
+          )
+          .take(205)
+          .toZStream
+      ) shouldBe (List.fill(100)(1) ++ List.fill(100)(2) ++ (0 until 5))
+    }
+
+    "treat a native ZIO leaf's defect as a failure for recover, mapError and onTerminate" in {
+      val boom = new IllegalStateException("boom")
+      // 1, then a defect (ZIO's map over a chunk loses the whole chunk: 1 in a chunk of its own)
+      val dying = ZStream(1) ++ ZStream(2).map(i => if (i == 2) throw boom else i)
+
+      runZio(dying.toAsyncStream.recover { case _ => 0 }.toZStream) shouldBe Seq(1, 0)
+      Try(
+        runZio(
+          dying.toAsyncStream.mapError { case e =>
+            new IllegalArgumentException(e.getMessage)
+          }.toZStream
+        )
+      ).failed.get shouldBe an[IllegalArgumentException]
+
+      val causes = new ConcurrentLinkedQueue[Termination]()
+      Try(runZio(dying.toAsyncStream.onTerminate(t => causes.add(t)).toZStream))
+      eventually(causes.size shouldBe 1)
+      causes.peek() shouldBe Termination.Failed(boom)
+    }
+
+    "keep a throwing mapError guard a failure, never a defect" in {
+      val result = unsafeRun(
+        AsyncStream
+          .failed[Int](new RuntimeException()) // getMessage is null
+          .mapError { case e if e.getMessage.startsWith("429") => new IllegalStateException() }
+          .toZStream
+          .runCollect
+          .either
+      )
+      result.left.toOption.get shouldBe a[NullPointerException]
+    }
+
+    "release a resource acquired while a cancel waited for the pull (exactly once)" in {
+      val acquired, released = new AtomicInteger()
+      val slowAcquire = ZStream
+        .acquireReleaseWith(
+          (ZIO.sleep(zio.Duration.fromMillis(300)) *> ZIO
+            .succeed(acquired.incrementAndGet())).uninterruptible
+        )(_ => ZIO.succeed(released.incrementAndGet()))
+        .flatMap(_ => ZStream.never)
+      val run = slowAcquire.toAsyncStream.run(_ => ())
+      Thread.sleep(50) // the pull is inside the uninterruptible acquire
+      run.cancel()
+      Await.result(run.done, 15.seconds)
+      eventually {
+        acquired.get shouldBe 1
+        released.get shouldBe 1
+      }
+    }
+
+    "cancel a scheduled task exactly when cancel() wins - never both, never neither" in {
+      val runs = new AtomicInteger()
+      val pending = ZioInterop.scheduler.scheduleOnce(300.millis)(() => {
+        runs.incrementAndGet(); ()
+      })
+      pending.cancel() shouldBe true
+      pending.isCancelled shouldBe true
+      pending.cancel() shouldBe false
+      Thread.sleep(500) // past the delay: the cancelled task never runs
+      runs.get shouldBe 0
+
+      val ran = Promise[Unit]()
+      val done = ZioInterop.scheduler.scheduleOnce(1.milli)(() => { ran.success(()); () })
+      Await.result(ran.future, 10.seconds)
+      done.cancel() shouldBe false
+      done.isCancelled shouldBe false
+    }
+
+    "agree with the neutral interpreter on random operator chains (200 seeds)" in {
+      (1 to 200).foreach { seed =>
+        def chain(): AsyncStream[Int] = {
+          val random = new Random(seed)
+          val source = Vector.fill(random.nextInt(10))(random.nextInt(15))
+          val base =
+            if (random.nextInt(4) == 0)
+              AsyncStream.fromIterable(source) ++ AsyncStream.failed(
+                new RuntimeException("source")
+              )
+            else AsyncStream.fromIterable(source)
+          (1 to 1 + random.nextInt(6)).foldLeft(base) {
+            (
+              s,
+              depth
+            ) =>
+              random.nextInt(13) match {
+                case 0 => val k = random.nextInt(5); s.map(_ + k)
+                case 1 => s.filter(_ % 2 != 0)
+                case 2 => s.mapConcat(i => List.fill(i % 3)(i))
+                case 3 => s.take(random.nextInt(6).toLong)
+                case 4 =>
+                  val l = random.nextInt(15);
+                  s.takeWhile(_ < l, inclusive = random.nextBoolean())
+                case 5 => s.drop(random.nextInt(3).toLong)
+                case 6 =>
+                  s.scan(0)(
+                    (
+                      a,
+                      i
+                    ) => (a + i) % 1000
+                  )
+                case 7 =>
+                  s.fold(0)(
+                    (
+                      a,
+                      i
+                    ) => (a + i) % 1000
+                  )
+                case 8  => s ++ AsyncStream(random.nextInt(9))
+                case 9  => s.flatMapConcat(i => AsyncStream.fromIterable(List.fill(i % 3)(i)))
+                case 10 => s.evalMap(i => Future.successful(i + 1))
+                case 11 =>
+                  val target = random.nextInt(15)
+                  s.map(i =>
+                    if (i == target) throw new RuntimeException(s"boom@$depth") else i
+                  )
+                case _ => s.recover { case e => -e.getMessage.length }
+              }
+          }
+        }
+
+        def outcome(run: (AsyncStream[Int], Int => Unit) => Future[Any])
+          : (Seq[Int], Option[String]) = {
+          val seen = new ConcurrentLinkedQueue[Int]()
+          val result = Try(Await.result(run(chain(), i => { seen.add(i); () }), 15.seconds))
+          (
+            seen.asScala.toList,
+            result match {
+              case Success(_) => None
+              case Failure(e) => Some(e.getMessage)
+            }
+          )
+        }
+
+        val native = outcome(
+          (
+            s,
+            f
+          ) =>
+            Unsafe.unsafe { implicit unsafe =>
+              runtime.unsafe.runToFuture(s.toZStream.runForeach(i => ZIO.succeed(f(i))))
+            }
+        )
+        val neutral = outcome(
+          (
+            s,
+            f
+          ) => s.runForeach(f)
+        )
+        withClue(s"seed $seed, plan ${chain().describe}: ") {
+          native shouldBe neutral
+        }
+      }
+    }
+  }
+
+}
