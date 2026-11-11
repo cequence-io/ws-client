@@ -4,7 +4,7 @@ Release notes of ws-client, newest first. **Behavior change** marks what existin
 Use one version for all ws-client artifacts on a classpath (see
 [Compatibility and upgrading](docs/compatibility.md)).
 
-## 1.2.0 (unreleased) - backend-neutral streaming
+## 1.2.0 (2026-11-11) - backend-neutral streaming
 
 **New**
 
