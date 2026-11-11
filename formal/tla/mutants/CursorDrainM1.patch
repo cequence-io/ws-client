@@ -1,0 +1,13 @@
+--- a/CursorDrain.tla
++++ b/CursorDrain.tla
+@@ -242,9 +242,7 @@
+       goto B6;
+     end if;
+ B4: cursorOpen := TRUE;               \* cursor = opener.open(ctx)
+-B5: if cancelled then                 \* cancelled meanwhile
+-      cursorCancelled := TRUE;
+-    end if;
++B5: skip;
+ B6: call DrainLoop();                 \* releases the count taken above
+ W1: await pendingDrains > 0 \/ Quiet;
+     if pendingDrains > 0 then

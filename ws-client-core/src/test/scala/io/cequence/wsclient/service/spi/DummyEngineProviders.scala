@@ -20,7 +20,7 @@ import scala.concurrent.{ExecutionContext, Future}
  * several [[SiteBinding]]s and assert that each call is correctly isolated to its own site.
  * Every other request fails with [[UnsupportedOperationException]].
  */
-final class DummyEngine extends WSClientEngine {
+class DummyEngine extends WSClientEngine {
 
   override protected implicit val ec: ExecutionContext = ExecutionContext.global
 

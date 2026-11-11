@@ -1,0 +1,11 @@
+--- a/TransformChain.tla
++++ b/TransformChain.tla
+@@ -278,7 +278,7 @@
+ procedure Flush(s)
+ variables missed = 0;
+ begin
+-F1: if lock[s] = self then            \* holds the monitor: left to the outermost frame
++F1: if FALSE then            \* holds the monitor: left to the outermost frame
+       return;
+     elsif upstreamCalls[s] # 0 then   \* a loop is running: it takes the calls over
+       upstreamCalls[s] := upstreamCalls[s] + 1;

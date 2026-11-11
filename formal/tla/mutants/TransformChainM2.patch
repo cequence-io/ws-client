@@ -1,0 +1,11 @@
+--- a/TransformChain.tla
++++ b/TransformChain.tla
+@@ -321,7 +321,7 @@
+       goto F6;
+     end if;
+ F5: inUpstream := inUpstream - 1;
+-F6: if upstreamCalls[s] = missed then \* missed = upstreamCalls.addAndGet(-missed)
++F6: if TRUE then \* missed = upstreamCalls.addAndGet(-missed)
+       upstreamCalls[s] := 0;
+       return;
+     else

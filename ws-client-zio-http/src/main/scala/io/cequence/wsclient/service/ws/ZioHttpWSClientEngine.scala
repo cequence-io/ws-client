@@ -8,13 +8,17 @@ import io.cequence.wsclient.service.{
   WSClientOutputStreamCore
 }
 import io.cequence.wsclient.stream.{
+  AsyncStream,
+  Bytes,
   DeferredPublisher,
   ErrorMappedPublisher,
+  JsonStreamPipes,
   StreamTransformers,
-  TransformPublisher
+  TransformPublisher,
+  ZioInterop
 }
 import org.reactivestreams.FlowAdapters
-import play.api.libs.json.{JsValue, Json}
+import play.api.libs.json.JsValue
 import zio.http.netty.NettyConfig
 import zio.http.netty.client.NettyClientDriver
 import zio.http.{
@@ -37,7 +41,7 @@ import zio.http.{
 }
 import zio.interop.reactivestreams.Adapters
 import zio.stream.ZStream
-import zio.{Chunk, Exit, Runtime, Scope, Unsafe, ZEnvironment, ZIO, ZLayer}
+import zio.{Cause, Chunk, Exit, Runtime, Scope, Unsafe, ZEnvironment, ZIO, ZLayer}
 
 import io.netty.channel.nio.NioIoHandler
 import io.netty.channel.socket.nio.NioSocketChannel
@@ -455,47 +459,15 @@ final class ZioHttpWSClientEngine private[ws] (
     // deferred: the request fires only when the first subscriber arrives (cold publisher),
     // and a second subscription is rejected (single-shot)
     new DeferredPublisher(() => {
-      val label = serviceAndEndpoint(site, Some(endPoint))
-      val body = if (bodyParams.nonEmpty) jsonBody(toJsBodyObject(bodyParams)) else noBody
-
-      val bytes: ZStream[Any, Throwable, ByteBuffer] = ZStream.unwrapScoped[Any] {
-        buildRequest(
-          site,
-          Method.fromString(method),
-          endPoint,
-          endPointParam,
-          params,
-          extraHeaders,
-          body
-        ).flatMap(request =>
-          ZClient.streaming(request).provideSomeEnvironment[Scope](_.add[Client](client))
-        ).timeoutFail(timeoutException(label))(requestTimeout)
-          .flatMap { response =>
-            if (response.status.isSuccess)
-              ZIO.succeed(
-                response.body.asStream.chunks.map(chunk => ByteBuffer.wrap(chunk.toArray))
-              )
-            else
-              // never expose an error page as stream data - fail with a bounded diagnostic:
-              // at most EngineSupport.MaxErrorBodyBytes are read, within the error-body read
-              // timeout, so a huge or never-ending error body is neither buffered nor able to
-              // stall the stream
-              response.body.asStream
-                .take(EngineSupport.MaxErrorBodyBytes)
-                .runCollect
-                .timeout(errorBodyReadTimeout)
-                .map(bytes =>
-                  new String(bytes.getOrElse(Chunk.empty).toArray, StandardCharsets.UTF_8)
-                )
-                // a failed diagnostic read must not mask the HTTP status
-                .orElseSucceed("")
-                .map(errorBody =>
-                  ZStream.fail(
-                    EngineSupport.streamStatusException(label, response.status.code, errorBody)
-                  )
-                )
-          }
-      }
+      val bytes = bodyChunks(
+        site,
+        endPoint,
+        method,
+        endPointParam,
+        params,
+        bodyParams,
+        extraHeaders
+      ).map(chunk => ByteBuffer.wrap(chunk.toArray))
 
       val publisher = Unsafe.unsafe { implicit u =>
         runtime.unsafe.run(Adapters.streamToPublisher(bytes)).getOrThrowFiberFailure()
@@ -506,6 +478,108 @@ final class ZioHttpWSClientEngine private[ws] (
         mapStreamError(site, endPoint)
       )
     })
+
+  // backend-neutral streams as NATIVE ZIO leaves (since 1.2.0): a ZIO consumer (`toZStream`,
+  // `toZByteStream`) gets this engine's own stream - no bridge; any other consumer runs it on
+  // this engine's runtime. The request fires per run (`ZStream.suspend`), and interrupting
+  // the run closes its scope, which aborts the request
+  override def execJsonAsyncStream(
+    site: SiteBinding,
+    endPoint: String,
+    method: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])],
+    bodyParams: Seq[(String, Option[JsValue])],
+    extraHeaders: Seq[(String, String)],
+    framingDelimiter: String,
+    maxFrameLength: Option[Int],
+    stripPrefix: Option[String],
+    stripSuffix: Option[String]
+  ): AsyncStream[JsValue] =
+    execRawAsyncStream(site, endPoint, method, endPointParam, params, bodyParams, extraHeaders)
+      .via(
+        JsonStreamPipes.jsonFrames(
+          framingDelimiter,
+          maxFrameLength.getOrElse(JsonStreamFrames.DefaultMaxFrameLength),
+          stripPrefix,
+          stripSuffix
+        )
+      )
+      .mapError { case e => mapStreamError(site, endPoint)(e) }
+
+  override def execRawAsyncStream(
+    site: SiteBinding,
+    endPoint: String,
+    method: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])],
+    bodyParams: Seq[(String, Option[JsValue])],
+    extraHeaders: Seq[(String, String)]
+  ): AsyncStream[Bytes] =
+    ZioInterop.byteChunkEngineLeaf(
+      ZStream.suspend(
+        bodyChunks(site, endPoint, method, endPointParam, params, bodyParams, extraHeaders)
+          // the Cequence taxonomy, as on the publisher path (a defect too; an interruption
+          // stays one)
+          .mapErrorCause(cause =>
+            if (cause.isInterruptedOnly) cause
+            else Cause.fail(mapStreamError(site, endPoint)(cause.squash))
+          )
+      ),
+      runtime
+    )
+
+  // the response body as received, once the status was checked; built per call - the request
+  // context, the body and the request itself are evaluated when the stream runs
+  private def bodyChunks(
+    site: SiteBinding,
+    endPoint: String,
+    method: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])],
+    bodyParams: Seq[(String, Option[JsValue])],
+    extraHeaders: Seq[(String, String)]
+  ): ZStream[Any, Throwable, Chunk[Byte]] = {
+    val label = serviceAndEndpoint(site, Some(endPoint))
+    val body = if (bodyParams.nonEmpty) jsonBody(toJsBodyObject(bodyParams)) else noBody
+
+    ZStream.unwrapScoped[Any] {
+      buildRequest(
+        site,
+        Method.fromString(method),
+        endPoint,
+        endPointParam,
+        params,
+        extraHeaders,
+        body
+      ).flatMap(request =>
+        ZClient.streaming(request).provideSomeEnvironment[Scope](_.add[Client](client))
+      ).timeoutFail(timeoutException(label))(requestTimeout)
+        .flatMap { response =>
+          if (response.status.isSuccess)
+            ZIO.succeed(response.body.asStream.chunks)
+          else
+            // never expose an error page as stream data - fail with a bounded diagnostic:
+            // at most EngineSupport.MaxErrorBodyBytes are read, within the error-body read
+            // timeout, so a huge or never-ending error body is neither buffered nor able to
+            // stall the stream
+            response.body.asStream
+              .take(EngineSupport.MaxErrorBodyBytes)
+              .runCollect
+              .timeout(errorBodyReadTimeout)
+              .map(bytes =>
+                new String(bytes.getOrElse(Chunk.empty).toArray, StandardCharsets.UTF_8)
+              )
+              // a failed diagnostic read must not mask the HTTP status
+              .orElseSucceed("")
+              .map(errorBody =>
+                ZStream.fail(
+                  EngineSupport.streamStatusException(label, response.status.code, errorBody)
+                )
+              )
+        }
+    }
+  }
 
   private def mapStreamError(
     site: SiteBinding,
@@ -558,8 +632,10 @@ final class ZioHttpWSClientEngine private[ws] (
         body
       )
       response <- ZClient.batched(request).provideEnvironment(ZEnvironment[Client](client))
-      text <- response.body.asString
-    } yield toRichResponse(site, endPoint, response, text, acceptableStatusCodes)
+      // a batched response's body is in memory: read once - the text UTF-8, as zio-http's
+      // `asString` decodes it, the raw bytes kept where they differ (binary-safe `bytes`)
+      bytes <- response.body.asArray
+    } yield toRichResponse(site, endPoint, response, bytes, acceptableStatusCodes)
 
     run(effect.timeoutFail(timeoutException(label))(requestTimeout))
       .recover(recoverErrors(site)(label))
@@ -580,21 +656,8 @@ final class ZioHttpWSClientEngine private[ws] (
     val headers = requestContext.authHeaders ++ extraHeaders
     val callerContentType = headers.exists { case (name, _) => isContentType(name) }
 
-    val queryParams = (params ++ requestContext.extraParams.map { case (key, value) =>
-      (key, Some(value))
-    }).collect { case (key, Some(value)) => (key, value.toString) }
-
     for {
-      baseUrl <- ZIO.fromEither(URL.decode(site.createURL(Some(endPoint), endPointParam)))
-      // appended to (never replacing) a query already embedded in coreUrl/endPoint
-      url =
-        if (queryParams.isEmpty) baseUrl
-        else
-          baseUrl.addQueryParams(
-            QueryParams(queryParams.map { case (key, value) =>
-              key -> Chunk.single(value)
-            }: _*)
-          )
+      url <- ZIO.fromEither(requestUrl(site, requestContext, endPoint, endPointParam, params))
       requestBody <- body(callerContentType)
     } yield Request(
       method = method,
@@ -608,20 +671,57 @@ final class ZioHttpWSClientEngine private[ws] (
     site: SiteBinding,
     endPoint: String,
     response: Response,
-    body: String,
+    bytes: Array[Byte],
     acceptableStatusCodes: Seq[Int]
   ): RichResponse = {
     val code = response.status.code
+    val body =
+      ResponseBodies(bytes, StandardCharsets.UTF_8, serviceName(site), Some(endPoint))
 
     SimpleRichResponse(
       if (acceptableStatusCodes.contains(code))
-        Some(StringBackedResponse(body, serviceName(site), Some(endPoint)))
+        Some(body)
       else None,
-      status = StatusData(code, body),
+      status = StatusData(code, body.string),
       headers = response.headers.toList.groupBy(_.headerName).map { case (name, headers) =>
         name -> headers.map(_.renderedValue)
       }
     )
+  }
+
+  // zio-http parses and re-renders the URL: the wire form is zio-http's rendering of it
+  override def wireUrl(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil
+  ): String =
+    requestUrl(site, site.requestContextFn(), endPoint, endPointParam, params) match {
+      case Right(url) => url.encode
+      case Left(e)    => throw e
+    }
+
+  private def requestUrl(
+    site: SiteBinding,
+    requestContext: WsRequestContext,
+    endPoint: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])]
+  ): Either[Exception, URL] = {
+    val queryParams = (params ++ requestContext.extraParams.map { case (key, value) =>
+      (key, Some(value))
+    }).collect { case (key, Some(value)) => (key, value.toString) }
+
+    URL.decode(site.createURL(Some(endPoint), endPointParam)).map { baseUrl =>
+      // appended to (never replacing) a query already embedded in coreUrl/endPoint
+      if (queryParams.isEmpty) baseUrl
+      else
+        baseUrl.addQueryParams(
+          QueryParams(queryParams.map { case (key, value) =>
+            key -> Chunk.single(value)
+          }: _*)
+        )
+    }
   }
 
   // a body, given whether the CALLER already supplies a Content-Type header: zio-http lets a
@@ -632,7 +732,7 @@ final class ZioHttpWSClientEngine private[ws] (
   private val noBody: BodyFactory = _ => ZIO.succeed(Body.empty)
 
   private def jsonBody(json: JsValue): BodyFactory = callerContentType => {
-    val body = Body.fromString(Json.stringify(json))
+    val body = Body.fromString(renderJsonBody(json))
     ZIO.succeed(if (callerContentType) body else body.contentType(MediaType.application.json))
   }
 

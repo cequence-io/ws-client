@@ -33,3 +33,13 @@ class CequenceWSHttpStatusException(
   val statusCode: Int,
   val body: String
 ) extends CequenceWSException(message)
+
+/**
+ * A stream frame longer than the configured maximum frame length (`maxFrameLength` of the JSON
+ * / SSE streams, [[io.cequence.wsclient.stream.ByteFraming]]) - one exception type on every
+ * engine, so callers can match on it instead of the message (since 1.2.0).
+ */
+class CequenceWSFrameTooLongException(
+  message: String,
+  val maxFrameLength: Int
+) extends CequenceWSException(message)

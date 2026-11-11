@@ -14,8 +14,9 @@ import io.cequence.wsclient.service.spi.{
   TransportSettings,
   WSClientEngineRegistry
 }
-import io.cequence.wsclient.testkit.LatchedSubscriber
+import io.cequence.wsclient.testkit.{AsyncStreamContract, LatchedSubscriber}
 import io.cequence.wsclient.testkit.TestServers.{
+  asyncStreamContract,
   CookieIsolation,
   cookieIsolation,
   MultipartInjection,
@@ -56,6 +57,21 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
 
   private lazy val keyStore = selfSignedKeyStore()
 
+  private def runZio[A](stream: zio.stream.ZStream[Any, Throwable, A]): Seq[A] =
+    zio.Unsafe.unsafe { implicit unsafe =>
+      Await.result(zio.Runtime.default.unsafe.runToFuture(stream.runCollect), 30.seconds)
+    }
+
+  private def runZioEither[A](
+    stream: zio.stream.ZStream[Any, Throwable, A]
+  ): Either[Throwable, Seq[A]] =
+    zio.Unsafe.unsafe { implicit unsafe =>
+      Await.result(
+        zio.Runtime.default.unsafe.runToFuture(stream.runCollect.either),
+        30.seconds
+      )
+    }
+
   private def get(
     engine: io.cequence.wsclient.service.WSClientEngine,
     site: SiteBinding,
@@ -74,6 +90,23 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
   }
 
   s"$expectedEngineId provider" should {
+
+    "send (or, on java.net.http, drop) caller-set Host / Connection headers - never fail" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        io.cequence.wsclient.testkit.TestServers
+          .restrictedHeaders(engine) shouldBe a[Right[_, _]]
+      finally engine.close()
+    }
+
+    "keep a buffered response's raw bytes (Response.bytes)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try {
+        val (intact, latin1) = io.cequence.wsclient.testkit.TestServers.bufferedBytes(engine)
+        intact shouldBe true
+        info(s"Latin-1 text decoded as: $latin1")
+      } finally engine.close()
+    }
 
     "be discovered via ServiceLoader with the expected id and capabilities" in {
       val providers = WSClientEngineRegistry.providers
@@ -127,6 +160,21 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       // read as a space
       val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
       try queryEncoding(engine) shouldBe QueryEncoding.expected
+      finally engine.close()
+    }
+
+    "honor the AsyncStream contract (cold, framing, cancel, downloads, wire format)" in {
+      val engine =
+        WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+      // zio-http re-renders the URL: the endpoint string's own query is re-encoded (pre-existing)
+      // - wireUrl reports that rendering. The streams are native ZIO leaves (since 1.2.0): a
+      // neutral run bridges each once (a ZIO consumer none - see the native-stream test)
+      try
+        asyncStreamContract(engine) shouldBe AsyncStreamContract.expected.copy(
+          endpointQueryVerbatim = false,
+          neutralBridges = 2,
+          downloadPlan = "native(zio) -> mapError"
+        )
       finally engine.close()
     }
 
@@ -664,6 +712,108 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         second.error.map(_.getClass.getSimpleName) shouldBe Some("IllegalStateException")
 
         engine.close()
+      }
+    }
+
+    "serve its AsyncStreams as native ZIO streams - cold, re-runnable, 0 bridges" in {
+      import io.cequence.wsclient.stream.StreamDiagnostics
+      import io.cequence.wsclient.stream.ZioInterop._
+
+      val body = "data: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
+      val requestCount = new AtomicInteger(0)
+      withServer("/events" -> sse(body, requestCount)) { port =>
+        val engine =
+          WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+        try {
+          val site = SiteBinding(s"http://localhost:$port")
+
+          val (json, jsonBridges) = StreamDiagnostics.counted(
+            engine.execJsonAsyncStream(site, "events", "GET").map(_ \ "i").toZStream
+          )
+          val (raw, rawBridges) = StreamDiagnostics.counted(
+            engine.execRawAsyncStream(site, "events", "GET").toZByteStream
+          )
+          Thread.sleep(200)
+          requestCount.get() shouldBe 0 // cold
+
+          runZio(json).map(_.as[Int]) shouldBe Seq(1, 2)
+          runZio(json).map(_.as[Int]) shouldBe Seq(1, 2) // a new request per run
+          new String(runZio(raw).toArray, "UTF-8") shouldBe body
+          requestCount.get() shouldBe 3
+          jsonBridges.get shouldBe 0
+          rawBridges.get shouldBe 0
+
+          // a download: its 404 preflight runs in ZIO too, so the body stays the engine's own
+          // stream
+          val (download, downloadBridges) = StreamDiagnostics.counted {
+            val stream = Await
+              .result(AsyncStreamContract.streamedDownload(engine, site, "events"), 30.seconds)
+              .get
+            stream.describe shouldBe "native(zio) -> mapError"
+            stream.toZByteStream
+          }
+          requestCount.get() shouldBe 4 // started by the preflight
+          new String(runZio(download).toArray, "UTF-8") shouldBe body
+          requestCount.get() shouldBe 4
+          downloadBridges.get shouldBe 0
+          Await.result(
+            AsyncStreamContract.streamedDownload(engine, site, "missing"),
+            30.seconds
+          ) shouldBe None
+        } finally engine.close()
+      }
+    }
+
+    "fail a native ZIO stream on a non-2xx status with the structured status exception" in {
+      import io.cequence.wsclient.stream.ZioInterop._
+
+      withServer("/events" -> (exchange => respond(exchange, 503, "overloaded"))) { port =>
+        val engine =
+          WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+        try {
+          val stream = engine
+            .execJsonAsyncStream(SiteBinding(s"http://localhost:$port"), "events", "GET")
+            .toZStream
+          val error = runZioEither(stream).left.toOption.get
+          error shouldBe a[io.cequence.wsclient.domain.CequenceWSHttpStatusException]
+          error
+            .asInstanceOf[io.cequence.wsclient.domain.CequenceWSHttpStatusException]
+            .statusCode shouldBe 503
+        } finally engine.close()
+      }
+    }
+
+    "abort the request when a native ZIO stream is interrupted (take)" in {
+      import io.cequence.wsclient.stream.ZioInterop._
+
+      val aborted = new java.util.concurrent.CountDownLatch(1)
+      withServer("/events" -> { exchange =>
+        exchange.getResponseHeaders.add("Content-Type", "text/event-stream")
+        exchange.sendResponseHeaders(200, 0)
+        val out = exchange.getResponseBody
+        try {
+          // an endless stream: only the client's abort ends it
+          var i = 0
+          while (true) {
+            out.write(("data: {\"i\":" + i + "}\n\n").getBytes("UTF-8"))
+            out.flush()
+            i += 1
+            Thread.sleep(20)
+          }
+        } catch {
+          case _: java.io.IOException => aborted.countDown()
+        }
+      }) { port =>
+        val engine =
+          WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+        try {
+          val stream = engine
+            .execJsonAsyncStream(SiteBinding(s"http://localhost:$port"), "events", "GET")
+            .toZStream
+            .take(2)
+          runZio(stream).size shouldBe 2
+          aborted.await(15, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+        } finally engine.close()
       }
     }
 

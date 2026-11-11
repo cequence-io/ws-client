@@ -1,0 +1,14 @@
+--- a/ZioCursor.tla
++++ b/ZioCursor.tla
+@@ -79,10 +79,7 @@
+     await interrupted;
+     goto Close;
+   or
+-    if state = "Demand" then
+-      state := "Idle";
+-      goto Pull;
+-    elsif state = "Idle" then
++    if state # "Closed" then
+       state := "Parked";
+       resumed := FALSE;
+     end if;                           \* Closed: never resumed, the fiber is being interrupted

@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 332" width="1120" height="332" role="img" aria-labelledby="t d" font-family="-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif" font-size="13">
+  <title id="t">WS Client overview</title>
+  <desc id="d">Your service calls the one WSClientEngine contract of ws-client-core; an HTTP backend found on the classpath (Play WS on Akka or Pekko, pekko-http, JDK HttpClient, sttp, zio-http) executes the request; streamed responses come back as an AsyncStream, which runs as plain Futures, an Akka or Pekko Source, an fs2 Stream, a ZIO ZStream or a Flow.Publisher.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#57606a"/>
+    </marker>
+  </defs>
+  <rect x="0.5" y="0.5" width="1119" height="331" rx="8" fill="#ffffff" stroke="#d0d7de"/>
+  <rect x="20" y="144" width="120" height="44" rx="6" fill="#ffffff" stroke="#8c959f"/>
+  <text x="80.0" y="166.0" text-anchor="middle" dominant-baseline="central" fill="#1f2328">your service</text>
+  <line x1="140" y1="166" x2="178" y2="166" stroke="#57606a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="180" y="118" width="170" height="96" rx="6" fill="#ddf4ff" stroke="#0969da"/>
+  <text x="265.0" y="140.5" text-anchor="middle" dominant-baseline="central" fill="#1f2328" font-weight="600">WSClientEngine</text>
+  <text x="265.0" y="157.5" text-anchor="middle" dominant-baseline="central" fill="#57606a">ws-client-core</text>
+  <text x="265.0" y="174.5" text-anchor="middle" dominant-baseline="central" fill="#57606a">one contract; the site</text>
+  <text x="265.0" y="191.5" text-anchor="middle" dominant-baseline="central" fill="#57606a">rides on each call</text>
+  <line x1="350" y1="166" x2="388" y2="166" stroke="#57606a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="390" y="28" width="210" height="276" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="495.0" y="50" text-anchor="middle" fill="#1f2328" font-weight="600">HTTP backends</text>
+  <text x="495.0" y="67" text-anchor="middle" fill="#57606a" font-size="12">found on the classpath</text>
+  <rect x="405" y="80" width="180" height="34" rx="6" fill="#ffffff" stroke="#8c959f"/>
+  <text x="495.0" y="97.0" text-anchor="middle" dominant-baseline="central" fill="#1f2328">Play WS on Akka or Pekko</text>
+  <rect x="405" y="124" width="180" height="34" rx="6" fill="#ffffff" stroke="#8c959f"/>
+  <text x="495.0" y="141.0" text-anchor="middle" dominant-baseline="central" fill="#1f2328">pekko-http</text>
+  <rect x="405" y="168" width="180" height="34" rx="6" fill="#ffffff" stroke="#8c959f"/>
+  <text x="495.0" y="185.0" text-anchor="middle" dominant-baseline="central" fill="#1f2328">JDK HttpClient</text>
+  <rect x="405" y="212" width="180" height="34" rx="6" fill="#ffffff" stroke="#8c959f"/>
+  <text x="495.0" y="229.0" text-anchor="middle" dominant-baseline="central" fill="#1f2328">sttp</text>
+  <rect x="405" y="256" width="180" height="34" rx="6" fill="#ffffff" stroke="#8c959f"/>
+  <text x="495.0" y="273.0" text-anchor="middle" dominant-baseline="central" fill="#1f2328">zio-http</text>
+  <line x1="600" y1="166" x2="718" y2="166" stroke="#57606a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="660" y="154" text-anchor="middle" fill="#57606a" font-size="12">streamed responses</text>
+  <rect x="720" y="134" width="150" height="64" rx="6" fill="#ddf4ff" stroke="#0969da"/>
+  <text x="795.0" y="157.5" text-anchor="middle" dominant-baseline="central" fill="#1f2328" font-weight="600">AsyncStream</text>
+  <text x="795.0" y="174.5" text-anchor="middle" dominant-baseline="central" fill="#57606a">one stream type</text>
+  <line x1="870" y1="166" x2="908" y2="166" stroke="#57606a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="910" y="28" width="190" height="276" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="1005.0" y="50" text-anchor="middle" fill="#1f2328" font-weight="600">a stream runs as</text>
+  <text x="1005.0" y="67" text-anchor="middle" fill="#57606a" font-size="12">in the library you use</text>
+  <rect x="925" y="80" width="160" height="34" rx="6" fill="#ffffff" stroke="#8c959f"/>
+  <text x="1005.0" y="97.0" text-anchor="middle" dominant-baseline="central" fill="#1f2328">plain Futures</text>
+  <rect x="925" y="124" width="160" height="34" rx="6" fill="#ffffff" stroke="#8c959f"/>
+  <text x="1005.0" y="141.0" text-anchor="middle" dominant-baseline="central" fill="#1f2328">Akka / Pekko Source</text>
+  <rect x="925" y="168" width="160" height="34" rx="6" fill="#ffffff" stroke="#8c959f"/>
+  <text x="1005.0" y="185.0" text-anchor="middle" dominant-baseline="central" fill="#1f2328">fs2 Stream</text>
+  <rect x="925" y="212" width="160" height="34" rx="6" fill="#ffffff" stroke="#8c959f"/>
+  <text x="1005.0" y="229.0" text-anchor="middle" dominant-baseline="central" fill="#1f2328">ZIO ZStream</text>
+  <rect x="925" y="256" width="160" height="34" rx="6" fill="#ffffff" stroke="#8c959f"/>
+  <text x="1005.0" y="273.0" text-anchor="middle" dominant-baseline="central" fill="#1f2328">Flow.Publisher</text>
+</svg>

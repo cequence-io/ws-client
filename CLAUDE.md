@@ -13,9 +13,10 @@ The project includes:
 - Play WS backend implementations (Play WS 2.x/Akka and Play WS 3.x/Pekko)
 - Additional backends: pekko-http, JDK HttpClient, sttp, zio-http (ZIO runtime)
 - Streaming support for large payloads
+- A backend-neutral stream type (`AsyncStream`, since 1.2.0) with native Akka / Pekko / fs2 / ZIO interop
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 1.1.5
+Current version: 1.2.0
 
 ## Build Commands
 
@@ -52,13 +53,25 @@ The project uses **SBT** as the build tool.
 
 ### Module Structure
 
-The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + a test-only testkit):
+The project is organized into 16 SBT modules (11 handwritten + 3 Pekko mirrors + the test-only
+testkit and verification modules):
 
 1. **ws-client-core** - Core abstractions and interfaces (Akka-free)
    - No concrete HTTP implementation, no Akka dependency
    - Defines `WSClient`, `WSClientEngine`, and `WSClientBase` traits
    - Contains domain models (`Response`, `RichResponse`, `WsRequestContext`, `CequenceWSException`)
    - Provides service adapters (logging, retries, round-robin)
+   - The backend-neutral stream layer (since 1.2.0, package `io.cequence.wsclient.stream`):
+     `AsyncStream`, `AsyncPipe`, `Bytes`, `AsyncBroadcastHub`, `ByteFraming`, `JsonStreamPipes`,
+     `StreamDiagnostics`; internals in `stream/impl` (the AST `Nodes`, the `StreamCompiler`
+     visitor, the neutral pull interpreter `NeutralCompiler` / `NeutralRunner`, the RS bridges
+     `CursorPublisher` / `SubscriberCursor`); timers in `io.cequence.wsclient.concurrent`
+     (`AsyncScheduler` - default in implicit scope - and `Futures`). The service base
+     `WSClientWithEngineAsyncStreamingBase` (streams + binary downloads - its public
+     `execGETBytes` / `execGETStream` ... delegate to the protected `execBytesDownload` /
+     `execStreamDownload` of `WSClientWithEngineBase`, which buffer on non-streaming engines),
+     the public `DeferredPublisher`, `PollingHelperCore`,
+     `ParallelServiceAdapters`, `WireFormat`
 
 2. **ws-client-core-akka** - Akka-based streaming extensions
    - Depends on `ws-client-core` + Akka Streams
@@ -67,6 +80,12 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
    - Adds `WSClientOutputStreamExtraAkka` (Pekko twin: `WSClientOutputStreamExtraPekko`) - trait for SSE/JSON streaming (`execJsonStream`, `execRawStream`)
    - Provides `StreamResponseImplicits` for `asSafeSource` on `Response`/`RichResponse`
    - Contains `PollingHelper`, `ParallelTakeFirstAdapter`, `ServiceBaseAdaptersAkka`
+   - The Akka interop of `AsyncStream` (since 1.2.0, package `io.cequence.wsclient.stream`):
+     `SourceCompiler` (every node natively; the custom stages in `stream/stages`),
+     `SourceLeaf` / `FlowPipe`, `SourceInterop`, the opt-in `SourceConversions`, and
+     `concurrent.ActorSchedulers`. New file and class names here must not contain "Akka" (the
+     generator renames paths); public names are flavor-neutral, so downstream code compiles
+     against either flavor
 
 3. **ws-client-play-akka** - Play WS backend implementation (named `ws-client-play` before 1.0.0)
    - Depends on `ws-client-core-akka`
@@ -92,21 +111,32 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      because those point the JVM-global default trust store at a test cert
    - Redirects are off explicitly (`.setFollowRedirect(false)`): the AHC builder's default comes
      from the JVM-wide property `play.shaded.ahc.org.asynchttpclient.followRedirect`. Response
-     decompression: AHC < 2.16.1 (play-ws 2.1.11 / 2.2.0-M2 - the Akka flavor) inflates gzip /
+     decompression: AHC < 2.16.1 (play-ws 2.1.11 / 2.2.0-M2 - the Akka flavor on Scala 2.12 / 3)
+     inflates gzip /
      deflate bodies without any limit (CVE-2026-85721), so `PlayWSClientEngine.boundedInflater`
      replaces AHC's `inflater` handler with AHC 2.16.1's own design (`maxDecompressedResponseSize`
      property, default 256 MiB, 0 or less = no limit - keep AHC's `> 0` guard;
      `DecompressionException`, rest of the body dropped; counted per response, so a long
      compressed stream fails too). It is installed only when the shaded AHC lacks the limit (no
-     `getMaxDecompressedResponseSize` on `AsyncHttpClientConfig`), so the Pekko flavor keeps
-     AHC's own. The provider specs cover both (redirect with the property set; a gzip bomb under
+     `getMaxDecompressedResponseSize` on `AsyncHttpClientConfig`), so the Pekko flavor - and,
+     since 1.2.0, the Akka flavor on Scala 2.13 (play-ws 2.2.18) - keeps AHC's own. The provider specs cover both (redirect with the property set; a gzip bomb under
      a lowered limit, and with 0 / -1)
    - Known CVEs (reachability checked 2026-10-24): the Akka flavor's shaded Netty 4.1.45 / 4.1.60
-     and AHC 2.10.5 / 2.12.3 carry dozens; reachable were only the cookie store (now off),
+     and AHC 2.10.5 / 2.12.3 (Scala 2.12 / 3) carry dozens; reachable were only the cookie store (now off),
      redirects (only with the property) and decompression - all three now closed in code.
      The rest (HTTP/2, SPDY, SNI, CORS, server decoders, Realm / NTLM, WebSocket) is unused by
-     the engine. play-ws 2.2.18 (still Akka 2.6.21; AHC 2.16.1, Netty 4.1.138) is the Scala 2.13
-     upgrade path; 2.12 has none (2.1.11 is the last), Scala 3 needs 3.3+
+     the engine. Scala 2.13 is on play-ws 2.2.18 since 1.2.0 (Akka 2.6.21; AHC 2.16.1, Netty
+     4.1.138; class files need Java 11); 2.12 has no upgrade path (2.1.11 is the last), Scala 3
+     needs 3.3+
+   - play-json comes from core only: `typesafePlayWS` excludes Play WS's own play-json by its
+     suffixed artifact name (`play-json_2.13` - a bare `play-json` matches nothing, as up to
+     1.1.5), so play-ws 2.2.18 links against core's play-json 2.8.2. Do not bump play-json to
+     2.10.x on 2.12 / 2.13 with it (Java 11, MiMa problems, NoSuchMethodError for users pinning
+     2.8)
+
+   - Scala 3 trap: with `play.api.libs.ws.JsonBodyReadables._` in scope, a bare
+     `rawResponse.body` with no expected type resolves to `body[JsValue]` on Scala 3 (to the
+     `String` one on Scala 2) - give it an expected type (`PlayWsResponse.string`)
 
 4. **ws-client-play-akka-stream** - Streaming extensions (named `ws-client-play-stream` before 1.0.0)
    - Depends on `ws-client-core-akka` and `ws-client-play-akka`
@@ -137,12 +167,14 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      3.3+). The provider uses sttp's JDK-based `HttpClientFutureBackend`; a custom sttp backend
      can be passed to `SttpWSClientEngine.apply`. The engine owns and closes its backend.
    - `ws-client-pekko-http`: direct pekko-http client engine (depends on ws-client-core-pekko;
-     Scala 2.13). Supports input streaming (`execPOSTSource`) and native output (SSE) streaming.
+     Scala 2.13 / 3.3). Supports input streaming (`execPOSTSource`) and native output (SSE) streaming.
      No Play WS / shaded AHC.
-   - `ws-client-zio-http`: engine on the zio-http (Netty) client + ZIO runtime (depends only on
-     ws-client-core; Scala 2.12/2.13 - zio-http's Scala 3 artifacts need 3.3+). Output (SSE)
-     streaming via `WSClientOutputStreamCore` (ZStream bridged with zio-interop-reactivestreams +
-     `FlowAdapters`, then the jdk engine's framing pipeline); the stream status is checked before
+   - `ws-client-zio-http`: engine on the zio-http (Netty) client + ZIO runtime (depends on
+     ws-client-core and, since 1.2.0, ws-client-zio; Scala 2.12/2.13 - zio-http's Scala 3
+     artifacts need 3.3+). Output (SSE) streaming via `WSClientOutputStreamCore` (publisher path:
+     ZStream bridged with zio-interop-reactivestreams + `FlowAdapters`, then the jdk engine's
+     framing pipeline; `execJsonAsyncStream` / `execRawAsyncStream` are native ZIO leaves over the
+     same body stream - `bodyChunks`); the stream status is checked before
      any byte is exposed. Discovery-created engines own a Netty driver + client (`close()`
      releases both); `copy(reuseExecContext = true)` shares the driver. `ZioHttpWSClientEngine(client)`
      / `.layer()` run on a caller-owned `Client` (never closed). Owned engines run Netty on
@@ -165,13 +197,17 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
      `target/**/src_managed` - edit the Akka module sources instead; the Pekko flavor follows.
    - Handwritten exceptions: `PlayPekkoWSClientEngineProvider.scala`,
      `PlayPekkoStreamWSClientEngineProvider.scala` and their `META-INF/services` resources (the
-     generator skips `*EngineProvider.scala` files because engine ids/priorities differ), plus all
-     test specs - the generator mirrors Compile sources only, so each Pekko module has its own
-     handwritten specs.
+     generator skips `*EngineProvider.scala` files because engine ids/priorities differ), plus the
+     test specs of the play-pekko / play-pekko-stream modules - the generator mirrors Compile
+     sources only there, so those Pekko modules have their own handwritten specs.
    - `ws-client-play-pekko` uses `org.playframework` play-ws 3.x (its play-json 3.x dependency is
      excluded - core's `com.typesafe.play` play-json is used instead);
      `ws-client-play-pekko-stream` uses pekko-http.
-   - Cross-built for Scala 2.13 only (play-ws 3.x needs Scala 2.13 or 3.3+; the build is on 3.2.2).
+   - Cross-built for Scala 2.13 and 3.3 (since 1.2.0; play-ws 3.x and Pekko need 3.3+). The
+     generator mirrors `src/<config>/scala` plus the `scala-2` variants, whatever Scala version
+     the Akka module is at: Play WS 3.x behaves like Play WS 2.1.x on every Scala version (the
+     Akka module's `scala-3` sources work around Play WS 2.2.0-M2). `ws-client-core-pekko` also
+     runs core-akka's specs, generated (`PekkoGenerator.testGeneratorSettings`)
    - IMPORTANT: generated Pekko classes share fully qualified names with the Akka ones by design,
      so the Akka and Pekko flavors are mutually exclusive on one classpath (downstream code compiles
      unchanged against either). Avoid `akka.`-package references in strings/comments in the Akka
@@ -181,9 +217,20 @@ The project is organized into 13 SBT modules (9 handwritten + 3 Pekko mirrors + 
 8. **ws-client-testkit** - test-only fixtures (never published): embedded echo / SSE / proxy-stub
    / protocol-restricted TLS servers and a tunnelling CONNECT proxy (`TestServers`), the shared
    engine scenarios (`cookieIsolation`, `multipartInjection`, `queryEncoding`,
-   `proxyConnectReply`, `connectTunnel`, `stalledBody`), and a generic `LatchedSubscriber` for `Flow`
-   publishers; engine modules depend on it `% Test`. Core's test classpath is NOT shared via
-   `test->test` - its dummy engine providers would leak into every engine's discovery tests.
+   `proxyConnectReply`, `connectTunnel`, `stalledBody`, `asyncStreamContract`), and a generic
+   `LatchedSubscriber` for `Flow` publishers; engine modules depend on it `% Test`. Core's test
+   classpath is NOT shared via `test->test` - its dummy engine providers would leak into every
+   engine's discovery tests.
+
+9. **ws-client-fs2 / ws-client-zio** - `AsyncStream` interop (since 1.2.0; Scala 2.12 / 2.13 /
+   3.3): `Fs2Compiler` / `Fs2Interop` / `Fs2Conversions` (fs2 3.12, cats-effect 3.6; `Fs2Runner`
+   for the fallback) and `ZioCompiler` / `ZioInterop` / `ZioConversions` (zio-streams 2.1.26 -
+   the zio-http engine's ZIO; hand-written pull bridges over the neutral cursors, no
+   zio-interop-reactivestreams)
+
+10. **ws-client-verification** - verification of the stream layer beyond the per-module specs
+    (never published; Scala 2.13 only - the one version on which the neutral interpreter and the
+    Akka, fs2 and ZIO compilers meet). See "Verification" under Testing.
 
 ### Key Architectural Patterns
 
@@ -264,7 +311,17 @@ All HTTP methods have two variants:
 This allows callers to handle non-2xx responses gracefully without exceptions.
 
 #### Response Types
-- `Response` - base trait with `json` and `string` (in `ws-client-core`)
+- `Response` - base trait with `json`, `string` and (since 1.2.0) `bytes` (in `ws-client-core`).
+  `BytesBackedResponse` is a plain final class (companion `apply`), not a case class - public
+  1.2.0 types that may grow must not be case classes (MiMa freezes apply / copy / unapply).
+  `TextAndBytesResponse` extends `StringBackedResponse`: every buffered non-Play body is still
+  a StringBackedResponse, as in 1.1.x.
+  `bytes` is the body exactly as received on every engine; its trait default (UTF-8 of `string`)
+  is only for foreign implementations. The non-Play engines build buffered bodies through core
+  `ResponseBodies`: decoded once; a UTF-8 body without U+FFFD keeps only the text
+  (`StringBackedResponse` - re-encoding reproduces the bytes exactly), any other body keeps the
+  raw bytes too (`TextAndBytesResponse`) - never hold every body twice. `BytesBackedResponse`
+  (public) is the bytes-first `Response` for callers
 - `StreamedResponse extends Response` - adds `source: Source[ByteString, _]` (in `ws-client-core-akka`)
 - `PlayWsResponse extends StreamedResponse` - concrete implementation backed by Play WS
 
@@ -280,19 +337,33 @@ Client-level settings (timeouts, proxy) live in `TransportSettings` instead. Use
 
 The build manages different dependency versions for Scala 2.12, 2.13, and 3.2:
 - Play JSON: 2.8.2 (Scala 2.12/2.13), 2.10.0-RC6 (Scala 3.2)
-- Akka Stream: 2.6.20 (not 2.6.1 on Scala 2.12: its akka-protobuf-v3 POM pulls protobuf-java
+- Akka Stream: 2.6.20, on Scala 2.13 2.6.21 (what play-ws 2.2.18 brings; not 2.6.1 on Scala 2.12: its akka-protobuf-v3 POM pulls protobuf-java
   3.10.0); Akka HTTP 10.5.3 (ws-client-play-akka-stream only; BUSL-1.1 licensed)
-- Play WS (Akka): 2.1.11 (Scala 2.12/2.13), 2.2.0-M2 (Scala 3.2)
-- Play WS (Pekko, `org.playframework`): 3.0.14 (shaded AHC 2.16.1 / Netty 4.1.138 - stricter HTTP response parsing than 3.0.7's 4.1.118: bare-LF lines, CL + TE, control chars in headers are rejected); Pekko Stream: 1.6.0; Pekko HTTP: 1.3.0 (Scala 2.13 only)
+- Play WS (Akka): 2.1.11 (Scala 2.12), 2.2.18 (Scala 2.13, since 1.2.0 - Java 11+),
+  2.2.0-M2 (Scala 3.2)
+- Scala 2.13.18 (play-ws 2.2.18 depends on that scala-library; SIP-51). `semanticdbVersion` is
+  pinned in build.sbt: semanticdb-scalac is published per Scala patch version, so a Scala bump
+  needs a semanticdb version that has it (for 2.12 AND 2.13)
+- Play WS (Pekko, `org.playframework`): 3.0.14 (shaded AHC 2.16.1 / Netty 4.1.138 - stricter HTTP response parsing than 3.0.7's 4.1.118: bare-LF lines, CL + TE, control chars in headers are rejected); Pekko Stream: 1.6.0; Pekko HTTP: 1.3.0 (Scala 2.13 / 3.3)
 
 Scala 3 requires manual cross-version suffix handling (e.g., `akka-stream_2.13` for Scala 3).
 
-Cross-building is per-project: the Pekko modules declare `crossScalaVersions := List(scala213)`, so
-`sbt +compile` from the root builds them only for 2.13. `ws-client-sttp` (2.12/2.13) and
-`ws-client-pekko-http` (2.13) also narrow their versions; the rest build for all three.
+Cross-building is per-project: the Pekko modules (and `ws-client-pekko-http`) declare
+`crossScalaVersions := pekkoScalaVersions` (2.13 and 3.3), fs2 / zio 2.12 / 2.13 / 3.3,
+`ws-client-sttp` and `ws-client-zio-http` 2.12 / 2.13; the rest build for 2.12 / 2.13 / 3.2.
 Version-dependent dependency settings must be `Def.setting`s reading the project-level
 `scalaVersion` (NOT `inThisBuild` settingKeys) - with heterogeneous crossScalaVersions, `+` switches
 Scala per project and an `inThisBuild` lookup sees the stale default version.
+
+Two Scala 3 lines (since 1.2.0): the `_3` artifacts of core, core-akka, json-repair, jdk and
+play-akka(-stream) are compiled with 3.2.2 (TASTy 28.2 - they serve 3.2 and 3.3+ users); the
+Pekko modules, fs2 and zio with 3.3.8 (`scala33`). An sbt project dependency needs one Scala line
+on both sides, so core and the testkit ALSO build with 3.3.8 - in-build only
+(`publishedExceptOnScala33`: never published, or `ws-client-core_3` would be published twice).
+A plain `+publishSigned` does the right thing. Guards (`project/ReleaseChecks.scala`):
+`tastyCheck` fails a publishable Scala 3 jar of the wrong line; `tastyCheckStaged [dir]` checks
+every `_3` jar of a staged release (default `target/sonatype-staging/<version>`) - run it before
+`sonatypeBundleRelease`. MiMa's previous artifacts are the exact 1.1.5 module x Scala matrix.
 
 ## Testing
 
@@ -305,7 +376,129 @@ Scala per project and an `inThisBuild` lookup sees the stale default version.
 - Note: `sbt ws-client-play-akka/test` also runs core and json-repair tests (aggregation)
 - Test logging: logback is a `% Test` dependency of every module with tests (`testLoggingSettings`
   in build.sbt), configured by the shared `test-resources/logback-test.xml`
-- CI: `.github/workflows/ci.yml` runs `sbt scalafmtCheckAll scalafmtSbtCheck` and `sbt +test`
+- CI: `.github/workflows/ci.yml` runs `sbt scalafmtCheckAll scalafmtSbtCheck`, `sbt +test`,
+  `sbt +mimaReportBinaryIssues` (against 1.1.5, see `project/ReleaseChecks.scala`) and
+  `sbt +tastyCheck`
+- The forked test JVMs of core, core-akka and core-pekko run in `target/`: TestNG (the Reactive
+  Streams TCK suites) writes report files into the working directory
+
+### Verification (since 1.2.0)
+
+Three layers beyond the example-based and random specs:
+
+- **Small-scope (bounded-exhaustive) specs** - ordinary tests, part of `sbt test`. EVERY input in
+  a small scope against a list model written from the scaladoc alone:
+  `FramingSmallScopeSpec` (core: every string x every chunking x frame limits, for
+  `ByteFraming.delimiter` and the engines' `DelimiterFramer`; its two allowed divergences are
+  named in `classify` and pinned by a test that fails once they are fixed) and
+  `OperatorSmallScopeSpec` (ws-client-verification: every operator pipeline up to a depth, with
+  failures injected at every user function, on the neutral interpreter and the Akka, fs2 and ZIO
+  compilers; neutral / fs2 / ZIO must match the model exactly, Akka may only differ by
+  `FailedFast`). Scopes: `-Dwsclient.verify.framing.maxLength` (default 5; audited at 6) and
+  `-Dwsclient.verify.operators.depth` (default 2; audited at 3, about 2 minutes). build.sbt's
+  `verifyKnobs` forwards every `-Dwsclient.verify.*` into the forked JVMs.
+- **Lincheck model checks** - `sbt modelCheck` (a forked main in ws-client-verification, NOT part
+  of `test`; about 7 minutes at the default 1000 interleavings per scenario,
+  `-Dwsclient.verify.modelcheck.invocations` / `.only` / `.traceLines`): the real classes -
+  `TransformPublisher`, `CursorPublisher`, `SubscriberCursor`, `AsyncBroadcastHub`, `ZioCursor` -
+  under the interleavings of each scenario's threads. A scenario builds everything inside its
+  body (`ThreadPerTask` as the ec, so tasks are interleaved too) and checks with `ensure`; a
+  failure prints the interleaving and writes it whole to
+  `ws-client-verification/target/model-check/<scenario>.trace`. Lincheck notes: a suite whose
+  code legitimately loops long needs a `loopBound` (the ZIO suite: a fiber is an interpreter
+  loop, and Lincheck's default bound of 50 reports it as "Concurrent test has hung") - set
+  through Lincheck's Kotlin-`internal` settings entry point (`ModelChecks.check`), to be
+  re-checked on a Lincheck upgrade; the `ArrayIndexOutOfBoundsException` stack traces (ASM, one
+  ZIO class stays uninstrumented) and `[WARN] Failed to get object field offset` lines it
+  prints are noise.
+- **TLA+ specs** - `formal/tla` (PlusCal; `check.sh` runs TLC over every spec, config and
+  mutant and compares each outcome with the expected one; the tools jar is fetched, not
+  committed): the designs of `ZioCursor`, the `CursorPublisher` drain loop and two chained
+  `TransformPublisher`s, each label one atomic step of the implementation. A change to one of
+  those classes' synchronization changes its spec first; a new invariant gets a mutant that
+  violates it. See `formal/tla/README.md`.
+
+CI runs the last two in a job of their own (`verification`; first run on GitHub 2026-11-11:
+13 minutes on the hosted runner, tools-jar download included). The `test` job takes about 20
+minutes there; tests whose run time depends on the shared `ExecutionContext.global` need
+generous timeouts (the fs2 100,000-element concat run: 1 s locally, over 15 s on the runner).
+
+#### State of the formalization (2026-11-11) - continue from here
+
+Last full run (20 cores, JDK 17), everything passes: small-scope specs at the default scopes
+(framing about 130,000 cases, 5 s; operators 25,616 pipelines per backend, 20 s) and at the
+audit scopes (framing length 6: about 590,000 cases; operators depth 3: 268,976 pipelines per
+backend, 2 minutes - manual, not in CI); Lincheck 25 scenarios x 1000 interleavings, 398 s;
+TLC 8 configurations + 9 mutants, about 5 minutes (state counts in `formal/tla/README.md`).
+
+Coverage per subject (`-` = nothing):
+
+| Subject | Small-scope | Lincheck (scenarios) | TLA+ |
+|---|---|---|---|
+| `ByteFraming.delimiter`, `DelimiterFramer` | `FramingSmallScopeSpec` (2 pinned edges) | - | - |
+| operators on neutral / Akka / fs2 / ZIO | `OperatorSmallScopeSpec` (16 sources, 40 operators) | - | - |
+| `TransformPublisher` (two chained) | - | 5 | `TransformChain`: 4 configs + `Legacy`, 3 mutants |
+| `CursorPublisher` | - | 4 x sync / async cursor, + 1 with `SubscriberCursor` | `CursorDrain`: 2 configs, 4 mutants |
+| `SubscriberCursor` | - | 2 x sync / async cursor, + the one above | - |
+| `AsyncBroadcastHub` | - | 5 | - |
+| `ZioCursor` | - | 2 (loop bound 100,000) | `ZioCursor`: 1 config, 2 mutants |
+
+What a pass does NOT say (the known gaps, most valuable first):
+
+1. The operator spec observes only elements + end (`Completed` / `Failed`): not cancellation
+   from outside, not how often termination hooks run, not demand (read-ahead), not timing. Its
+   scope has no `via(pipe)` / `zipVia`, `concurrently`, `preflight`, `guaranteeCase`, hub or
+   publisher leaf. Next: a second observation - (elements, end, hook calls) under a cancel
+   after k elements - on the same scope.
+2. No design-level spec of `SubscriberCursor` (the lock-free work-in-progress loop + the
+   `delivering` window) and of `AsyncBroadcastHub` (first terminal event wins; registration vs
+   shutdown): Lincheck samples their interleavings, nothing checks liveness. Next: `Hub.tla`,
+   `SubscriberCursor.tla` with mutants, same conventions as the three specs.
+3. Nothing ties a TLA+ label to the code but review, and Lincheck checks no liveness. Each
+   spec'd class has model-check scenarios for the same races - keep that pairing for every new
+   spec (a spec without a model check of the real class, or the reverse, is half a result).
+4. The pure wire-level functions have no model yet: `WireFormat.url` (against RFC 3986),
+   `MultipartParams` (no `"` / CR / LF survives in a header value), `JsonStreamFrames.parseFrame`
+   (against the SSE rules stated under Important Notes). All are small-scope
+   candidates of the framing spec's shape (every string over a tiny alphabet against a
+   reference written from the RFC / the note).
+5. Not modelled or model-checked: the fs2 pull bridge (`Fs2Compiler.cursorStream`), the
+   blocking cursor (reads on the pool vs cancel vs `close()` exactly once), the Akka / Pekko
+   stages (`NestedStreamsLogic`, `CursorSourceStage` - actor-confined, but their async
+   callbacks are not), `StreamedBody.of`, and the jdk engine's `IdleTimeoutPublisher` /
+   `DeadlineBodySubscriber` / `BoundedBodyReader`.
+6. The framing spec's two pinned edges are real divergences from the scaladoc model, allowed
+   in `classify` - fixing both framers together (then dropping the allowance) is open.
+7. Scopes: TLC configurations are 2 - 3 elements / calls per thread (the largest, 4 million
+   states, takes half the run); Lincheck's 1000 interleavings per scenario is a sample, not a
+   bound (the two historical bugs - the 1.1.5 transform deadlock, the hub's shutdown race -
+   showed within 10 s).
+
+Conventions when adding to a layer: a small-scope model is written from the scaladoc / RFC
+text ALONE, never from the code, and every allowed divergence is named in the spec and pinned
+by a test that fails once it is fixed; a Lincheck scenario is first shown to FAIL on the bug it
+is for (revert the fix locally, or run it against the last release jar); a TLA+ invariant gets
+a mutant, and an invariant TLC rejects is first read as a fact about the class (see
+`CancelCompletes` in the README) before the spec is weakened; never put an exact state count
+of a counterexample run into a doc (it varies per run).
+
+## Documentation layout
+
+- `README.md` is the landing page only: overview chart, the backends and stream-abstractions
+  tables, installation, quick start, the short "Good to know" list and the Documentation table.
+  Its badge and dependency snippets stay at the RELEASED version until the next one is on Maven
+  Central.
+- Topic pages live in `docs/` (`engines.md`, `sites-and-requests.md`, `streaming.md`,
+  `architecture.md`, `compatibility.md`, `verification.md`): a new behavior or caveat goes to
+  its topic page, never back into the README. Every page opens with a title, the back link to
+  the README and a lead paragraph.
+- Release notes go to the root `CHANGELOG.md` (newest first; behavior changes and upgrade notes
+  per version), not into the README.
+- Charts are Mermaid blocks (GitHub renders them): quote every node / edge label, and re-check
+  that a changed block still parses.
+- The README's overview chart is an image, `docs/images/overview.svg` (hand-written SVG on its
+  own white card, so it reads in dark mode; GitHub's Mermaid widget was too heavy for the
+  landing page) - edit the SVG and look at a rendering of it.
 
 ## Key Dependencies
 
@@ -386,6 +579,70 @@ val service = roundRobin(service1, service2, service3)
 val loggedService = log(service, "MyService")
 ```
 
+## Scala Style - Pragmatic Principles
+
+Readable, pragmatic Scala: plain OO (traits, classes, encapsulation) where it models the problem,
+plain FP (immutable data, pure functions, `Option` / `Either` / `Try`, collection combinators) where
+it reads well. Every abstraction must pay for itself - no monoid / type-class towers, no
+tagless-final `F[_]`, no transformer stacks, no symbolic operators. Project rules above and below
+win where they are more specific.
+
+**Design**
+- Least power: a plain method or function, then a case class, a sealed trait, a class, a trait
+  hierarchy - an implicit or type class last. Generalize only for a second real use.
+- Decompose by the axis of change: a closed set of alternatives is a sealed trait matched
+  exhaustively (no `case _` on our own sealed types); an open set of implementations (engines,
+  providers, adapters) is a trait with dynamic dispatch / SPI discovery.
+- Small single-concern traits, concrete classes at the leaves, composition and constructor
+  parameters over inheritance and cake wiring; abstract members are `def`s.
+- Immutable data, pure decision logic (parsing, framing, encoding, error classification); I/O,
+  clocks, logging and mutation at the edges. Mutable state is private and its owning thread or
+  lock is stated. While-loops / arrays / `null` only on inherently hot paths (framers, cursors),
+  encapsulated and commented.
+- Data: `final case class` for plain data; a plain final class with a companion `apply` for
+  public types that may grow (MiMa); `Option`, never null fields; covariant producer types.
+- Reuse before writing: core helpers first (`EngineSupport`, `WireFormat`, `MultipartParams`,
+  `JsonStreamFrames`, ...); logic a second engine needs moves to core as `private[wsclient]`.
+
+**Library API** - everything public is a MiMa obligation after a release
+- Smallest surface: helpers `private` / `private[wsclient]`; explicit result types on public /
+  protected members and implicits; public parameter names are API.
+- Never change a published signature in place: add an overload / forwarder (TransportSettings
+  shows the shim for a case-class field); MiMa against the previous release decides.
+- Scaladoc opens with a one-sentence summary; extension points state implementer obligations
+  (thread safety, ownership / `close()`, call-once). Comments say why, not what.
+
+**Errors and concurrency**
+- `Option` for absence, `Either` / a small sealed result for outcomes callers branch on, a failed
+  `Future` with a `CequenceWSException` subclass for transport / HTTP failures; no sentinels.
+- A `Future`-returning method never throws synchronously (`Future.failed`, or build the request
+  inside the future).
+- Catch `NonFatal(e)` or specific types - `case e: Throwable` only to rethrow unchanged.
+  `Option(javaValue)`, never `Some(javaValue)`; no unguarded `.get` / `.head` / `.reduce`.
+- Take an implicit `ExecutionContext` (never `global` in library code); never block in a future or
+  callback (`blocking {}` or a dedicated pool); `Await` only in tests. A `Promise` only to bridge
+  callback / Reactive Streams APIs. Deadlines with `System.nanoTime`.
+- One synchronization strategy per piece of state; never call foreign code (user functions,
+  subscribers, subscriptions) while holding a lock.
+- Implicits only for ambient context (`ExecutionContext`, `Materializer`, `AsyncScheduler`);
+  domain values (`SiteBinding`, `TransportSettings`) stay explicit; implicit conversions only in
+  opt-in objects imported by name (`SourceConversions`).
+
+**Code shape**
+- Expressions over statements; a combinator chain of more than about 3 steps gets a named
+  intermediate; `for` for nested flatMaps; a plain `match` / local loop over a clever fold.
+- No `return` inside a lambda or callback; `@tailrec` on intended tail recursion.
+- Shared sources stay Scala-2 syntax Scala 3 accepts (no `given` / `using` / `enum` /
+  `extension`); version-specific code lives in `scala-2` / `scala-3` dirs.
+- Naming: no `get` prefix; `()` on side-effecting zero-arg methods; words, not symbols; public
+  names must not clash with Akka / Pekko / ZIO / fs2 names a user imports next to ours.
+- Tests: intercept the most specific exception; synchronize with latches / bounded waits (a sleep
+  only to open a race window); behavior every engine shares is one testkit scenario.
+
+Distilled (2026-11) from the Scala Style Guide, the Scala 3 Book, "Binary Compatibility for
+Library Authors", Effective Scala, the Databricks Scala Style Guide, Li Haoyi's "Strategic Scala
+Style" and Odersky's "Lean Scala".
+
 ## Important Notes
 
 - The library uses Play JSON (`JsValue`) as the JSON representation
@@ -404,8 +661,8 @@ val loggedService = log(service, "MyService")
   timeout)
 - Query-param encoding contract: every engine takes raw keys and values (`params` and
   `WsRequestContext.extraParams`) and percent-encodes them - the Play engines since 1.1.5
-  (`PlayWSClientEngine.encodeQueryComponent`, RFC 3986: `%20` for a space; the jdk
-  engine writes form encoding, `+`). Up to 1.1.4 the Play engines passed them verbatim: a `#`
+  (`PlayWSClientEngine.encodeQueryComponent`, RFC 3986: `%20` for a space), the jdk engine
+  RFC 3986 too since 1.2.0 (`WireFormat.url`; form encoding, `+`, up to 1.1.5). Up to 1.1.4 the Play engines passed them verbatim: a `#`
   cut the query off (Pinecone `fetch(ids)` with `doc#0` came back empty), `&` / `=` split a
   value. A query written into the endpoint string is not a parameter - the caller encodes it.
   The Play engines send it byte for byte (openai-scala's SigV4-signed Bedrock GETs build their
@@ -502,7 +759,10 @@ val loggedService = log(service, "MyService")
   `SttpClientException` text includes the full URI, so `SttpWSClientEngine.defaultRecoverErrors`
   describes a failure by the transport cause below the sttp wrapper and maps every remaining
   sttp failure to `CequenceWSException` - never put `e.getMessage` of a request-describing
-  exception into a message
+  exception into a message. The jdk engine reports an invalid request URL as a
+  `CequenceWSException` with only the reason and the position (`requestUri`: `URI.create`'s
+  message quotes the whole URL), as a failed future - a request that cannot be built (an
+  invalid URL, a throwing request-context function) never throws out of the call
 - `StreamTransformers.DelimiterFramer` (jdk / zio-http SSE framing) tracks frames by offset and
   compacts its buffer once per chunk - keep it linear per chunk (`DelimiterFramerSpec` diffs it
   against the 1.1.2 implementation)
@@ -517,12 +777,33 @@ val loggedService = log(service, "MyService")
   builds its AHC config directly), which replayed one site's / tenant's cookies on every other
   `SiteBinding` (AHC 2.1.11 even honored a foreign `Domain` attribute). Covered on every engine by
   the shared testkit scenario `TestServers.cookieIsolation`
+- Public names of the stream layer must not clash with Akka / Pekko / ZIO / fs2 names a user
+  imports next to ours (wildcard imports): `AsyncBroadcastHub`, `AsyncScheduler`,
+  `AsyncCancellable`, `ByteFraming` (not `BroadcastHub`, `Scheduler`, `Cancellable`,
+  `Framing`) - renamed before the 1.2.0 release, with the main downstream consumer's
+  agreement. Bridge diagnostics are scoped only (`StreamDiagnostics.counted`); there is no
+  JVM-wide counter
+- Restricted headers (since 1.2.0): `java.net.http` throws for headers it sets itself (`Host`,
+  `Connection`, ...). The jdk engine and the sttp engine ON ITS OWN JDK BACKEND
+  (its `filterRestrictedHeaders` constructor flag: a caller-supplied sttp backend is never filtered) drop
+  them with a one-time warning via `JdkRestrictedHeaders` (core, `private[wsclient]`) - only a
+  header java.net.http derives itself (host, connection, content-length, expect, upgrade) AND
+  the running JDK refuses (a throwaway `HttpRequest.Builder.header` probe, cached per name, so
+  `-Djdk.httpclient.allowRestrictedHeaders` and `conf/net.properties` decide). Any other
+  refusal still fails the call: JDK 11 before 11.0.14 also refuses `Referer`, `Origin`, ... -
+  dropping those would silently break e.g. referrer-restricted API keys. It is loaded only by those two engines: core also runs on Java 8. Covered
+  on every engine by `TestServers.restrictedHeaders` (and binary-safe `bytes` by
+  `TestServers.bufferedBytes`)
+- Stream HTTP-status failures (`CequenceWSHttpStatusException`) are logged at DEBUG, any other
+  stream failure at ERROR (`StreamFailures.log`, Play stream + pekko-http; jdk / zio-http log
+  none): the status is the caller's to handle (the download helpers map a 404 to `None`), and
+  it still reaches the caller as the exception
 - `DirectWSClient` defaults a scheme-less URL to `https://` and rejects schemes other than
   http/https; plain HTTP needs an explicit `http://`
 - Artifact rename hazard: the pre-1.0 `ws-client-play` / `ws-client-play-stream` artifacts and
   their ≥ 1.0.0 successors `ws-client-play-akka` / `ws-client-play-akka-stream` share FQCNs
   but not artifact ids, so there is no eviction - old + new on one classpath means
-  jar-order-dependent shadowing (README documents exclusion rules). `WSClientEngineRegistry`
+  jar-order-dependent shadowing (`docs/compatibility.md` documents exclusion rules). `WSClientEngineRegistry`
   probes marker classes via `ClassLoader.getResources` on first use and logs a warning naming
   the conflicting jars (covers akka+pekko mixing and old+renamed coexistence); with the config
   key `ws-client.strict-classpath = true` (or the same system property) it throws a
@@ -586,3 +867,149 @@ val loggedService = log(service, "MyService")
   oracle - valid nested number-heavy JSON (signed / unsigned exponents, values beyond a double
   or a Long, long decimals) repairs exactly like Jackson / play-json parses it - must stay at
   100% (it was 27%)
+- `AsyncStream` (since 1.2.0) is an initial encoding: an immutable AST of 19 private nodes
+  (`stream/impl/Nodes.scala` - 8 leaves, 11 operators unary on their upstream; second branches
+  are lazy children compiled at run time) dispatched through the `StreamCompiler` visitor, so a
+  compiler that misses a node does not compile. Rules for every compiler (neutral, Akka/Pekko,
+  fs2, ZIO): compiling is pure - no user thunk runs at compile time, only per run; the spine is
+  walked iteratively (`StreamCompiler.compile`); a compiler returns its OWN native leaf as is
+  (`src.toAsyncStream.toSource eq src`) and bridges only at a foreign leaf (1) or a foreign
+  native pipe (2), counting each in its `BridgeCounter` (captured when a compilation / run
+  starts: `StreamDiagnostics.counted` scopes it; lazy children inherit it - the Akka/fs2/ZIO
+  compiler instance carries it, a neutral run carries it in its `RunContext`). A visitor
+  method added after 1.2.0 needs a default (a new OPERATOR: the node as a neutral `NativePipe`
+  via `viaNative`; a new LEAF: a neutral `NativeStream` via `native`, or `fromCursor`), so
+  interop jars built before a NEW visitor method keep working - nothing more: the interop
+  modules use other `private[wsclient]` core internals, so all ws-client artifacts must share
+  one version (the README and `docs/compatibility.md` say so). Semantics are pinned by
+  differential specs (native vs neutral: core-akka/-pekko `SourceDifferentialSpec`, the fs2 and
+  ZIO specs; exhaustively in a small scope by `OperatorSmallScopeSpec`) - sanctioned
+  differences: on a failure Akka's / Pekko's stages fail fast - a failure overtakes elements a
+  stage still holds (`flatMapConcat`, `mapAsync`: in flight; `mapConcat`: the rest of the
+  element's iterable - and so whatever those would have become downstream), where the neutral
+  interpreter, fs2 and ZIO deliver them first; and below an early stop a native upstream's
+  completion can race the cancel (an extra end hook); fs2 / ZIO read an iterator (an `emits`
+  leaf, an element stage's emitted iterable) ahead of the demand - the first chunk is one
+  element, then doubling up to 64 (`MaxOutputChunk`; the head of a slow iterator is not held
+  back for a whole chunk, and a throwing read emits the elements read before it) - where
+  neutral / Akka read one per demand. A blocking source (`fromInputStream`,
+  `fromBlockingIterator`) is ONE implementation on every backend - the neutral blocking cursor
+  (Akka / Pekko: `CursorSourceStage`; not a bridge): reads on the blocking pool, a cancel never
+  waits for a stalled read, `close()` follows the last read exactly once, and a throwing
+  `close()` is logged, never a stream failure. fs2 / ZIO element stages process
+  chunks element by element (a throw emits the prefix first) and drain an emitted iterable
+  lazily - never `out ++= emit` (an infinite `LazyList` must stay back-pressured); ZIO user
+  functions run under `ZIO.attempt` (failures, not defects), and a native ZIO leaf's defect is
+  a failure for recover / mapError / onTerminate (`ZioCompiler.failureOf`); waits on user
+  futures are cancelable (fs2 `fromFutureCancelable`), termination hooks are awaited. The
+  Akka / Pekko sequencing nodes - concat (`ConcatQueueStage`) and flatMapConcat
+  (`FlatMapConcatStage`) - share `NestedStreamsLogic`: streams that follow one another run in
+  ONE stage however they nest (a chain of frames, one per flatMapConcat; a concat is unrolled
+  into its frame's queue of thunks, a defer / future stream resolved in place), so a recursive
+  stream (paging, polling) runs at a constant depth and in constant memory - compiled to the
+  built-in operators every level nests a stage, quadratic in the depth. Nothing runs ahead of
+  the demand (a thunk, a function or an outer element only when the downstream pulls after the
+  previous stream ended - never Akka's own flatMapConcat over the thunks, it opens the next
+  inner source early); the stage completes as soon as nothing is left, demand or not. Residual
+  (measured 2026-11-11, 10,000 / 50,000 / 100,000 levels; neutral and fs2 run every shape in
+  linear time, at most 2 s for 100,000): recursion through `recoverWith` still nests a stage
+  per level on Akka / Pekko - quadratic (10,000 levels: 22 s); ZIO nests a channel per level of
+  `flatMapConcat` / `futureStream` recursion (zio-streams' own concatMap) - quadratic too
+  (10,000: 2.5 s, 50,000: 70 s), `recoverWith` recursion is linear there. A streamed
+  response body that arrives with the response head goes through `StreamedBody.of` (core-akka):
+  a run that ended before the head arrived still runs-and-cancels the late source, which
+  aborts the request (`Source.futureSource` alone never reads it; pinned on every streaming
+  engine by the contract's `cancelBeforeHeadAbortedRequest`). `toFlow`'s fallback input (a
+  `prefixAndTail(0)` tail) has no subscription timeout and is cancelled when the pipe's output
+  ends unopened or the pipe's function throws; it can be consumed once. Akka / Pekko stages
+  that outlive their upstream (a pending hook / task) guard `onPull` with `isClosed(in)`.
+  Akka's publisher input buffer (`fromPublisher`'s `bufferSize`) is preallocated: capped at
+  `SourceCompiler.MaxInputBuffer` (4096). Every publisher into fs2 goes through the pull bridge
+  `Fs2Compiler.cursorStream` over a neutral cursor (`SubscriberCursor`) - never
+  `fs2.interop.flow.fromPublisher`, whose subscriber holds elements back until a chunk is full
+  (SSE in bursts; a stalled stream withheld events). `ZioCursor` runs a stream on ONE fiber for
+  the whole run (a fiber per pull took the children forked by that pull with it): `next()` hands
+  the fiber the demand for one chunk through an atomic state (Idle / Demand / Parked / Closed)
+  and a promise (`asked`); `cancel()` completes the outstanding `next()` with `None` at once and
+  interrupts the fiber - the scope closes once a pull in flight has finished; the stream's end
+  or failure is signalled after the scope closed. Its design is the TLA+ spec
+  `formal/tla/ZioCursor.tla` - change the spec with the class. ZIO keeps an interruption an
+  interruption (`failureOf`), where the cursor bridge sees a leaf's self-raised interruption as
+  a failure (sanctioned)
+- The neutral interpreter (`NeutralCompiler`) is pull-based: at most one outstanding
+  `Cursor.next()`, `cancel()` may race it (the pending future completes with `None`). Foreign
+  completions re-enter the run's `ec`; internal continuations use the `Trampoline`. Consecutive
+  map / mapConcat / stateful nodes fuse into one cursor (`FusedCursor` - keep its scan linear:
+  after feeding stage i+1 continue at i+1, never restart from the top); consecutive concats fuse
+  and a next stream that is itself a concat is flattened (constant stack for `def loop =
+  single(1) ++ loop`). Recursion in TAIL position through `flatMapConcat`, `recoverWith` and
+  `futureStream` runs at a constant depth too: a cursor that only passes its calls on says so
+  (`Cursor.forwardsTo`) and its holder skips it (`Cursors.resolve`); a `flatMapConcat` whose
+  upstream is known to have ended (`Cursor.exhausted` - asked only of strict collections, never
+  of a lazy one) continues in place with an inner stream that is itself a `flatMapConcat`.
+  Recursion NOT in tail position (an operator applied to the recursive call's result) nests a
+  cursor per level: deeper than the thread's stack, `Cursors.pull` fails the run with an
+  ordinary exception (a `StackOverflowError` is not `NonFatal` and would leave the run's future
+  incomplete). `concurrently` fails the stream as soon as its task HAS failed (read from the
+  future itself - a task that threw or was returned failed is not missed behind a synchronous
+  upstream). `AsyncBroadcastHub`: the first terminal event decides - an upstream result that
+  arrives after `shutdown()` (a failure racing it included) changes nothing. `CursorPublisher` pulls one result ahead of demand (RS 1.4: a failure
+  is signalled without demand); a `request` from outside its drain loop drains on the run's
+  `ec` (pulling runs the run's user functions - never on a subscriber's / IO thread), and the
+  loop yields `ec` every 1024 synchronous results (an ec that rejects: the loop continues
+  inline, iteratively - never recurse); the start task holds the loop while `onSubscribe` runs
+  (rule 1.3: a request from inside it only registers). A cursor that hands a promise to `ec`
+  (`SubscriberCursor`, the hub consumer) keeps it reachable for `cancel()` (`delivering`), so
+  a cancel in that window still completes the outstanding `next()` with `None`
+- Never call an upstream `Flow.Subscription` while holding a lock the upstream's thread may
+  need: `TransformPublisher` (jdk / zio-http streams) delivers downstream signals under its
+  monitor, so its upstream `request` / `cancel` calls are only recorded and issued by one
+  serializing loop (`flushUpstream`, RS 2.7) - skipped while `Thread.holdsLock(this)` (a cancel
+  a downstream issues from inside our signal, e.g. at `[DONE]`), so the thread's outermost frame
+  issues them after releasing the monitor; every entry point flushes after its synchronized
+  block. Nothing may unwind through that loop: downstream signals go through `signal` (a
+  throwing subscriber counts as a cancel, rule 2.13) and a throwing upstream `request` fails
+  the stream (3.16) - an escaped exception would leave the loop's counter up and swallow every
+  later cancel. Up to 1.1.5 it cancelled under the monitor (a downstream
+  `take(1)` racing the next element deadlocked two chained transforms), and requested under it
+  (a request racing the upstream's completion - fixed in 1.2.0); `SubscriberCursor` serializes
+  its subscription calls with a lock-free work-in-progress loop for the same reason
+- Wire format (since 1.2.0): every engine sends JSON bodies as `WireFormat.jsonBody` (Play WS's
+  `Json.toBytes` rendering: non-BMP characters such as emoji escaped as `\uXXXX`) and reports
+  it via `WSClientEngine.renderJsonBody`; `wireUrl` is the exact URL an engine sends (Play / jdk:
+  the shared `WireFormat.url`; sttp / pekko-http / zio-http: their library's rendering, built by
+  the same helper the request uses) - request signers (SigV4) depend on both. The testkit
+  contract (`asyncStreamContract`) pins them on every streaming engine
+- `TransportSettings.httpVersion` (since 1.2.0; honored by jdk) was added with a 1.1.x
+  binary-compatibility shim: the explicit companion extends `AbstractFunction2` and keeps the
+  2-arg `apply`, the class a 2-arg constructor and `copy`. MiMa does not report the changed
+  generic signature of the synthetic `unapply` (Tuple3): Scala 2 code compiled against 1.1.x
+  that calls it explicitly would fail with a ClassCastException (pattern matches use the
+  accessors; on Scala 3 the synthetic `unapply` returns the instance - unchanged)
+- The typed `CequenceWSFrameTooLongException(message, maxFrameLength)` (since 1.2.0) is what
+  every engine fails an oversized frame with: the core framer (jdk, zio-http, `ByteFraming`)
+  throws it, the Akka / Pekko engines map Akka's `FramingException` to it
+  (`StreamFailures.frameTooLong`); the message is unchanged
+- The Akka / Pekko stream engines return their `execJsonAsyncStream` / `execRawAsyncStream` as
+  native leaves (`SourceInterop.engineLeaf` over `Source.lazySource` - Play and pekko-http fire
+  the request when `execJsonStream` is CALLED, the neutral stream must be cold). zio-http
+  returns native ZIO leaves (`ZioInterop.byteChunkEngineLeaf` over `ZStream.suspend` - the
+  request context and request are evaluated per run; the JSON stream is that leaf +
+  `JsonStreamPipes.jsonFrames`, compiled natively): `toZStream` / `toZByteStream` cost 0 bridges,
+  a neutral run 1 per stream. `preflight` (the 404 check of `execStreamDownload`) keeps such
+  a stream native: a native leaf that mixes in the core hook `NativePreflight`
+  (`private[wsclient]`; `SourceLeaf`, `ZioLeaf` - not fs2, which takes the neutral preflight)
+  preflights the WHOLE stream with its backend's compiler, on the leaf's own materializer /
+  runtime (the caller's `ec` is not used), and returns a native single-run leaf - a download's
+  plan is `native(<backend>) -> mapError`, 0 bridges for a native consumer (pinned per engine:
+  the contract's `downloadPlan`, the provider specs). Akka / Pekko: `prefixAndTail(1)` +
+  `Sink.head`; the tail has NO subscription timeout (the caller may hold the stream for any
+  time - with the default 5 s cancel mode the held run would be torn down) and the replay
+  claims its single run in `Source.fromMaterializer` - at materialization, not on first demand
+  (a `lazySource` there would leak the held request when a run is cancelled before it pulls).
+  ZIO: the stream's `toPull` in a `Scope` of its own, closed with the run's exit (or at once
+  when the stream is empty / failed); the future fails with the stream's own exception
+  (`start.either` - no fiber-trace suppressed exception attached). An unrun preflighted stream
+  holds its request open, as on the neutral path. `toZByteStream` peepholes the `Mapped(ZioLeaf, FromChunk)` shape
+  back to the chunk stream (as `toByteStringSource` does for Akka). jdk inherits the
+  publisher-wrapping defaults of `WSClientOutputStreamCore`

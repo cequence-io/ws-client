@@ -1,0 +1,15 @@
+--- a/CursorDrain.tla
++++ b/CursorDrain.tla
+@@ -68,11 +68,9 @@
+ begin
+ R1: demand := demand + 1;
+     requested := requested + 1;
+-R2: if wip = 0 then                   \* wip.getAndIncrement() == 0: the loop runs on the ec
++R2: if wip = 0 then
+       wip := 1;
+       pendingDrains := pendingDrains + 1;
+-    else
+-      wip := wip + 1;
+     end if;
+     return;
+ end procedure;

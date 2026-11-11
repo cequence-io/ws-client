@@ -39,8 +39,56 @@ import io.cequence.wsclient.service.ws.Timeouts
  *   (zio-http tunnels via `CONNECT` and still resolves the TARGET host through local DNS); the
  *   pekko-http backend ignores it with a warning. A proxy is a property of the client: all
  *   sites served through one engine go through the same proxy.
+ * @param httpVersion
+ *   the HTTP version the client speaks (since 1.2.0); `None` keeps the backend's default.
+ *   Honored by the jdk backend (`java.net.http` defaults to HTTP/2, falling back to HTTP/1.1
+ *   per connection); the other backends ignore it.
  */
 final case class TransportSettings(
   timeouts: Timeouts = Timeouts(),
-  proxyURL: Option[String] = None
-)
+  proxyURL: Option[String] = None,
+  httpVersion: Option[HttpVersion] = None
+) {
+
+  // binary compatibility with 1.1.x (two fields)
+  def this(
+    timeouts: Timeouts,
+    proxyURL: Option[String]
+  ) = this(timeouts, proxyURL, None)
+
+  def copy(
+    timeouts: Timeouts = timeouts,
+    proxyURL: Option[String] = proxyURL,
+    httpVersion: Option[HttpVersion] = httpVersion
+  ): TransportSettings =
+    new TransportSettings(timeouts, proxyURL, httpVersion)
+
+  // binary compatibility with 1.1.x
+  def copy(
+    timeouts: Timeouts,
+    proxyURL: Option[String]
+  ): TransportSettings =
+    new TransportSettings(timeouts, proxyURL, httpVersion)
+}
+
+// a Function2, as the 1.1.x companion of the two-field case class was (binary compatibility)
+object TransportSettings
+    extends scala.runtime.AbstractFunction2[Timeouts, Option[String], TransportSettings] {
+
+  // binary compatibility with 1.1.x
+  def apply(
+    timeouts: Timeouts,
+    proxyURL: Option[String]
+  ): TransportSettings =
+    new TransportSettings(timeouts, proxyURL, None)
+}
+
+/** The HTTP version an engine's client speaks - see [[TransportSettings.httpVersion]]. */
+sealed abstract class HttpVersion(val name: String) {
+  override def toString: String = name
+}
+
+object HttpVersion {
+  case object Http11 extends HttpVersion("HTTP/1.1")
+  case object Http2 extends HttpVersion("HTTP/2")
+}

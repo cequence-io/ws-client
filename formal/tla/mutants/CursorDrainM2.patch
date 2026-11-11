@@ -1,0 +1,11 @@
+--- a/CursorDrain.tla
++++ b/CursorDrain.tla
+@@ -205,7 +205,7 @@
+      end either;
+ NX2: inSignal := inSignal - 1;
+      goto DL1;
+-DLX: if wip = missed then             \* missed = wip.addAndGet(-missed): the loop is left
++DLX: if TRUE then             \* missed = wip.addAndGet(-missed): the loop is left
+        wip := 0;
+        active := active - 1;
+        return;

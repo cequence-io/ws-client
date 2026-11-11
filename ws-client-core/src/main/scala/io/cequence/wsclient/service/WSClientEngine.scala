@@ -2,7 +2,7 @@ package io.cequence.wsclient.service
 
 import io.cequence.wsclient.domain.{CequenceWSException, RichResponse, SiteBinding}
 import io.cequence.wsclient.service.spi.TransportSettings
-import io.cequence.wsclient.service.ws.FilePart
+import io.cequence.wsclient.service.ws.{FilePart, WireFormat}
 import play.api.libs.json.{JsObject, JsValue}
 
 import java.io.File
@@ -208,6 +208,44 @@ trait WSClientEngine extends WSClientBase {
     extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
+
+  /////////////////
+  // WIRE FORMAT //
+  /////////////////
+
+  /**
+   * The exact JSON text this engine sends as the body for `json` (since 1.2.0) - for request
+   * signers (e.g. AWS SigV4) that must sign the bytes on the wire. Every engine renders bodies
+   * with [[io.cequence.wsclient.service.ws.WireFormat.jsonBody]].
+   */
+  def renderJsonBody(json: JsValue): String = WireFormat.jsonBody(json)
+
+  /**
+   * The exact URL (path and query) this engine sends for these arguments (since 1.2.0) - for
+   * request signers. The parameters include the site's `WsRequestContext.extraParams` (the
+   * context function is evaluated for this call; a request evaluates it again - with a
+   * `requestContextFun`, sign and send with one fixed binding: `site.copy(requestContext =
+   * site.requestContextFn(), requestContextFun = None)`). The default is the base URL with an
+   * RFC 3986-encoded query appended (a query in the endpoint string kept byte for byte) - the
+   * Play and jdk engines; an engine whose HTTP library normalizes the URL overrides it with
+   * that library's rendering.
+   */
+  def wireUrl(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil
+  ): String =
+    WireFormat.url(site.createURL(Some(endPoint), endPointParam), wireParams(site, params))
+
+  // the call's parameters plus the site's extra params (one evaluation of the context function)
+  private[wsclient] def wireParams(
+    site: SiteBinding,
+    params: Seq[(String, Option[Any])]
+  ): Seq[(String, Option[Any])] =
+    params ++ site.requestContextFn().extraParams.map { case (key, value) =>
+      key -> Some(value)
+    }
 
   /////////
   // AUX //

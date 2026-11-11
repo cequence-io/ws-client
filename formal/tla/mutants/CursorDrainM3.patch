@@ -1,0 +1,27 @@
+--- a/CursorDrain.tla
++++ b/CursorDrain.tla
+@@ -223,8 +223,7 @@
+ W0: if self # Starter then
+       goto W1;
+     end if;
+-B1: wip := wip + 1;                   \* the start task holds the loop
+-    assert inSignal = 0;              \* onSubscribe
++B1: assert inSignal = 0;              \* onSubscribe
+     inSignal := inSignal + 1;
+     subscribed := TRUE;
+ B2: either                            \* what the subscriber does inside onSubscribe
+@@ -245,7 +244,13 @@
+ B5: if cancelled then                 \* cancelled meanwhile
+       cursorCancelled := TRUE;
+     end if;
+-B6: call DrainLoop();                 \* releases the count taken above
++B6: if wip = 0 then
++      wip := 1;
++      call DrainLoop();
++      goto W1;
++    else
++      wip := wip + 1;
++    end if;
+ W1: await pendingDrains > 0 \/ Quiet;
+     if pendingDrains > 0 then
+       pendingDrains := pendingDrains - 1;

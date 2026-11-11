@@ -117,5 +117,20 @@ class JsonStreamFramesSpec extends AnyWordSpec with Matchers {
       // a JSON serializer never puts a colon at a line start
       intercept[CequenceWSException](parseFrame("data: {\"a\"\n:1}"))
     }
+
+    "quote at most 500 characters of a frame, keeping the cause" in {
+      val large = "data: " + ("x" * 5000)
+      val notJson = intercept[CequenceWSException](parseFrame(large))
+      // our excerpt (500) plus Jackson's own (it quotes at most 500 characters too)
+      notJson.getMessage should not include ("x" * 1200)
+      notJson.getMessage.length should be < 1500
+      notJson.getCause should not be null
+
+      // beyond Jackson's nesting limit: not a JsonParseException - the catch-all branch
+      val deep = "data: " + ("[" * 3000) + ("]" * 3000)
+      val tooDeep = intercept[CequenceWSException](parseFrame(deep))
+      tooDeep.getMessage.length should be < 2000
+      tooDeep.getCause should not be null
+    }
   }
 }

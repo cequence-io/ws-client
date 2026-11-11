@@ -6,7 +6,7 @@ import io.cequence.wsclient.service.{
   WSClientEngine,
   WSClientOutputStreamCore
 }
-import io.cequence.wsclient.service.spi.TransportSettings
+import io.cequence.wsclient.service.spi.{HttpVersion, TransportSettings}
 import io.cequence.wsclient.stream.{
   BoundedBodyReader,
   DeferredPublisher,
@@ -15,17 +15,18 @@ import io.cequence.wsclient.stream.{
   StreamTransformers,
   TransformPublisher
 }
-import play.api.libs.json.{JsValue, Json}
+import play.api.libs.json.JsValue
 
 import java.io.File
 import java.net.http.HttpRequest.BodyPublishers
 import java.net.http.HttpResponse.BodyHandlers
 import java.net.http.{HttpClient, HttpRequest, HttpResponse, HttpTimeoutException}
-import java.net.{ConnectException, URI, URLEncoder, UnknownHostException}
+import java.net.{ConnectException, URI, URISyntaxException, URLEncoder, UnknownHostException}
 import java.nio.channels.UnresolvedAddressException
 import java.time.Duration
 import java.util.concurrent.{CompletableFuture, CompletionException, CompletionStage}
 import scala.concurrent.{blocking, ExecutionContext, Future, Promise}
+import scala.util.control.NonFatal
 
 /**
  * A dependency-free, SITE-STATELESS engine backed by the JDK 11+ `java.net.http.HttpClient` -
@@ -79,6 +80,10 @@ final class JdkWSClientEngine private[ws] (
     transportSettings.proxyURL.foreach { proxyUrl =>
       val (host, port) = ProxyUrlUtil.hostAndPort(proxyUrl)
       builder.proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(host, port)))
+    }
+    transportSettings.httpVersion.foreach {
+      case HttpVersion.Http11 => builder.version(HttpClient.Version.HTTP_1_1)
+      case HttpVersion.Http2  => builder.version(HttpClient.Version.HTTP_2)
     }
     builder.build()
   }
@@ -209,7 +214,7 @@ final class JdkWSClientEngine private[ws] (
       s"${encode(key)}=${encode(value.toString)}"
     }.mkString("&")
 
-    val request = requestBuilder(
+    def request = requestBuilder(
       site,
       endPoint,
       endPointParam,
@@ -439,7 +444,7 @@ final class JdkWSClientEngine private[ws] (
         if (bodyParams.nonEmpty)
           builder.method(
             method,
-            BodyPublishers.ofString(Json.stringify(toJsBodyObject(bodyParams)))
+            BodyPublishers.ofString(renderJsonBody(toJsBodyObject(bodyParams)))
           )
         else
           builder.method(method, BodyPublishers.noBody())
@@ -539,14 +544,14 @@ final class JdkWSClientEngine private[ws] (
     extraHeaders: Seq[(String, String)],
     acceptableStatusCodes: Seq[Int]
   ): Future[RichResponse] = {
-    val request = requestBuilder(
+    def request = requestBuilder(
       site,
       endPoint,
       endPointParam,
       params,
       extraHeaders,
       defaultContentType = Some("application/json")
-    ).method(method, BodyPublishers.ofString(Json.stringify(body)))
+    ).method(method, BodyPublishers.ofString(renderJsonBody(body)))
 
     execRequest(site, request, Some(endPoint), acceptableStatusCodes)
   }
@@ -561,7 +566,7 @@ final class JdkWSClientEngine private[ws] (
     extraHeaders: Seq[(String, String)],
     acceptableStatusCodes: Seq[Int]
   ): Future[RichResponse] = {
-    val request = requestBuilder(
+    def request = requestBuilder(
       site,
       endPoint,
       endPointParam,
@@ -628,21 +633,20 @@ final class JdkWSClientEngine private[ws] (
     val extraStringParams = requestContext.extraParams.map { case (tag, value) =>
       (tag, Some(value))
     }
-    val paramsString = (params ++ extraStringParams).collect { case (tag, Some(value)) =>
-      s"${encode(tag)}=${encode(value.toString)}"
-    }.mkString("&")
 
-    val url = {
-      val base = site.createURL(Some(endPoint), endPointParam)
-      if (paramsString.isEmpty) base
-      // append with '&' when the URL already carries a query (e.g. Azure-style ?api-version=...)
-      else base + (if (base.contains("?")) "&" else "?") + paramsString
-    }
+    // RFC 3986-encoded parameters (%20 for a space; up to 1.1.5 form encoding, '+'), appended
+    // with '&' to a query the endpoint string carries - which is sent byte for byte (`wireUrl`)
+    val url = WireFormat.url(
+      site.createURL(Some(endPoint), endPointParam),
+      params ++ extraStringParams
+    )
 
-    val builder = HttpRequest.newBuilder(URI.create(url))
+    val builder = HttpRequest.newBuilder(requestUri(url, site, endPoint))
     timeouts.requestTimeout.foreach(ms => builder.timeout(Duration.ofMillis(ms)))
 
-    val allHeaders = requestContext.authHeaders ++ extraHeaders
+    // java.net.http refuses Host, Connection, Content-Length, Expect, Upgrade from a caller
+    val allHeaders =
+      JdkRestrictedHeaders.filter(requestContext.authHeaders ++ extraHeaders)
     allHeaders.foreach { case (key, value) =>
       // setHeader for Content-Type - `header` appends, which would send two Content-Type
       // headers once the body-implied default is added below (or the caller repeats it)
@@ -654,52 +658,78 @@ final class JdkWSClientEngine private[ws] (
     builder
   }
 
+  // URI.create's message quotes the whole URL - whose query may hold an API key: only the
+  // reason and the position are reported
+  private def requestUri(
+    url: String,
+    site: SiteBinding,
+    endPoint: String
+  ): URI =
+    try new URI(url)
+    catch {
+      case e: URISyntaxException =>
+        throw new CequenceWSException(
+          s"${serviceAndEndpoint(site, Some(endPoint))}: Invalid request URL. " +
+            s"${e.getReason} at index ${e.getIndex}."
+        )
+    }
+
   private def isContentType(headerName: String) = headerName.equalsIgnoreCase("Content-Type")
 
+  // `request` is built here: a request that cannot be built (an invalid URL, a throwing
+  // request-context function) fails the future, never the call
   private def execRequest(
     site: SiteBinding,
-    request: HttpRequest.Builder,
+    request: => HttpRequest.Builder,
     endPointForLogging: Option[String],
     acceptableStatusCodes: Seq[Int]
   ): Future[RichResponse] = {
-    val promise = Promise[HttpResponse[String]]()
+    val promise = Promise[HttpResponse[Array[Byte]]]()
 
     // HttpRequest.timeout covers the wait for the headers only - bound the body by the rest of
-    // the same budget
+    // the same budget. The text is decoded as BodyHandlers.ofString does (the Content-Type's
+    // charset, else UTF-8); the raw bytes are kept where it does not reproduce them
+    // (binary-safe `Response.bytes`)
     val startNanos = System.nanoTime()
-    val handler: HttpResponse.BodyHandler[String] = responseInfo =>
+    val handler: HttpResponse.BodyHandler[Array[Byte]] = responseInfo =>
       new DeadlineBodySubscriber(
-        BodyHandlers.ofString().apply(responseInfo),
+        BodyHandlers.ofByteArray().apply(responseInfo),
         requestTimeoutMs - (System.nanoTime() - startNanos) / 1000000L,
         s"response body not received within $requestTimeoutMs ms"
       )
 
-    client.sendAsync(request.build(), handler).whenComplete {
-      (
-        response,
-        error
-      ) =>
-        if (error != null) promise.failure(unwrap(error)) else promise.success(response)
-        ()
-    }
+    try
+      client.sendAsync(request.build(), handler).whenComplete {
+        (
+          response,
+          error
+        ) =>
+          if (error != null) promise.tryFailure(unwrap(error))
+          else promise.trySuccess(response)
+          ()
+      }
+    catch { case NonFatal(e) => promise.tryFailure(e) }
 
     promise.future.map { rawResponse =>
+      val charset = EngineSupport.charsetOf(
+        Option(rawResponse.headers.firstValue("Content-Type").orElse(null))
+      )
+      val body =
+        ResponseBodies(rawResponse.body, charset, serviceName(site), endPointForLogging)
       val response =
         if (acceptableStatusCodes.contains(rawResponse.statusCode))
-          Some(
-            StringBackedResponse(rawResponse.body, serviceName(site), endPointForLogging)
-          )
+          Some(body)
         else None
 
       SimpleRichResponse(
         response,
-        status = StatusData(rawResponse.statusCode, rawResponse.body),
+        status = StatusData(rawResponse.statusCode, body.string),
         headers = headersToMap(rawResponse)
       )
     }.recover(recoverErrors(site)(serviceAndEndpoint(site, endPointForLogging)))
   }
 
-  private def headersToMap(response: HttpResponse[String]): Map[String, Seq[String]] = {
+  private def headersToMap(response: HttpResponse[_]): Map[String, Seq[String]] = {
     val builder = Map.newBuilder[String, Seq[String]]
     response.headers.map.forEach {
       (

@@ -5,6 +5,7 @@ import io.cequence.wsclient.domain.CequenceWSException
 import play.api.libs.json.{JsValue, Json}
 
 import java.util.regex.Pattern
+import scala.util.control.NonFatal
 
 /**
  * Pure, backend-agnostic parsing of SSE/JSON stream frames - the single source of truth for
@@ -113,15 +114,19 @@ object JsonStreamFrames {
         }
       }
     } catch {
+      // a remote value never enters a message whole: the first 500 characters of the frame
       case e: JsonParseException =>
         throw new CequenceWSException(
-          s"JSON marshaller problem - response is not a JSON: ${e.getMessage}. Unmarshalled string: $frame."
+          s"JSON marshaller problem - response is not a JSON: ${e.getMessage}. Unmarshalled string: ${frame
+              .take(500)}.",
+          e
         )
       case e: CequenceWSException =>
         throw e
-      case e: Throwable =>
+      case NonFatal(e) =>
         throw new CequenceWSException(
-          s"JSON marshaller problem - reason: ${e.getMessage}: Unmarshalled string: $frame."
+          s"JSON marshaller problem - reason: ${e.getMessage}: Unmarshalled string: ${frame.take(500)}.",
+          e
         )
     }
 }

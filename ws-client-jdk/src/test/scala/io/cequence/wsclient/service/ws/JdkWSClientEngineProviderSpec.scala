@@ -2,6 +2,7 @@ package io.cequence.wsclient.service.ws
 
 import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
 import io.cequence.wsclient.domain.{
+  CequenceWSException,
   CequenceWSTimeoutException,
   CequenceWSUnknownHostException,
   SimpleRichResponse,
@@ -11,13 +12,15 @@ import io.cequence.wsclient.domain.{
 }
 import io.cequence.wsclient.service.spi.{
   EngineCapability,
+  HttpVersion,
   TransportSettings,
   WSClientEngineRegistry
 }
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
-import io.cequence.wsclient.testkit.LatchedSubscriber
+import io.cequence.wsclient.testkit.{AsyncStreamContract, LatchedSubscriber}
 import io.cequence.wsclient.testkit.TestServers.{
+  asyncStreamContract,
   CookieIsolation,
   cookieIsolation,
   MultipartInjection,
@@ -47,6 +50,35 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
   private val expectedEngineId = "jdk"
 
   s"$expectedEngineId provider" should {
+
+    "drop only the refused headers java.net.http derives itself (never e.g. Referer)" in {
+
+      JdkRestrictedHeaders.isRestricted("Host") shouldBe true
+
+      JdkRestrictedHeaders.isRestricted("content-length") shouldBe true
+
+      JdkRestrictedHeaders.isRestricted("Referer") shouldBe false
+
+      JdkRestrictedHeaders.isRestricted("X-Api-Key") shouldBe false
+
+    }
+
+    "send (or, on java.net.http, drop) caller-set Host / Connection headers - never fail" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        io.cequence.wsclient.testkit.TestServers
+          .restrictedHeaders(engine) shouldBe a[Right[_, _]]
+      finally engine.close()
+    }
+
+    "keep a buffered response's raw bytes (Response.bytes)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try {
+        val (intact, latin1) = io.cequence.wsclient.testkit.TestServers.bufferedBytes(engine)
+        intact shouldBe true
+        info(s"Latin-1 text decoded as: $latin1")
+      } finally engine.close()
+    }
 
     "be discovered via ServiceLoader with the expected id and capabilities" in {
       val providers = WSClientEngineRegistry.providers
@@ -101,6 +133,39 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
       try queryEncoding(engine) shouldBe QueryEncoding.expected
       finally engine.close()
+    }
+
+    "honor the AsyncStream contract (cold, framing, cancel, downloads, wire format)" in {
+      val engine =
+        WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+      try asyncStreamContract(engine) shouldBe AsyncStreamContract.expected
+      finally engine.close()
+    }
+
+    "speak the configured HTTP version" in {
+      // java.net.http defaults to HTTP/2: over plain http it offers an h2c upgrade
+      def upgradeHeaderSent(settings: TransportSettings): Boolean = {
+        val upgrade = new java.util.concurrent.atomic.AtomicReference[String]("")
+        withServer("/" -> { (exchange: HttpExchange) =>
+          upgrade.set(Option(exchange.getRequestHeaders.getFirst("Upgrade")).getOrElse(""))
+          respond(exchange, 200, "{}")
+        }) { port =>
+          val engine = WSClientEngineRegistry(settings, Some(expectedEngineId))
+          try
+            Await.result(
+              engine.execGETRich(SiteBinding(s"http://localhost:$port"), "v"),
+              10.seconds
+            )
+          finally engine.close()
+        }
+        upgrade.get().contains("h2c")
+      }
+
+      upgradeHeaderSent(TransportSettings()) shouldBe true
+      upgradeHeaderSent(TransportSettings(httpVersion = Some(HttpVersion.Http2))) shouldBe true
+      upgradeHeaderSent(
+        TransportSettings(httpVersion = Some(HttpVersion.Http11))
+      ) shouldBe false
     }
 
     "fail a call whose response stalls after the headers within the request / read timeout" in {
@@ -255,6 +320,35 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
           30.seconds
         )
       }
+
+      engine.close()
+    }
+
+    "fail an invalid request URL through the future / the stream, without the URL (its query may hold a key)" in {
+      val engine =
+        WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+      val site = SiteBinding(
+        "http://localhost:9",
+        WsRequestContext(extraParams = Seq("api_key" -> "s3cr3t-key"))
+      )
+
+      // never thrown by the call itself
+      val call = engine.execGETRich(site, "not a path")
+      val failure = intercept[CequenceWSException](Await.result(call, 30.seconds))
+      failure.getMessage should include("Invalid request URL")
+      failure.getMessage should include("Illegal character in path at index")
+      failure.getMessage should not include "s3cr3t-key"
+      failure.getMessage should not include "api_key"
+
+      val posted = engine.execPOSTRich(site, "not a path", bodyParams = Seq("a" -> None))
+      intercept[CequenceWSException](Await.result(posted, 30.seconds))
+
+      val subscriber = new LatchedSubscriber[JsValue]
+      engine.execJsonStreamPublisher(site, "not a path", "POST").subscribe(subscriber)
+      subscriber.awaitDone(30) shouldBe true
+      subscriber.error.get shouldBe a[CequenceWSException]
+      subscriber.error.get.getMessage should include("Invalid request URL")
+      subscriber.error.get.getMessage should not include "s3cr3t-key"
 
       engine.close()
     }
