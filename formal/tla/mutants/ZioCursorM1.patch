@@ -1,0 +1,13 @@
+--- a/ZioCursor.tla
++++ b/ZioCursor.tla
+@@ -119,8 +119,8 @@
+ F1: sawCancelled := cancelled;        \* finish, on the run's ec
+ F2: assert sawCancelled \/ outcome # "none";
+     ended := IF sawCancelled THEN "Stopped" ELSE outcome;
+-F3: state := "Closed";
+-F4: fpend := asked;
++F3: fpend := asked;
++F4: state := "Closed";
+ F5: TryComplete(fpend, ended);
+ end process;
+ 

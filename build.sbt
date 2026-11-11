@@ -209,8 +209,16 @@ lazy val playWsPekkoDependencies = Def.setting {
 // the working directory
 lazy val forkedTestsInTarget = Seq(
   Test / fork := true,
-  Test / forkOptions := (Test / forkOptions).value.withWorkingDirectory(target.value)
+  Test / forkOptions := (Test / forkOptions).value.withWorkingDirectory(target.value),
+  verifyKnobs
 )
+
+// the knobs of the exhaustive specs (-Dwsclient.verify.*: scope, depth, invocation budget) reach
+// a forked test JVM
+lazy val verifyKnobs =
+  Test / javaOptions ++= sys.props.toSeq.collect {
+    case (key, value) if key.startsWith("wsclient.verify.") => s"-D$key=$value"
+  }
 
 // Reactive Streams TCK (TestNG-based) for the AsyncStream <-> Flow.Publisher bridges, run
 // through ScalaTest's TestNG integration (the scalatestplus line matching ScalaTest 3.2.16)
@@ -453,6 +461,41 @@ lazy val `ws-client-zio` =
     )
     .dependsOn(`ws-client-core`, `ws-client-testkit` % Test)
 
+// Verification of the stream layer beyond the per-module specs - never published. Scala 2.13
+// only: the one version on which the neutral interpreter and the Akka, fs2 and ZIO compilers
+// meet.
+//  - small-scope (bounded-exhaustive) differential specs: ordinary tests
+//  - Lincheck model checks of the lock-free bridges: the `modelCheck` command (a forked main,
+//    about 7 minutes - not part of `test`)
+val lincheckVersion = "3.7"
+
+lazy val `ws-client-verification` =
+  (project in file("ws-client-verification"))
+    .settings(
+      name := "ws-client-verification",
+      crossScalaVersions := List(scala213),
+      libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
+      libraryDependencies += "org.jetbrains.lincheck" % "lincheck" % lincheckVersion % Test,
+      testLoggingSettings,
+      Test / fork := true,
+      Test / javaOptions += "-Xmx2g",
+      verifyKnobs,
+      // Lincheck attaches its agent to the running JVM
+      Test / run / fork := true,
+      Test / run / javaOptions ++= Seq(
+        "-Djdk.attach.allowAttachSelf=true",
+        "-XX:+EnableDynamicAgentLoading"
+      ),
+      Test / run / outputStrategy := Some(StdoutOutput),
+      publish / skip := true
+    )
+    .dependsOn(`ws-client-core-akka`, `ws-client-fs2`, `ws-client-zio`)
+
+addCommandAlias(
+  "modelCheck",
+  "ws-client-verification/Test/runMain io.cequence.wsclient.verification.ModelChecks"
+)
+
 lazy val root = (project in file("."))
   .settings(
     name := "ws-client",
@@ -474,5 +517,6 @@ lazy val root = (project in file("."))
     `ws-client-fs2`,
     `ws-client-zio`,
     `ws-client-testkit`,
+    `ws-client-verification`,
     `json-repair`
   )

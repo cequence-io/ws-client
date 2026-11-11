@@ -1,0 +1,11 @@
+--- a/TransformChain.tla
++++ b/TransformChain.tla
+@@ -181,7 +181,7 @@
+     goto N6;
+ N5: owed[s] := owed[s] + 1;           \* requestUpstream()
+     call Flush(s);
+-N6: call Flush(s);
++N6: skip;
+ N7: return;
+ end procedure;
+ 
