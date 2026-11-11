@@ -470,6 +470,21 @@ a mutant, and an invariant TLC rejects is first read as a fact about the class (
 `CancelCompletes` in the README) before the spec is weakened; never put an exact state count
 of a counterexample run into a doc (it varies per run).
 
+## Documentation layout
+
+- `README.md` is the landing page only: overview chart, the backends and stream-abstractions
+  tables, installation, quick start, the short "Good to know" list and the Documentation table.
+  Its badge and dependency snippets stay at the RELEASED version until the next one is on Maven
+  Central.
+- Topic pages live in `docs/` (`engines.md`, `sites-and-requests.md`, `streaming.md`,
+  `architecture.md`, `compatibility.md`, `verification.md`): a new behavior or caveat goes to
+  its topic page, never back into the README. Every page opens with a title, the back link to
+  the README and a lead paragraph.
+- Release notes go to the root `CHANGELOG.md` (newest first; behavior changes and upgrade notes
+  per version), not into the README.
+- Charts are Mermaid blocks (GitHub renders them): quote every node / edge label, and re-check
+  that a changed block still parses.
+
 ## Key Dependencies
 
 - Play JSON - JSON serialization/deserialization
@@ -773,7 +788,7 @@ Style" and Odersky's "Lean Scala".
 - Artifact rename hazard: the pre-1.0 `ws-client-play` / `ws-client-play-stream` artifacts and
   their ≥ 1.0.0 successors `ws-client-play-akka` / `ws-client-play-akka-stream` share FQCNs
   but not artifact ids, so there is no eviction - old + new on one classpath means
-  jar-order-dependent shadowing (README documents exclusion rules). `WSClientEngineRegistry`
+  jar-order-dependent shadowing (`docs/compatibility.md` documents exclusion rules). `WSClientEngineRegistry`
   probes marker classes via `ClassLoader.getResources` on first use and logs a warning naming
   the conflicting jars (covers akka+pekko mixing and old+renamed coexistence); with the config
   key `ws-client.strict-classpath = true` (or the same system property) it throws a
@@ -851,7 +866,7 @@ Style" and Odersky's "Lean Scala".
   via `viaNative`; a new LEAF: a neutral `NativeStream` via `native`, or `fromCursor`), so
   interop jars built before a NEW visitor method keep working - nothing more: the interop
   modules use other `private[wsclient]` core internals, so all ws-client artifacts must share
-  one version (README says so). Semantics are pinned by
+  one version (the README and `docs/compatibility.md` say so). Semantics are pinned by
   differential specs (native vs neutral: core-akka/-pekko `SourceDifferentialSpec`, the fs2 and
   ZIO specs; exhaustively in a small scope by `OperatorSmallScopeSpec`) - sanctioned
   differences: on a failure Akka's / Pekko's stages fail fast - a failure overtakes elements a
