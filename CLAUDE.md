@@ -53,7 +53,8 @@ The project uses **SBT** as the build tool.
 
 ### Module Structure
 
-The project is organized into 15 SBT modules (11 handwritten + 3 Pekko mirrors + a test-only testkit):
+The project is organized into 16 SBT modules (11 handwritten + 3 Pekko mirrors + the test-only
+testkit and verification modules):
 
 1. **ws-client-core** - Core abstractions and interfaces (Akka-free)
    - No concrete HTTP implementation, no Akka dependency
@@ -80,7 +81,7 @@ The project is organized into 15 SBT modules (11 handwritten + 3 Pekko mirrors +
    - Provides `StreamResponseImplicits` for `asSafeSource` on `Response`/`RichResponse`
    - Contains `PollingHelper`, `ParallelTakeFirstAdapter`, `ServiceBaseAdaptersAkka`
    - The Akka interop of `AsyncStream` (since 1.2.0, package `io.cequence.wsclient.stream`):
-     `SourceCompiler` (every node natively; the three custom stages in `stream/stages`),
+     `SourceCompiler` (every node natively; the custom stages in `stream/stages`),
      `SourceLeaf` / `FlowPipe`, `SourceInterop`, the opt-in `SourceConversions`, and
      `concurrent.ActorSchedulers`. New file and class names here must not contain "Akka" (the
      generator renames paths); public names are flavor-neutral, so downstream code compiles
@@ -219,6 +220,10 @@ The project is organized into 15 SBT modules (11 handwritten + 3 Pekko mirrors +
    for the fallback) and `ZioCompiler` / `ZioInterop` / `ZioConversions` (zio-streams 2.1.26 -
    the zio-http engine's ZIO; hand-written pull bridges over the neutral cursors, no
    zio-interop-reactivestreams)
+
+10. **ws-client-verification** - verification of the stream layer beyond the per-module specs
+    (never published; Scala 2.13 only - the one version on which the neutral interpreter and the
+    Akka, fs2 and ZIO compilers meet). See "Verification" under Testing.
 
 ### Key Architectural Patterns
 
@@ -365,6 +370,105 @@ every `_3` jar of a staged release (default `target/sonatype-staging/<version>`)
   `sbt +tastyCheck`
 - The forked test JVMs of core, core-akka and core-pekko run in `target/`: TestNG (the Reactive
   Streams TCK suites) writes report files into the working directory
+
+### Verification (since 1.2.0)
+
+Three layers beyond the example-based and random specs:
+
+- **Small-scope (bounded-exhaustive) specs** - ordinary tests, part of `sbt test`. EVERY input in
+  a small scope against a list model written from the scaladoc alone:
+  `FramingSmallScopeSpec` (core: every string x every chunking x frame limits, for
+  `ByteFraming.delimiter` and the engines' `DelimiterFramer`; its two allowed divergences are
+  named in `classify` and pinned by a test that fails once they are fixed) and
+  `OperatorSmallScopeSpec` (ws-client-verification: every operator pipeline up to a depth, with
+  failures injected at every user function, on the neutral interpreter and the Akka, fs2 and ZIO
+  compilers; neutral / fs2 / ZIO must match the model exactly, Akka may only differ by
+  `FailedFast`). Scopes: `-Dwsclient.verify.framing.maxLength` (default 5; audited at 6) and
+  `-Dwsclient.verify.operators.depth` (default 2; audited at 3, about 2 minutes). build.sbt's
+  `verifyKnobs` forwards every `-Dwsclient.verify.*` into the forked JVMs.
+- **Lincheck model checks** - `sbt modelCheck` (a forked main in ws-client-verification, NOT part
+  of `test`; about 7 minutes at the default 1000 interleavings per scenario,
+  `-Dwsclient.verify.modelcheck.invocations` / `.only` / `.traceLines`): the real classes -
+  `TransformPublisher`, `CursorPublisher`, `SubscriberCursor`, `AsyncBroadcastHub`, `ZioCursor` -
+  under the interleavings of each scenario's threads. A scenario builds everything inside its
+  body (`ThreadPerTask` as the ec, so tasks are interleaved too) and checks with `ensure`; a
+  failure prints the interleaving and writes it whole to
+  `ws-client-verification/target/model-check/<scenario>.trace`. Lincheck notes: a suite whose
+  code legitimately loops long needs a `loopBound` (the ZIO suite: a fiber is an interpreter
+  loop, and Lincheck's default bound of 50 reports it as "Concurrent test has hung") - set
+  through Lincheck's Kotlin-`internal` settings entry point (`ModelChecks.check`), to be
+  re-checked on a Lincheck upgrade; the `ArrayIndexOutOfBoundsException` stack traces (ASM, one
+  ZIO class stays uninstrumented) and `[WARN] Failed to get object field offset` lines it
+  prints are noise.
+- **TLA+ specs** - `formal/tla` (PlusCal; `check.sh` runs TLC over every spec, config and
+  mutant and compares each outcome with the expected one; the tools jar is fetched, not
+  committed): the designs of `ZioCursor`, the `CursorPublisher` drain loop and two chained
+  `TransformPublisher`s, each label one atomic step of the implementation. A change to one of
+  those classes' synchronization changes its spec first; a new invariant gets a mutant that
+  violates it. See `formal/tla/README.md`.
+
+CI runs the last two in a job of their own (`verification`; added with the layers and not yet
+run on GitHub - watch its first run: timing on 2 - 4 cores, the tools-jar download, TLC's disk
+use).
+
+#### State of the formalization (2026-11-11) - continue from here
+
+Last full run (20 cores, JDK 17), everything passes: small-scope specs at the default scopes
+(framing about 130,000 cases, 5 s; operators 25,616 pipelines per backend, 20 s) and at the
+audit scopes (framing length 6: about 590,000 cases; operators depth 3: 268,976 pipelines per
+backend, 2 minutes - manual, not in CI); Lincheck 25 scenarios x 1000 interleavings, 398 s;
+TLC 8 configurations + 9 mutants, about 5 minutes (state counts in `formal/tla/README.md`).
+
+Coverage per subject (`-` = nothing):
+
+| Subject | Small-scope | Lincheck (scenarios) | TLA+ |
+|---|---|---|---|
+| `ByteFraming.delimiter`, `DelimiterFramer` | `FramingSmallScopeSpec` (2 pinned edges) | - | - |
+| operators on neutral / Akka / fs2 / ZIO | `OperatorSmallScopeSpec` (16 sources, 40 operators) | - | - |
+| `TransformPublisher` (two chained) | - | 5 | `TransformChain`: 4 configs + `Legacy`, 3 mutants |
+| `CursorPublisher` | - | 4 x sync / async cursor, + 1 with `SubscriberCursor` | `CursorDrain`: 2 configs, 4 mutants |
+| `SubscriberCursor` | - | 2 x sync / async cursor, + the one above | - |
+| `AsyncBroadcastHub` | - | 5 | - |
+| `ZioCursor` | - | 2 (loop bound 100,000) | `ZioCursor`: 1 config, 2 mutants |
+
+What a pass does NOT say (the known gaps, most valuable first):
+
+1. The operator spec observes only elements + end (`Completed` / `Failed`): not cancellation
+   from outside, not how often termination hooks run, not demand (read-ahead), not timing. Its
+   scope has no `via(pipe)` / `zipVia`, `concurrently`, `preflight`, `guaranteeCase`, hub or
+   publisher leaf. Next: a second observation - (elements, end, hook calls) under a cancel
+   after k elements - on the same scope.
+2. No design-level spec of `SubscriberCursor` (the lock-free work-in-progress loop + the
+   `delivering` window) and of `AsyncBroadcastHub` (first terminal event wins; registration vs
+   shutdown): Lincheck samples their interleavings, nothing checks liveness. Next: `Hub.tla`,
+   `SubscriberCursor.tla` with mutants, same conventions as the three specs.
+3. Nothing ties a TLA+ label to the code but review, and Lincheck checks no liveness. Each
+   spec'd class has model-check scenarios for the same races - keep that pairing for every new
+   spec (a spec without a model check of the real class, or the reverse, is half a result).
+4. The pure wire-level functions have no model yet: `WireFormat.url` (against RFC 3986),
+   `MultipartParams` (no `"` / CR / LF survives in a header value), `JsonStreamFrames.parseFrame`
+   (against the SSE rules stated under Important Notes). All are small-scope
+   candidates of the framing spec's shape (every string over a tiny alphabet against a
+   reference written from the RFC / the note).
+5. Not modelled or model-checked: the fs2 pull bridge (`Fs2Compiler.cursorStream`), the
+   blocking cursor (reads on the pool vs cancel vs `close()` exactly once), the Akka / Pekko
+   stages (`NestedStreamsLogic`, `CursorSourceStage` - actor-confined, but their async
+   callbacks are not), `StreamedBody.of`, and the jdk engine's `IdleTimeoutPublisher` /
+   `DeadlineBodySubscriber` / `BoundedBodyReader`.
+6. The framing spec's two pinned edges are real divergences from the scaladoc model, allowed
+   in `classify` - fixing both framers together (then dropping the allowance) is open.
+7. Scopes: TLC configurations are 2 - 3 elements / calls per thread (the largest, 4 million
+   states, takes half the run); Lincheck's 1000 interleavings per scenario is a sample, not a
+   bound (the two historical bugs - the 1.1.5 transform deadlock, the hub's shutdown race -
+   showed within 10 s).
+
+Conventions when adding to a layer: a small-scope model is written from the scaladoc / RFC
+text ALONE, never from the code, and every allowed divergence is named in the spec and pinned
+by a test that fails once it is fixed; a Lincheck scenario is first shown to FAIL on the bug it
+is for (revert the fix locally, or run it against the last release jar); a TLA+ invariant gets
+a mutant, and an invariant TLC rejects is first read as a fact about the class (see
+`CancelCompletes` in the README) before the spec is weakened; never put an exact state count
+of a counterexample run into a doc (it varies per run).
 
 ## Key Dependencies
 
@@ -625,7 +729,10 @@ Style" and Odersky's "Lean Scala".
   `SttpClientException` text includes the full URI, so `SttpWSClientEngine.defaultRecoverErrors`
   describes a failure by the transport cause below the sttp wrapper and maps every remaining
   sttp failure to `CequenceWSException` - never put `e.getMessage` of a request-describing
-  exception into a message
+  exception into a message. The jdk engine reports an invalid request URL as a
+  `CequenceWSException` with only the reason and the position (`requestUri`: `URI.create`'s
+  message quotes the whole URL), as a failed future - a request that cannot be built (an
+  invalid URL, a throwing request-context function) never throws out of the call
 - `StreamTransformers.DelimiterFramer` (jdk / zio-http SSE framing) tracks frames by offset and
   compacts its buffer once per chunk - keep it linear per chunk (`DelimiterFramerSpec` diffs it
   against the 1.1.2 implementation)
@@ -746,21 +853,43 @@ Style" and Odersky's "Lean Scala".
   modules use other `private[wsclient]` core internals, so all ws-client artifacts must share
   one version (README says so). Semantics are pinned by
   differential specs (native vs neutral: core-akka/-pekko `SourceDifferentialSpec`, the fs2 and
-  ZIO specs) - sanctioned differences: on a failure Akka's / Pekko's asynchronous stages
-  (`flatMapConcat`, `mapAsync`) fail fast and may drop in-flight elements (the neutral
-  interpreter, fs2 and ZIO deliver them first), and below an early stop a native upstream's
+  ZIO specs; exhaustively in a small scope by `OperatorSmallScopeSpec`) - sanctioned
+  differences: on a failure Akka's / Pekko's stages fail fast - a failure overtakes elements a
+  stage still holds (`flatMapConcat`, `mapAsync`: in flight; `mapConcat`: the rest of the
+  element's iterable - and so whatever those would have become downstream), where the neutral
+  interpreter, fs2 and ZIO deliver them first; and below an early stop a native upstream's
   completion can race the cancel (an extra end hook); fs2 / ZIO read an iterator (an `emits`
-  leaf, an element stage's emitted iterable) up to 64 elements ahead (one output chunk,
-  `MaxOutputChunk`) where neutral / Akka read one per demand. fs2 / ZIO element stages process
+  leaf, an element stage's emitted iterable) ahead of the demand - the first chunk is one
+  element, then doubling up to 64 (`MaxOutputChunk`; the head of a slow iterator is not held
+  back for a whole chunk, and a throwing read emits the elements read before it) - where
+  neutral / Akka read one per demand. A blocking source (`fromInputStream`,
+  `fromBlockingIterator`) is ONE implementation on every backend - the neutral blocking cursor
+  (Akka / Pekko: `CursorSourceStage`; not a bridge): reads on the blocking pool, a cancel never
+  waits for a stalled read, `close()` follows the last read exactly once, and a throwing
+  `close()` is logged, never a stream failure. fs2 / ZIO element stages process
   chunks element by element (a throw emits the prefix first) and drain an emitted iterable
   lazily - never `out ++= emit` (an infinite `LazyList` must stay back-pressured); ZIO user
   functions run under `ZIO.attempt` (failures, not defects), and a native ZIO leaf's defect is
   a failure for recover / mapError / onTerminate (`ZioCompiler.failureOf`); waits on user
   futures are cancelable (fs2 `fromFutureCancelable`), termination hooks are awaited. The
-  Akka / Pekko concat is `ConcatQueueStage` (one stage, a per-materialization queue, next
-  streams unrolled - constant memory for recursive concats; a thunk runs only on demand: never
-  a flatMapConcat over the thunks, Akka's flatMapConcat opens the next inner source early; it
-  completes as soon as its last stream ended, demand or not). `toFlow`'s fallback input (a
+  Akka / Pekko sequencing nodes - concat (`ConcatQueueStage`) and flatMapConcat
+  (`FlatMapConcatStage`) - share `NestedStreamsLogic`: streams that follow one another run in
+  ONE stage however they nest (a chain of frames, one per flatMapConcat; a concat is unrolled
+  into its frame's queue of thunks, a defer / future stream resolved in place), so a recursive
+  stream (paging, polling) runs at a constant depth and in constant memory - compiled to the
+  built-in operators every level nests a stage, quadratic in the depth. Nothing runs ahead of
+  the demand (a thunk, a function or an outer element only when the downstream pulls after the
+  previous stream ended - never Akka's own flatMapConcat over the thunks, it opens the next
+  inner source early); the stage completes as soon as nothing is left, demand or not. Residual
+  (measured 2026-11-11, 10,000 / 50,000 / 100,000 levels; neutral and fs2 run every shape in
+  linear time, at most 2 s for 100,000): recursion through `recoverWith` still nests a stage
+  per level on Akka / Pekko - quadratic (10,000 levels: 22 s); ZIO nests a channel per level of
+  `flatMapConcat` / `futureStream` recursion (zio-streams' own concatMap) - quadratic too
+  (10,000: 2.5 s, 50,000: 70 s), `recoverWith` recursion is linear there. A streamed
+  response body that arrives with the response head goes through `StreamedBody.of` (core-akka):
+  a run that ended before the head arrived still runs-and-cancels the late source, which
+  aborts the request (`Source.futureSource` alone never reads it; pinned on every streaming
+  engine by the contract's `cancelBeforeHeadAbortedRequest`). `toFlow`'s fallback input (a
   `prefixAndTail(0)` tail) has no subscription timeout and is cancelled when the pipe's output
   ends unopened or the pipe's function throws; it can be consumed once. Akka / Pekko stages
   that outlive their upstream (a pending hook / task) guard `onPull` with `isClosed(in)`.
@@ -768,17 +897,33 @@ Style" and Odersky's "Lean Scala".
   `SourceCompiler.MaxInputBuffer` (4096). Every publisher into fs2 goes through the pull bridge
   `Fs2Compiler.cursorStream` over a neutral cursor (`SubscriberCursor`) - never
   `fs2.interop.flow.fromPublisher`, whose subscriber holds elements back until a chunk is full
-  (SSE in bursts; a stalled stream withheld events). `ZioCursor` serializes pull vs cancel
-  (Idle / Starting / in-flight / Cancelled) and closes the scope only after an interrupted pull
-  finished; ZIO keeps an interruption an interruption (`failureOf`), where the cursor bridge
-  sees a leaf's self-raised interruption as a failure (sanctioned)
+  (SSE in bursts; a stalled stream withheld events). `ZioCursor` runs a stream on ONE fiber for
+  the whole run (a fiber per pull took the children forked by that pull with it): `next()` hands
+  the fiber the demand for one chunk through an atomic state (Idle / Demand / Parked / Closed)
+  and a promise (`asked`); `cancel()` completes the outstanding `next()` with `None` at once and
+  interrupts the fiber - the scope closes once a pull in flight has finished; the stream's end
+  or failure is signalled after the scope closed. Its design is the TLA+ spec
+  `formal/tla/ZioCursor.tla` - change the spec with the class. ZIO keeps an interruption an
+  interruption (`failureOf`), where the cursor bridge sees a leaf's self-raised interruption as
+  a failure (sanctioned)
 - The neutral interpreter (`NeutralCompiler`) is pull-based: at most one outstanding
   `Cursor.next()`, `cancel()` may race it (the pending future completes with `None`). Foreign
   completions re-enter the run's `ec`; internal continuations use the `Trampoline`. Consecutive
   map / mapConcat / stateful nodes fuse into one cursor (`FusedCursor` - keep its scan linear:
   after feeding stage i+1 continue at i+1, never restart from the top); consecutive concats fuse
   and a next stream that is itself a concat is flattened (constant stack for `def loop =
-  single(1) ++ loop`). `CursorPublisher` pulls one result ahead of demand (RS 1.4: a failure
+  single(1) ++ loop`). Recursion in TAIL position through `flatMapConcat`, `recoverWith` and
+  `futureStream` runs at a constant depth too: a cursor that only passes its calls on says so
+  (`Cursor.forwardsTo`) and its holder skips it (`Cursors.resolve`); a `flatMapConcat` whose
+  upstream is known to have ended (`Cursor.exhausted` - asked only of strict collections, never
+  of a lazy one) continues in place with an inner stream that is itself a `flatMapConcat`.
+  Recursion NOT in tail position (an operator applied to the recursive call's result) nests a
+  cursor per level: deeper than the thread's stack, `Cursors.pull` fails the run with an
+  ordinary exception (a `StackOverflowError` is not `NonFatal` and would leave the run's future
+  incomplete). `concurrently` fails the stream as soon as its task HAS failed (read from the
+  future itself - a task that threw or was returned failed is not missed behind a synchronous
+  upstream). `AsyncBroadcastHub`: the first terminal event decides - an upstream result that
+  arrives after `shutdown()` (a failure racing it included) changes nothing. `CursorPublisher` pulls one result ahead of demand (RS 1.4: a failure
   is signalled without demand); a `request` from outside its drain loop drains on the run's
   `ec` (pulling runs the run's user functions - never on a subscriber's / IO thread), and the
   loop yields `ec` every 1024 synchronous results (an ec that rejects: the loop continues
