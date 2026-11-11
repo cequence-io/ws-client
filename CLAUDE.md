@@ -484,6 +484,9 @@ of a counterexample run into a doc (it varies per run).
   per version), not into the README.
 - Charts are Mermaid blocks (GitHub renders them): quote every node / edge label, and re-check
   that a changed block still parses.
+- The README's overview chart is an image, `docs/images/overview.svg` (hand-written SVG on its
+  own white card, so it reads in dark mode; GitHub's Mermaid widget was too heavy for the
+  landing page) - edit the SVG and look at a rendering of it.
 
 ## Key Dependencies
 

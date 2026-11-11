@@ -1,5 +1,5 @@
-# WS Client (Cequence)
-[![version](https://img.shields.io/badge/version-1.1.5-green.svg)](https://cequence.io) [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](https://opensource.org/licenses/MIT) [![Twitter Follow](https://img.shields.io/twitter/follow/cequence_io?style=social)](https://twitter.com/0xbnd)
+# WS Client
+[![version](https://img.shields.io/badge/version-1.1.5-green.svg)](https://cequence.io) [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](https://opensource.org/licenses/MIT) [![Follow on X](https://img.shields.io/badge/X-%400xbnd-black?logo=x)](https://x.com/0xbnd)
 
 A simple and efficient web-service client for Scala: one API to send requests to RESTful services, handle responses and manage errors - on the HTTP backend of your choice.
 
@@ -14,36 +14,7 @@ As a part of this suite we also provide the [json-repair](./json-repair/README.m
 
 ## Overview 🧭
 
-```mermaid
-flowchart LR
-    app["your service"]
-    engine["WSClientEngine<br/>(ws-client-core)<br/>one contract, the site<br/>rides on each call"]
-
-    subgraph backends["HTTP backends - found on the classpath"]
-        direction LR
-        play["Play WS<br/>on Akka or Pekko"]
-        pekko["pekko-http"]
-        jdk["JDK HttpClient"]
-        sttp["sttp"]
-        zio["zio-http"]
-    end
-
-    stream["AsyncStream<br/>one stream type"]
-
-    subgraph consumers["a stream runs as"]
-        direction LR
-        fut["plain Futures"]
-        src["Akka / Pekko Source"]
-        fs2["fs2 Stream"]
-        zs["ZIO ZStream"]
-        pub["Flow.Publisher"]
-    end
-
-    app --> engine
-    engine --> backends
-    backends -- "streamed responses" --> stream
-    stream --> consumers
-```
+![WS Client overview: your service calls the one engine contract, an HTTP backend found on the classpath executes the request, streamed responses come back as an AsyncStream](docs/images/overview.svg)
 
 ### Backends
 
