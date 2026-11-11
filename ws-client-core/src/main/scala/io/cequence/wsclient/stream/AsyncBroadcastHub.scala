@@ -14,8 +14,9 @@ import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.{Failure, Success, Try}
 
 /**
- * A HOT fan-out of one upstream run to any number of consumers (Akka `AsyncBroadcastHub`
- * semantics), running on the neutral interpreter. The upstream starts when the hub is created.
+ * A HOT fan-out of one upstream run to any number of consumers (the semantics of Akka's
+ * `BroadcastHub`), running on the neutral interpreter. The upstream starts when the hub is
+ * created.
  *
  *   - `source(prefix)` is a re-runnable stream; each run registers a consumer WHEN THE RUN
  *     STARTS, emits `prefix` first (live elements are buffered for it meanwhile), then the
@@ -27,7 +28,9 @@ import scala.util.{Failure, Success, Try}
  *   - When the upstream completes (fails), every consumer gets the remaining buffered
  *     elements, then the completion (failure); a consumer registering after that completes
  *     (fails) at once.
- *   - `shutdown()` cancels the upstream and completes every consumer.
+ *   - `shutdown()` cancels the upstream and completes every consumer. The first terminal event
+ *     decides: an upstream result that arrives after `shutdown()` (a failure racing it
+ *     included) changes nothing - `completion` and every later consumer agree with it.
  *
  * In a native backend (Akka, fs2, ZIO), a hub source is bridged once.
  */
@@ -76,14 +79,15 @@ final class AsyncBroadcastHub[A] private (
 
   /** Cancels the upstream and completes every consumer. */
   def shutdown(): Unit = {
-    val waiting = lock.synchronized {
+    val (waiting, result) = lock.synchronized {
       if (terminal.isEmpty) terminal = Some(Success(()))
-      takeAllWaiting()
+      (takeAllWaiting(), terminal.get)
     }
     val cursor = upstreamCursor
     if (cursor != null) cursor.cancel()
     waiting.foreach { case (promise, consumer) => consumer.deliver(promise, Success(None)) }
-    completionPromise.trySuccess(())
+    // the terminal event that came first - the upstream's own, if it ended before this call
+    completionPromise.tryComplete(result)
   }
 
   // ------------------------------------------------------------------------------ internal
@@ -141,7 +145,7 @@ final class AsyncBroadcastHub[A] private (
       if (!shouldPull)
         continue = false
       else {
-        val future = cursor.next()
+        val future = Cursors.pull(cursor)
         future.value match {
           case Some(result) => onUpstream(result)
           case None =>
@@ -159,6 +163,10 @@ final class AsyncBroadcastHub[A] private (
     val (delivered, terminated) = lock.synchronized {
       pulling = false
       result match {
+        // shut down meanwhile: the first terminal event stands - the result of the pull the
+        // shutdown cancelled (a late element, or a failure racing the cancel) is dropped
+        case _ if terminal.isDefined =>
+          (Nil, None)
         case Success(Some(element)) =>
           ring((head % bufferSize).toInt) = element
           head += 1

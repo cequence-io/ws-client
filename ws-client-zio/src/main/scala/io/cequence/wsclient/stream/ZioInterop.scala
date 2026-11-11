@@ -7,6 +7,7 @@ import zio.stream.{ZPipeline, ZStream}
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import java.util.concurrent.{Flow => JFlow}
+import scala.annotation.tailrec
 import scala.concurrent.duration.FiniteDuration
 import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
@@ -200,43 +201,56 @@ private[wsclient] object ZioBridges {
    * replays that chunk and continues the same pull, and closes the scope - the stream's
    * finalizers - when its run ends, however it ends. A stream that ended or failed before a
    * first element has its scope closed here.
+   *
+   * The fiber of those first pulls stays until the run ended: a fiber the stream forked in
+   * them (a producer feeding a queue) is its child, and would be interrupted with it.
    */
   def preflight[A](
     stream: ZStream[Any, Throwable, A],
     runtime: Runtime[Any]
   ): Future[AsyncStream[A]] = {
-    val start: ZIO[Any, Throwable, ZStream[Any, Throwable, A]] =
+    val result = scala.concurrent.Promise[AsyncStream[A]]()
+
+    def hand(rest: ZStream[Any, Throwable, A]): UIO[Unit] =
+      ZIO.succeed {
+        result.trySuccess(AsyncStream.fromNative(new ZioLeaf(rest, runtime)))
+        ()
+      }
+
+    val start: ZIO[Any, Nothing, Unit] =
       ZIO.uninterruptibleMask { restore =>
         for {
           scope <- Scope.make
+          runEnded <- Promise.make[Nothing, Unit]
           started <- restore(
             scope
               .extend[Any](stream.toPull)
               .flatMap(pull => pull.repeatUntil(_.nonEmpty).unsome.map(first => (first, pull)))
           ).exit
-          rest <- started match {
+          _ <- started match {
             case Exit.Success((Some(first), pull)) =>
-              ZIO.succeed(singleRun(first, pull, scope.close(_)))
+              val rest = singleRun(
+                first,
+                pull,
+                exit => scope.close(exit).ensuring(runEnded.succeed(()))
+              )
+              hand(rest) *> restore(runEnded.await)
             case Exit.Success((None, _)) =>
-              scope
-                .close(Exit.unit)
-                .as(singleRun[A](Chunk.empty, ZIO.fail(None), _ => ZIO.unit))
+              scope.close(Exit.unit) *>
+                hand(singleRun[A](Chunk.empty, ZIO.fail(None), _ => ZIO.unit))
             case Exit.Failure(cause) =>
-              scope.close(started) *> ZIO.failCause(cause)
+              // the stream's own exception, as it is (nothing attached)
+              scope.close(started) *> ZIO.succeed(result.tryFailure(cause.squash))
           }
-        } yield rest
+        } yield ()
       }
 
-    // through `either`: a failure reaches the future as the stream's own exception (a failed
-    // effect run to a future gets its trace attached as a suppressed exception)
+    // a fiber that ended without a result (a finalizer's defect, a runtime shutting down)
     Unsafe
-      .unsafe(implicit unsafe => runtime.unsafe.runToFuture(start.either))
-      .flatMap {
-        case Right(rest) =>
-          Future.successful(AsyncStream.fromNative(new ZioLeaf(rest, runtime)))
-        case Left(error) =>
-          Future.failed(error)
-      }(Trampoline)
+      .unsafe(implicit unsafe => runtime.unsafe.runToFuture(start))
+      .failed
+      .foreach(result.tryFailure)(Trampoline)
+    result.future
   }
 
   // the rest of a preflighted run: one run only; `release` runs when that run ends
@@ -282,11 +296,17 @@ private[wsclient] object ZioBridges {
 }
 
 /**
- * A run of a ZIO stream as a cursor: its pull in its own scope, chunks handed out element by
- * element; `cancel()` interrupts a pull in flight and closes the scope (the stream's
- * finalizers) once that pull has finished - a resource it acquired meanwhile is released too.
- * The end of the stream (or its failure) is signalled after the scope closed - its finalizers
- * have run, as for a native ZIO consumer.
+ * A run of a ZIO stream as a cursor, on ONE fiber: it opens the stream's pull in a scope of
+ * its own, pulls a chunk whenever one is asked for (chunks are handed out element by element)
+ * and closes the scope - the stream's finalizers - when the run ends. A fiber the stream forks
+ * is that fiber's child and lives as long as the run, as for a native ZIO consumer (a fiber
+ * per pull would take the children of each pull with it: a producer forked by the first pull,
+ * feeding a queue, stopped after it).
+ *
+ * `cancel()` completes the outstanding `next()` and interrupts the fiber: a pull in flight is
+ * interrupted, and the scope closes once that pull has finished - a resource it acquired
+ * meanwhile is released too. The end of the stream (or its failure) is signalled after the
+ * scope closed - its finalizers have run, as for a native ZIO consumer.
  */
 private[wsclient] final class ZioCursor[A](
   stream: ZStream[Any, Throwable, A],
@@ -297,22 +317,88 @@ private[wsclient] final class ZioCursor[A](
   import ZioCursor._
 
   private type Pull = ZIO[Any, Option[Throwable], Chunk[A]]
+  private type Asked = scala.concurrent.Promise[Option[Chunk[A]]]
 
-  private val scope: Scope.Closeable =
-    Unsafe.unsafe(implicit unsafe => runtime.unsafe.run(Scope.make).getOrThrowFiberFailure())
-
-  private val closed = new AtomicBoolean(false)
-  private val closing = scala.concurrent.Promise[Unit]()
-  // Idle | Starting (a pull being started) | the pull in flight (CancelableFuture) | Cancelled
+  // the hand-over between the consumer and the fiber: Idle | Demand (a chunk is asked for, the
+  // fiber busy) | a Parked fiber (waiting to be asked) | Closed (cancelled, or the fiber ended)
   private val state = new AtomicReference[AnyRef](Idle)
   @volatile private var cancelled = false
+  // how the run ended; written before `state` is Closed for it
+  @volatile private var end: Try[Option[Chunk[A]]] = Stopped
+  // the chunk asked for; written before the demand is signalled, completed once
+  @volatile private var asked: Asked = _
+  // the consumer's: written when a chunk is handed over, read by the next() after it
   private var buffer: Chunk[A] = Chunk.empty
   private var index = 0
 
-  private val pull: Future[Pull] = run(scope.extend[Any](stream.toPull))
+  // on the fiber: until a chunk is asked for
+  private val awaitDemand: UIO[Unit] =
+    ZIO.suspendSucceed {
+      if (state.compareAndSet(Demand, Idle)) ZIO.unit
+      else ZIO.async[Any, Nothing, Unit](resume => park(new Parked(resume)))
+    }
 
-  private def run[T](effect: ZIO[Any, Throwable, T]): CancelableFuture[T] =
-    Unsafe.unsafe(implicit unsafe => runtime.unsafe.runToFuture(effect))
+  @tailrec private def park(parked: Parked): Unit =
+    state.get() match {
+      case Demand =>
+        if (state.compareAndSet(Demand, Idle)) parked.resume(ZIO.unit) else park(parked)
+      case Idle =>
+        if (!state.compareAndSet(Idle, parked)) park(parked)
+      case _ =>
+        () // closed by a cancel: the fiber is being interrupted
+    }
+
+  // on the fiber: a non-empty chunk per demand, until the stream ends
+  private def serve(pull: Pull): ZIO[Any, Throwable, Unit] =
+    (awaitDemand *> pull.repeatUntil(_.nonEmpty).unsome.map {
+      case Some(chunk) =>
+        asked.trySuccess(Some(chunk)) // lost against a cancel: the chunk is dropped
+        true
+      case None =>
+        false
+    }).repeatWhile(identity).unit
+
+  // the run's fiber. Started last: it reads the fields above
+  private val fiber: CancelableFuture[Try[Unit]] =
+    Unsafe.unsafe { implicit unsafe =>
+      runtime.unsafe.runToFuture(
+        ZIO.uninterruptibleMask { restore =>
+          for {
+            scope <- Scope.make
+            served <- restore(scope.extend[Any](stream.toPull).flatMap(serve)).exit
+            closed <- scope.close(Exit.unit).exit
+          } yield ended(served, closed)
+        }
+      )
+    }
+
+  // a fiber that ended without a result was interrupted before it started
+  fiber.onComplete(result => finish(result.flatten))(ctx.ec)
+
+  // a failing finalizer fails a completed stream and is attached as suppressed to a failure
+  private def ended(
+    served: Exit[Throwable, Unit],
+    closed: Exit[Nothing, Any]
+  ): Try[Unit] =
+    (served, closed) match {
+      case (Exit.Failure(cause), Exit.Failure(finalizerCause)) =>
+        val error = cause.squash
+        val finalizerError = finalizerCause.squash
+        if (finalizerError ne error) error.addSuppressed(finalizerError)
+        Failure(error)
+      case (Exit.Failure(cause), Exit.Success(_))          => Failure(cause.squash)
+      case (Exit.Success(_), Exit.Failure(finalizerCause)) => Failure(finalizerCause.squash)
+      case (Exit.Success(_), Exit.Success(_))              => Success(())
+    }
+
+  private def finish(result: Try[Unit]): Unit = {
+    end = if (cancelled) Stopped else result.map(_ => None)
+    state.set(Closed)
+    // read after the state is Closed: a next() that missed it sees Closed itself
+    val pending = asked
+    if (pending != null) pending.tryComplete(end)
+    ()
+  }
 
   def next(): Future[Option[A]] =
     if (cancelled)
@@ -321,105 +407,55 @@ private[wsclient] final class ZioCursor[A](
       val element = buffer(index)
       index += 1
       Future.successful(Some(element))
-    } else
-      pull.value match {
-        case Some(result) => afterPull(result)
-        case None         => pull.transformWith(afterPull)(ctx.ec)
-      }
-
-  private def afterPull(result: Try[Pull]): Future[Option[A]] =
-    result match {
-      case Success(p) => pullOnce(p)
-      case Failure(e) => terminate(Failure(e))
+    } else {
+      val demand: Asked = scala.concurrent.Promise[Option[Chunk[A]]]()
+      asked = demand
+      signal(demand)
+      // on the run's ec, whoever completed it (the fiber, a cancel, the end)
+      demand.future.map {
+        case Some(chunk) =>
+          buffer = chunk
+          index = 1
+          Some(chunk(0))
+        case None =>
+          None
+      }(ctx.ec)
     }
 
-  private def pullOnce(p: Pull): Future[Option[A]] =
-    // the pull is registered before it starts: a cancel either comes first (the stream is never
-    // pulled) or sees it and closes the scope only after it finished
-    if (!state.compareAndSet(Idle, Starting))
-      Cursors.NoneFuture
-    else {
-      val result = run(p.either)
-      if (!state.compareAndSet(Starting, result)) {
-        // cancelled while starting: interrupt it, then close
-        interruptThenClose(result)
-        Cursors.NoneFuture
-      } else
-        result.transformWith { outcome =>
-          if (!state.compareAndSet(result, Idle))
-            Cursors.NoneFuture // cancelled meanwhile (the cancel closes the scope)
-          else
-            outcome match {
-              case Success(Right(chunk)) =>
-                if (chunk.isEmpty)
-                  pullOnce(p)
-                else {
-                  buffer = chunk
-                  index = 1
-                  Future.successful(Some(chunk(0)))
-                }
-              case Success(Left(None))    => terminate(Success(None))
-              case Success(Left(Some(e))) => terminate(Failure(e))
-              case Failure(e)             => terminate(Failure(e))
-            }
-        }(ctx.ec)
+  @tailrec private def signal(demand: Asked): Unit =
+    state.get() match {
+      case Idle =>
+        if (!state.compareAndSet(Idle, Demand)) signal(demand)
+      case parked: Parked =>
+        if (state.compareAndSet(parked, Idle)) parked.resume(ZIO.unit) else signal(demand)
+      case Closed =>
+        demand.tryComplete(end)
+        ()
+      case _ =>
+        () // Demand: one next() at a time
     }
-
-  // the end (or the failure) once the scope closed; a failing finalizer fails a completed
-  // stream and is attached as suppressed to a failure
-  private def terminate(end: Try[Option[A]]): Future[Option[A]] =
-    close().transform { closeResult =>
-      if (cancelled)
-        Success(None)
-      else
-        (end, closeResult) match {
-          case (Failure(e), Failure(finalizerError)) =>
-            if (finalizerError ne e) e.addSuppressed(finalizerError)
-            end
-          case (Success(_), Failure(finalizerError)) =>
-            Failure(finalizerError)
-          case _ =>
-            end
-        }
-    }(ctx.ec)
-
-  private def close(): Future[Unit] = {
-    if (closed.compareAndSet(false, true))
-      closing.completeWith(run(scope.close(Exit.unit)))
-    closing.future
-  }
-
-  private def interruptThenClose(inFlight: CancelableFuture[_]): Unit = {
-    inFlight.cancel().onComplete(_ => close())(ctx.ec)
-    ()
-  }
 
   def cancel(): Unit = {
     cancelled = true
-    var done = false
-    while (!done)
-      state.get() match {
-        case Cancelled => done = true
-        case Starting  =>
-          // the puller sees the failed CAS and interrupts / closes
-          done = state.compareAndSet(Starting, Cancelled)
-        case Idle =>
-          if (state.compareAndSet(Idle, Cancelled)) {
-            close()
-            done = true
-          }
-        case inFlight: CancelableFuture[_] @unchecked =>
-          if (state.compareAndSet(inFlight, Cancelled)) {
-            interruptThenClose(inFlight)
-            done = true
-          }
-        case _ => done = true
-      }
+    if (state.getAndSet(Closed) ne Closed) {
+      // read after the state is Closed, as in `finish`
+      val pending = asked
+      if (pending != null) pending.trySuccess(None)
+      // a parked fiber is interrupted where it waits, a pull where it can be; the fiber then
+      // closes the scope
+      fiber.cancel()
+      ()
+    }
   }
 }
 
 private[wsclient] object ZioCursor {
   private val Idle = new AnyRef
-  private val Starting = new AnyRef
-  private val Cancelled = new AnyRef
+  private val Demand = new AnyRef
+  private val Closed = new AnyRef
+
+  // a run that was cancelled ends as a completed one
+  private val Stopped: Try[Option[Nothing]] = Success(None)
+
+  private final class Parked(val resume: UIO[Unit] => Unit)
 }

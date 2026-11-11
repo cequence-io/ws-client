@@ -123,11 +123,11 @@ private[wsclient] object Fs2Compiler {
 
 /**
  * Compiles an [[AsyncStream]] into an fs2 stream - natively: an fs2 leaf of the same `Async`
- * instance is returned as is, neutral leaves become fs2 streams (`Stream.suspend`, `bracket`,
- * ...), and every operator an fs2 operator. A bridge (through `java.util.concurrent.Flow`) is
- * built only for a foreign leaf (one) or a foreign native pipe (two). Compiling runs no user
- * code: every thunk runs per run. Element functions process a chunk element by element - a
- * failure emits the outputs of the elements before it first.
+ * instance is returned as is, neutral leaves become fs2 streams (a blocking source: the
+ * neutral blocking cursor, pulled), and every operator an fs2 operator. A bridge (through
+ * `java.util.concurrent.Flow`) is built only for a foreign leaf (one) or a foreign native pipe
+ * (two). Compiling runs no user code: every thunk runs per run. Element functions process a
+ * chunk element by element - a failure emits the outputs of the elements before it first.
  */
 private[wsclient] final class Fs2Compiler[F[_]](
   bridges: BridgeCounter
@@ -160,17 +160,56 @@ private[wsclient] final class Fs2Compiler[F[_]](
   private def awaitFuture[A](future: => Future[A]): F[A] =
     F.fromFuture(F.delay(future))
 
+  // a stream built per run by user code: a throw while building it is a failure of the stream.
+  // (A throw out of Stream.suspend's own thunk is no stream failure where the suspended stream
+  // follows a `++` or is stepped by a pull: a later recover / mapError never saw it.)
+  private def suspended[A](build: => Stream[F, A]): Stream[F, A] =
+    Stream.suspend(
+      try build
+      catch { case NonFatal(e) => Stream.raiseError[F](e) }
+    )
+
+  private def output[A](out: Vector[A]): Pull[F, A, Unit] =
+    if (out.isEmpty) Pull.done else Pull.output(Chunk.from(out))
+
+  // an iterator, read lazily chunk by chunk (`size` elements, doubling up to MaxOutputChunk): a
+  // throw emits the elements read before it, then fails
+  private def readIterator[A](
+    it: Iterator[A],
+    size: Int
+  ): Pull[F, A, Unit] =
+    Pull.suspend {
+      val out = Vector.newBuilder[A]
+      var n = 0
+      var error: Throwable = null
+      try
+        while (n < size && it.hasNext) {
+          out += it.next()
+          n += 1
+        }
+      catch { case NonFatal(e) => error = e }
+      val emitted = output(out.result())
+      if (error != null)
+        emitted >> Pull.raiseError[F](error)
+      else if (n == size)
+        emitted >> readIterator(it, math.min(size * 2, Fs2Compiler.MaxOutputChunk))
+      else
+        emitted
+    }
+
   // ------------------------------------------------------------------------------ leaves
 
+  // the first chunk is one element, so the head of a slow iterator is not held back for a
+  // whole chunk (fs2's fromIterator reads a full chunk first, and drops it when a read throws)
   def emits[A](as: immutable.Iterable[A]): Stream[F, A] =
-    Stream.suspend(Stream.fromIterator[F](as.iterator, 64))
+    suspended(readIterator(as.iterator, 1).stream)
 
   def failed[A](error: Throwable): Stream[F, A] = Stream.raiseError[F](error)
 
-  def defer[A](thunk: () => AsyncStream[A]): Stream[F, A] = Stream.suspend(compile(thunk()))
+  def defer[A](thunk: () => AsyncStream[A]): Stream[F, A] = suspended(compile(thunk()))
 
   def futureStream[A](thunk: () => Future[AsyncStream[A]]): Stream[F, A] =
-    Stream.eval(fromFuture(thunk())).flatMap(stream => compile(stream))
+    Stream.eval(fromFuture(thunk())).flatMap(stream => suspended(compile(stream)))
 
   // a publisher is foreign to fs2: one bridge (SubscriberCursor: `bufferSize` requested up
   // front, half as much after each half consumed)
@@ -182,11 +221,11 @@ private[wsclient] final class Fs2Compiler[F[_]](
     bridge[A](factory(), bufferSize)
   }
 
-  // open and every read on the blocking pool; close exactly once, after the last read returned
+  // the neutral blocking cursor (ws-client's blocking pool), as on every backend: a cancel
+  // never waits for a stalled read, close() follows the last read exactly once, and a throwing
+  // close() is logged, not a stream failure
   def fromBlocking[A](open: () => BlockingCursor[A]): Stream[F, A] =
-    Stream
-      .bracket(F.blocking(open()))(cursor => F.blocking(cursor.close()))
-      .flatMap(cursor => Stream.repeatEval(F.blocking(cursor.next())).unNoneTerminate)
+    cursorStream[A](ctx => new BlockingReadCursor[A](open, ctx))
 
   def native[A](leaf: NativeStream[A]): Stream[F, A] =
     leaf match {
@@ -218,35 +257,12 @@ private[wsclient] final class Fs2Compiler[F[_]](
     step: (S, A) => AsyncStream.Step[S, B],
     onComplete: S => immutable.Iterable[B]
   ): Stream[F, B] =
-    Stream.suspend {
+    suspended {
       val limit = Fs2Compiler.MaxOutputChunk
       var state = init()
 
-      def output(out: Vector[B]): Pull[F, B, Unit] =
-        if (out.isEmpty) Pull.done else Pull.output(Chunk.from(out))
-
       // the rest of one element's outputs, chunk by chunk
-      def drain(it: Iterator[B]): Pull[F, B, Unit] =
-        Pull.suspend {
-          val out = Vector.newBuilder[B]
-          var n = 0
-          var more = false
-          var error: Throwable = null
-          try {
-            while (n < limit && it.hasNext) {
-              out += it.next()
-              n += 1
-            }
-            more = it.hasNext
-          } catch { case NonFatal(e) => error = e }
-          val emitted = output(out.result())
-          if (error != null)
-            emitted >> Pull.raiseError[F](error)
-          else if (more)
-            emitted >> drain(it)
-          else
-            emitted
-        }
+      def drain(it: Iterator[B]): Pull[F, B, Unit] = readIterator(it, limit)
 
       // the elements of `chunk` from index `from`
       def elements(
@@ -345,13 +361,13 @@ private[wsclient] final class Fs2Compiler[F[_]](
     up: Stream[F, A],
     next: () => AsyncStream[A]
   ): Stream[F, A] =
-    up ++ Stream.suspend(compile(next()))
+    up ++ suspended(compile(next()))
 
   def flatMapConcat[A, B](
     up: Stream[F, A],
     f: A => AsyncStream[B]
   ): Stream[F, B] =
-    up.flatMap(a => Stream.suspend(compile(f(a))))
+    up.flatMap(a => suspended(compile(f(a))))
 
   def evalMap[A, B](
     up: Stream[F, A],
@@ -376,7 +392,7 @@ private[wsclient] final class Fs2Compiler[F[_]](
     pf: PartialFunction[Throwable, AsyncStream[A]]
   ): Stream[F, A] =
     up.handleErrorWith { e =>
-      Stream.suspend(
+      suspended(
         if (pf.isDefinedAt(e)) compile(pf(e))
         else Stream.raiseError[F](e)
       )

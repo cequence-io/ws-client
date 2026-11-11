@@ -29,6 +29,9 @@ final case class AsyncStreamContract(
   rawRequestsAfterTwoRuns: Int,
   statusFailure: Option[String],
   takeOneAbortedRequest: Boolean,
+  // a run cancelled before the response head arrived: the request is aborted - at the cancel,
+  // or as soon as the late head is there (never read to the end of its body)
+  cancelBeforeHeadAbortedRequest: Boolean,
   rawBytesIntact: Boolean,
   downloadBytesIntact: Boolean,
   postDownloadBytesIntact: Boolean,
@@ -54,6 +57,7 @@ object AsyncStreamContract {
     rawRequestsAfterTwoRuns = 2,
     statusFailure = Some("CequenceWSHttpStatusException: 503"),
     takeOneAbortedRequest = true,
+    cancelBeforeHeadAbortedRequest = true,
     rawBytesIntact = true,
     downloadBytesIntact = true,
     postDownloadBytesIntact = true,
@@ -131,6 +135,8 @@ object AsyncStreamContract {
     val sseRequests, rawRequests = new AtomicInteger()
     val streamAborted = new AtomicBoolean(false)
     val streamFinished = new CountDownLatch(1)
+    val lateRequested, lateFinished = new CountDownLatch(1)
+    val lateAborted = new AtomicBoolean(false)
     val received = new AtomicReference[(String, Array[Byte])](("", Array.emptyByteArray))
 
     def sendBytes(
@@ -195,6 +201,29 @@ object AsyncStreamContract {
           streamFinished.countDown()
         }
       },
+      // the response head only after 600 ms, then events every 20 ms until the client goes
+      // away (or 6 s pass)
+      "/late" -> { exchange =>
+        exchange.getRequestBody.readAllBytes()
+        lateRequested.countDown()
+        try {
+          Thread.sleep(600)
+          exchange.getResponseHeaders.add("Content-Type", "text/event-stream")
+          exchange.sendResponseHeaders(200, 0)
+          val out = exchange.getResponseBody
+          val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(6)
+          while (System.nanoTime() < deadline) {
+            out.write(("data: " + Json.obj("pad" -> Pad).toString + "\n\n").getBytes("UTF-8"))
+            out.flush()
+            Thread.sleep(20)
+          }
+        } catch {
+          case _: java.io.IOException => lateAborted.set(true)
+        } finally {
+          Try(exchange.close())
+          lateFinished.countDown()
+        }
+      },
       // records the request target and body as received
       "/echo" -> { exchange =>
         val body = exchange.getRequestBody.readAllBytes()
@@ -246,6 +275,13 @@ object AsyncStreamContract {
       streamFinished.await(15, TimeUnit.SECONDS)
       val takeOneAborted = streamAborted.get()
 
+      // a run cancelled while the server still holds the response head back
+      val lateRun = engine.execRawAsyncStream(site, "late", "GET").run(_ => ())
+      lateRequested.await(15, TimeUnit.SECONDS)
+      lateRun.cancel()
+      lateFinished.await(15, TimeUnit.SECONDS)
+      val cancelBeforeHeadAborted = lateAborted.get()
+
       // binary-safe downloads
       val download = await(service.execGETBytes("raw"))
       val postDownload =
@@ -282,6 +318,7 @@ object AsyncStreamContract {
         rawRequestsAfterTwoRuns = rawRequestsAfterTwoRuns,
         statusFailure = statusFailure,
         takeOneAbortedRequest = takeOneAborted,
+        cancelBeforeHeadAbortedRequest = cancelBeforeHeadAborted,
         rawBytesIntact = rawBytes.toArray.toSeq == AllBytes.toSeq,
         downloadBytesIntact = download == Bytes(AllBytes),
         postDownloadBytesIntact = postDownload == Bytes(AllBytes),

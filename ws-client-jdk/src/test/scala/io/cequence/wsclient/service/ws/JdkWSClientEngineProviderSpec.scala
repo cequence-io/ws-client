@@ -2,6 +2,7 @@ package io.cequence.wsclient.service.ws
 
 import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
 import io.cequence.wsclient.domain.{
+  CequenceWSException,
   CequenceWSTimeoutException,
   CequenceWSUnknownHostException,
   SimpleRichResponse,
@@ -319,6 +320,35 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
           30.seconds
         )
       }
+
+      engine.close()
+    }
+
+    "fail an invalid request URL through the future / the stream, without the URL (its query may hold a key)" in {
+      val engine =
+        WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+      val site = SiteBinding(
+        "http://localhost:9",
+        WsRequestContext(extraParams = Seq("api_key" -> "s3cr3t-key"))
+      )
+
+      // never thrown by the call itself
+      val call = engine.execGETRich(site, "not a path")
+      val failure = intercept[CequenceWSException](Await.result(call, 30.seconds))
+      failure.getMessage should include("Invalid request URL")
+      failure.getMessage should include("Illegal character in path at index")
+      failure.getMessage should not include "s3cr3t-key"
+      failure.getMessage should not include "api_key"
+
+      val posted = engine.execPOSTRich(site, "not a path", bodyParams = Seq("a" -> None))
+      intercept[CequenceWSException](Await.result(posted, 30.seconds))
+
+      val subscriber = new LatchedSubscriber[JsValue]
+      engine.execJsonStreamPublisher(site, "not a path", "POST").subscribe(subscriber)
+      subscriber.awaitDone(30) shouldBe true
+      subscriber.error.get shouldBe a[CequenceWSException]
+      subscriber.error.get.getMessage should include("Invalid request URL")
+      subscriber.error.get.getMessage should not include "s3cr3t-key"
 
       engine.close()
     }

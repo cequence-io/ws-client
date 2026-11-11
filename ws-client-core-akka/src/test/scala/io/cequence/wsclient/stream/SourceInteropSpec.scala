@@ -2,7 +2,12 @@ package io.cequence.wsclient.stream
 
 import akka.NotUsed
 import akka.actor.ActorSystem
-import akka.stream.{ActorAttributes, Materializer, StreamSubscriptionTimeoutTerminationMode}
+import akka.stream.{
+  ActorAttributes,
+  KillSwitches,
+  Materializer,
+  StreamSubscriptionTimeoutTerminationMode
+}
 import akka.stream.scaladsl.{Flow, JavaFlowSupport, Keep, Sink, Source}
 import akka.util.ByteString
 import io.cequence.wsclient.stream.AsyncStream.Step
@@ -12,7 +17,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.{ConcurrentLinkedQueue, TimeUnit, Flow => JFlow}
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit, Flow => JFlow}
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future, Promise}
@@ -296,6 +301,54 @@ class SourceInteropSpec extends AnyWordSpec with Matchers with BeforeAndAfterAll
         Seq(1, 2, 3, 4)
     }
 
+    "read a blocking source through the neutral blocking cursor - without a bridge" in {
+      // a throwing close() is logged: never a failure of the (finished) stream, never repeated
+      val closes = new AtomicInteger()
+      val throwingClose = AsyncStream.fromBlockingIterator[Int](
+        () => Iterator(1, 2),
+        () => { closes.incrementAndGet(); throw new RuntimeException("close") }
+      )
+      val (result, count) = bridges(runAkka(throwingClose.toSource))
+      result shouldBe Seq(1, 2)
+      count shouldBe 0
+      closes.get() shouldBe 1
+
+      // a stalled read: the cancel does not wait for it; the source is closed once it returned
+      val reading = new CountDownLatch(1)
+      val release = new CountDownLatch(1)
+      val stalledCloses = new AtomicInteger()
+      val stalled = AsyncStream.fromBlockingIterator[Int](
+        () =>
+          new Iterator[Int] {
+            def hasNext: Boolean = { reading.countDown(); release.await(); false }
+            def next(): Int = throw new NoSuchElementException
+          },
+        () => stalledCloses.incrementAndGet()
+      )
+      try {
+        val (killSwitch, done) =
+          stalled.toSource
+            .viaMat(KillSwitches.single)(Keep.right)
+            .toMat(Sink.seq)(Keep.both)
+            .run()
+        reading.await(10, TimeUnit.SECONDS) shouldBe true
+        killSwitch.shutdown()
+        await(done) shouldBe Seq.empty
+        stalledCloses.get() shouldBe 0 // the read is still in progress
+      } finally release.countDown()
+      eventually(stalledCloses.get() shouldBe 1)
+
+      // an early stop closes once
+      val earlyCloses = new AtomicInteger()
+      runAkka(
+        AsyncStream
+          .fromBlockingIterator(() => Iterator.from(1), () => earlyCloses.incrementAndGet())
+          .toSource
+          .take(2)
+      ) shouldBe Seq(1, 2)
+      eventually(earlyCloses.get() shouldBe 1)
+    }
+
     "give a toFlow pipe its input without a subscription timeout, cancelling an unopened one" in {
       // the pipe opens its input only after a slow first stream (300 ms > the 100 ms timeout)
       val late = AsyncPipe.fromFunction[Int, Int](in =>
@@ -390,6 +443,180 @@ class SourceInteropSpec extends AnyWordSpec with Matchers with BeforeAndAfterAll
       Try(runAkka(upstream.via(throwing.toFlow))).failed.get.getMessage shouldBe
         "per-run failure"
       Await.result(cancelled.future, 3.seconds) shouldBe (())
+    }
+  }
+
+  "the sequencing stage (recursive and nested streams)" should {
+
+    def sum(stream: AsyncStream[Int]): Long =
+      Await.result(stream.toSource.runWith(Sink.fold(0L)(_ + _)), 60.seconds)
+
+    // an endless stream; `ended` learns when a run of it was cancelled or ended
+    def endless(
+      name: String,
+      ended: ConcurrentLinkedQueue[String]
+    ): AsyncStream[Int] = {
+      def from(i: Int): AsyncStream[Int] = AsyncStream.single(i) ++ from(i + 1)
+      from(1).onTerminate { _ => ended.add(name); () }
+    }
+
+    "run a recursive flatMapConcat (paging) at a constant depth" in {
+      // compiled to the built-in flatMapConcat, a level nests in the previous one: 4,000 pages
+      // took 15 s (quadratic)
+      val pages = 20000
+      def page(i: Int): AsyncStream[Int] =
+        AsyncStream.future(Future.successful(i)).flatMapConcat { p =>
+          if (p == pages) AsyncStream(p, p) else AsyncStream(p, p) ++ page(p + 1)
+        }
+      sum(page(1)) shouldBe pages.toLong * (pages + 1)
+    }
+
+    "run a recursive flatMapConcat that emits nothing until its end (polling)" in {
+      val polls = 20000
+      def poll(i: Int): AsyncStream[Int] =
+        AsyncStream.future(Future.successful(i)).flatMapConcat { p =>
+          if (p == polls) AsyncStream.single(p) else poll(p + 1)
+        }
+      runAkka(poll(1).toSource) shouldBe Seq(polls)
+    }
+
+    "run a recursive futureStream (paging) at a constant depth" in {
+      val pages = 20000
+      // a pending future per page
+      def page(i: Int): AsyncStream[Int] =
+        AsyncStream.futureStream(Future(i).map { p =>
+          if (p == pages) AsyncStream(p, p) else AsyncStream(p, p) ++ page(p + 1)
+        })
+      sum(page(1)) shouldBe pages.toLong * (pages + 1)
+
+      // completed futures resolve in a loop, not on the stack
+      val polls = 1000000
+      def poll(i: Int): AsyncStream[Int] =
+        AsyncStream.futureStream(
+          Future.successful(if (i == polls) AsyncStream.single(i) else poll(i + 1))
+        )
+      runAkka((AsyncStream.single(0) ++ poll(1)).toSource) shouldBe Seq(0, polls)
+    }
+
+    "run genuinely nested streams as the neutral interpreter does" in {
+      val nested =
+        AsyncStream(1, 2, 3).flatMapConcat { i =>
+          AsyncStream(10, 20).flatMapConcat { j =>
+            AsyncStream(i + j, i - j) ++
+              AsyncStream.defer(AsyncStream.empty[Int]) ++
+              AsyncStream.futureStream(Future(AsyncStream.single(i * j)))
+          } ++ AsyncStream.empty[Int].flatMapConcat(_ => AsyncStream.single(0)) ++
+            AsyncStream(4, 5).flatMapConcat(k =>
+              AsyncStream.fromIterable(List.fill(k - 3)(k))
+            ) ++
+            AsyncStream.single(-i)
+        }
+      val expected = await(nested.runToSeq)
+      expected.take(8) shouldBe Seq(11, -9, 10, 21, -19, 20, 4, 5)
+      runAkka(nested.toSource) shouldBe expected
+    }
+
+    "drop a frame whose outer stream ends while a stream below it runs" in {
+      // the middle frame's outer stream ends only after the innermost frame started
+      val middleEnd = Promise[Option[Int]]()
+      val gate = Source.maybe[Int].mapMaterializedValue { p =>
+        p.completeWith(middleEnd.future); NotUsed
+      }
+      val middleOuter = Source.single(1).concat(gate).toAsyncStream
+
+      val stream = AsyncStream(100, 200).flatMapConcat { a =>
+        middleOuter.flatMapConcat { _ =>
+          AsyncStream(1, 2, 3).flatMapConcat { c =>
+            if (c == 2) middleEnd.trySuccess(None)
+            AsyncStream.single(a + c)
+          }
+        } ++ AsyncStream.single(a)
+      }
+      runAkka(stream.toSource) shouldBe Seq(101, 102, 103, 100, 201, 202, 203, 200)
+    }
+
+    "ask for an outer element, a function and a next stream only on demand" in {
+      val calls = new AtomicInteger()
+      val thunks = new AtomicInteger()
+      val stream = AsyncStream.fromIterator(() => Iterator.from(1)).flatMapConcat { i =>
+        calls.incrementAndGet()
+        AsyncStream.single(i) ++ AsyncStream.defer {
+          thunks.incrementAndGet(); AsyncStream.single(-i)
+        }
+      }
+      runAkka(stream.take(3).toSource) shouldBe Seq(1, -1, 2)
+      calls.get shouldBe 2
+      thunks.get shouldBe 1
+    }
+
+    "complete as soon as nothing is left - without further demand" in {
+      val completed = Promise[Seq[Int]]()
+      val received = new ConcurrentLinkedQueue[Int]()
+      AsyncStream(1, 2)
+        .flatMapConcat(i => AsyncStream.single(i))
+        .toSource
+        .runWith(JavaFlowSupport.Sink.asPublisher[Int](fanout = false))
+        .subscribe(new JFlow.Subscriber[Int] {
+          def onSubscribe(s: JFlow.Subscription): Unit = s.request(2)
+          def onNext(item: Int): Unit = { received.add(item); () }
+          def onError(e: Throwable): Unit = completed.tryFailure(e)
+          def onComplete(): Unit = completed.trySuccess(received.asScala.toList)
+        })
+      Await.result(completed.future, 3.seconds) shouldBe Seq(1, 2)
+    }
+
+    "cancel the streams of every frame when the downstream stops early" in {
+      val ended = new ConcurrentLinkedQueue[String]()
+      val stream = endless("outer", ended).flatMapConcat { _ =>
+        endless("middle", ended).flatMapConcat(_ => endless("inner", ended))
+      }
+      runAkka(stream.take(3).toSource) shouldBe Seq(1, 2, 3)
+      eventually(ended.asScala.toSet shouldBe Set("outer", "middle", "inner"))
+    }
+
+    "fail at once, cancelling the streams of the other frames, when a stream fails" in {
+      val ended = new ConcurrentLinkedQueue[String]()
+      val boom = new IllegalStateException("boom")
+      val stream = endless("outer", ended).flatMapConcat { _ =>
+        endless("middle", ended).flatMapConcat { _ =>
+          AsyncStream.single(1) ++ AsyncStream.failed[Int](boom)
+        }
+      }
+      Try(runAkka(stream.toSource)).failed.get should be theSameInstanceAs boom
+      eventually(ended.asScala.toSet shouldBe Set("outer", "middle"))
+
+      val failedFuture =
+        AsyncStream.single(1) ++ AsyncStream.futureStream[Int](Future.failed(boom))
+      Try(runAkka(failedFuture.toSource)).failed.get should be theSameInstanceAs boom
+      val failedLater =
+        AsyncStream.single(1) ++ AsyncStream.futureStream[Int](Future(throw boom))
+      Try(runAkka(failedLater.toSource)).failed.get should be theSameInstanceAs boom
+    }
+
+    "fail with what a function or a thunk threw, or name the one that returned null" in {
+      val boom = new IllegalStateException("boom")
+      def failure(stream: AsyncStream[Int]): Throwable =
+        Try(runAkka(stream.toSource)).failed.get
+
+      failure(AsyncStream(1).flatMapConcat(_ => throw boom)) should be theSameInstanceAs boom
+      failure(AsyncStream(1) ++ (throw boom)) should be theSameInstanceAs boom
+      failure(
+        AsyncStream(1) ++ AsyncStream.defer[Int](throw boom)
+      ) should be theSameInstanceAs boom
+      failure(
+        AsyncStream(1) ++ AsyncStream.futureStream[Int](throw boom)
+      ) should be theSameInstanceAs boom
+
+      failure(AsyncStream(1).flatMapConcat(_ => null: AsyncStream[Int])).getMessage shouldBe
+        "The flatMapConcat function returned null"
+      failure(AsyncStream(1) ++ (null: AsyncStream[Int])).getMessage shouldBe
+        "The next stream of a concat returned null"
+      failure(AsyncStream(1) ++ AsyncStream.futureStream[Int](null)).getMessage shouldBe
+        "The futureStream thunk returned null"
+      failure(
+        AsyncStream(1) ++ AsyncStream.futureStream[Int](Future.successful(null))
+      ).getMessage shouldBe
+        "The futureStream future returned null"
     }
   }
 

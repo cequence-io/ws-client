@@ -85,12 +85,39 @@ private[wsclient] final class ZioCompiler(bridges: BridgeCounter) extends Stream
 
   private def fromFuture[A](future: => Future[A]): Task[A] = ZIO.fromFuture(_ => future)
 
+  // an iterator, read lazily chunk by chunk (`size` elements, doubling up to MaxOutputChunk): a
+  // throw emits the elements read before it, then fails. It reads no input, so it is a stream's
+  // channel as well as a step of a pipeline's
+  private def readIterator[A](
+    it: Iterator[A],
+    size: Int
+  ): ZChannel[Any, Any, Any, Any, Throwable, Chunk[A], Any] =
+    ZChannel.suspend {
+      val out = ChunkBuilder.make[A]()
+      var n = 0
+      var error: Throwable = null
+      try
+        while (n < size && it.hasNext) {
+          out += it.next()
+          n += 1
+        }
+      catch { case NonFatal(e) => error = e }
+      val chunk = out.result()
+      val emitted = if (chunk.isEmpty) ZChannel.unit else ZChannel.write(chunk)
+      if (error != null)
+        emitted *> ZChannel.fail(error)
+      else if (n == size)
+        emitted *> readIterator(it, math.min(size * 2, ZioCompiler.MaxOutputChunk))
+      else
+        emitted
+    }
+
   // ------------------------------------------------------------------------------ leaves
 
+  // the first chunk is one element, so the head of a slow iterator is not held back for a
+  // whole chunk (ZStream.fromIterator reads a full chunk first, and drops it when a read throws)
   def emits[A](as: immutable.Iterable[A]): ZStream[Any, Throwable, A] =
-    ZStream
-      .fromZIO(ZIO.attempt(as.iterator))
-      .flatMap(iterator => ZStream.fromIterator(iterator, 64))
+    safely(ZStream.fromChannel(readIterator(as.iterator, 1)))
 
   def failed[A](error: Throwable): ZStream[Any, Throwable, A] = ZStream.fail(error)
 
@@ -110,20 +137,11 @@ private[wsclient] final class ZioCompiler(bridges: BridgeCounter) extends Stream
     ZioBridges.cursorStream[A](ctx => SubscriberCursor[A](factory, bufferSize, ctx), bridges)
   }
 
-  // open and every read on the blocking pool; close exactly once, after the last read returned
+  // the neutral blocking cursor (ws-client's blocking pool), as on every backend: an interrupt
+  // never waits for a stalled read, close() follows the last read exactly once, and a throwing
+  // close() is logged, not a stream failure
   def fromBlocking[A](open: () => BlockingCursor[A]): ZStream[Any, Throwable, A] =
-    ZStream
-      .acquireReleaseWith(ZIO.attemptBlocking(open()))(cursor =>
-        ZIO.attemptBlocking(cursor.close()).ignore
-      )
-      .flatMap { cursor =>
-        ZStream.repeatZIOOption(
-          ZIO.attemptBlocking(cursor.next()).mapError(Some(_)).flatMap {
-            case Some(element) => ZIO.succeed(element)
-            case None          => ZIO.fail(None)
-          }
-        )
-      }
+    ZioBridges.cursorStream[A](ctx => new BlockingReadCursor[A](open, ctx), bridges)
 
   def native[A](leaf: NativeStream[A]): ZStream[Any, Throwable, A] =
     leaf match {
@@ -165,27 +183,7 @@ private[wsclient] final class ZioCompiler(bridges: BridgeCounter) extends Stream
       if (out.isEmpty) ZChannel.unit else ZChannel.write(out)
 
     // the rest of one element's outputs, chunk by chunk
-    def drain(it: Iterator[B]): Channel =
-      ZChannel.suspend {
-        val out = ChunkBuilder.make[B]()
-        var n = 0
-        var more = false
-        var error: Throwable = null
-        try {
-          while (n < limit && it.hasNext) {
-            out += it.next()
-            n += 1
-          }
-          more = it.hasNext
-        } catch { case NonFatal(e) => error = e }
-        val emitted = output(out.result())
-        if (error != null)
-          emitted *> ZChannel.fail(error)
-        else if (more)
-          emitted *> drain(it)
-        else
-          emitted
-      }
+    def drain(it: Iterator[B]): Channel = readIterator(it, limit)
 
     // the elements of `chunk` from index `from` (a pipeline channel never sees an upstream
     // failure - the stream propagates it)

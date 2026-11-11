@@ -83,8 +83,8 @@ private[wsclient] object NeutralRunner {
 
     execute(ec, promise) {
       val cursor = Cursors.open(stream, ctx)
-      cursor
-        .next()
+      Cursors
+        .pull(cursor)
         .onComplete {
           case Success(first) => promise.success(singleShot(first, cursor))
           case Failure(e)     => promise.failure(e)
@@ -182,7 +182,7 @@ private[wsclient] object NeutralRunner {
           promise.trySuccess(acc)
           return
         }
-        val future = cursor.next()
+        val future = Cursors.pull(cursor)
         future.value match {
           case Some(result) =>
             continue = handle(result)

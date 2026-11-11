@@ -12,6 +12,7 @@ import io.cequence.wsclient.service.{
   SourcePublishersAkka,
   StreamErrorBody,
   StreamFailures,
+  StreamedBody,
   WSClientOutputStreamExtraAkka
 }
 import io.cequence.wsclient.service.spi.TransportSettings
@@ -305,20 +306,18 @@ class PlayWSStreamClientEngine(
             )
       }
 
-    // keep it like this because of older version of akka-stream (futureSource vs fromFutureSource)
-    // a failure is logged once, by its kind (`StreamFailures.log`: a non-2xx status at DEBUG,
-    // anything else at ERROR) - no `.log` stage: it would log every body chunk at DEBUG
-    Source
-      .fromFutureSource(source)
-      .recover { case e: Throwable =>
-        StreamFailures.log(
-          logger,
-          s"$prefix: execStreamRequestAux failed: ${e.getMessage}.",
-          e
-        )
-        throw e
-      }
-      .mapMaterializedValue(_ => NotUsed)
+    // a run that ends before the response head arrived still aborts the request
+    // (`StreamedBody`). A failure is logged once, by its kind (`StreamFailures.log`: a non-2xx
+    // status at DEBUG, anything else at ERROR) - no `.log` stage: it would log every body chunk
+    // at DEBUG
+    StreamedBody.of(source).recover { case e: Throwable =>
+      StreamFailures.log(
+        logger,
+        s"$prefix: execStreamRequestAux failed: ${e.getMessage}.",
+        e
+      )
+      throw e
+    }
   }
 }
 

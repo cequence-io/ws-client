@@ -14,6 +14,8 @@ import io.cequence.wsclient.stream.impl._
 import io.cequence.wsclient.stream.stages.{
   ConcatQueueStage,
   ConcurrentTaskStage,
+  CursorSourceStage,
+  FlatMapConcatStage,
   StatefulStage,
   TerminationStage
 }
@@ -27,11 +29,11 @@ import scala.util.control.NonFatal
 
 /**
  * Compiles an [[AsyncStream]] into an Akka `Source` - natively: an Akka leaf (`SourceLeaf`) is
- * returned as is, neutral leaves become Akka sources (`Source(...)`, `lazySource`,
- * `unfoldResource`, ...), and every operator a native stage. A bridge (through
- * `java.util.concurrent.Flow.Publisher`) is built only for a foreign leaf (one) or a foreign
- * native pipe (two). Compiling runs no user code: every thunk runs when the source is
- * materialized, once per materialization.
+ * returned as is, neutral leaves become Akka sources (`Source(...)`, `lazySource`, ...; a
+ * blocking source is the neutral blocking cursor, pulled), and every operator a native stage.
+ * A bridge (through `java.util.concurrent.Flow.Publisher`) is built only for a foreign leaf
+ * (one) or a foreign native pipe (two). Compiling runs no user code: every thunk runs when the
+ * source is materialized, once per materialization.
  */
 private[wsclient] object SourceCompiler {
 
@@ -215,9 +217,20 @@ private[wsclient] final class SourceCompiler(bridges: BridgeCounter) extends Str
     ).addAttributes(Attributes.inputBuffer(size, size))
   }
 
+  // the neutral blocking cursor, as on every backend: a cancel never waits for a stalled read,
+  // close() runs exactly once and its failure is logged, never the stream's. (unfoldResource
+  // failed a finished stream on a throwing close() and then closed a second time.)
   def fromBlocking[A](open: () => BlockingCursor[A]): Source[A, NotUsed] =
-    // unfoldResource reads on the blocking IO dispatcher and closes exactly once
-    Source.unfoldResource[A, BlockingCursor[A]](open, _.next(), _.close())
+    Source.fromMaterializer {
+      (
+        materializer,
+        _
+      ) =>
+        val ctx = StreamRuntime.context(materializer.executionContext, bridges)
+        Source.fromGraph(
+          new CursorSourceStage[A](() => new BlockingReadCursor[A](open, ctx), "fromBlocking")
+        )
+    }.mapMaterializedValue(_ => NotUsed)
 
   def native[A](leaf: NativeStream[A]): Source[A, NotUsed] =
     leaf match {
@@ -280,11 +293,13 @@ private[wsclient] final class SourceCompiler(bridges: BridgeCounter) extends Str
   ): Source[A, NotUsed] =
     up.concatLazy(Source.fromGraph(new ConcatQueueStage[A](next, stream => compile(stream))))
 
+  // one stage however deep the inner streams nest flatMapConcats: a recursive stream (paging,
+  // polling) runs at a constant depth - the built-in flatMapConcat nests a stage per level
   def flatMapConcat[A, B](
     up: Source[A, NotUsed],
     f: A => AsyncStream[B]
   ): Source[B, NotUsed] =
-    up.flatMapConcat(a => compile(f(a)))
+    up.via(new FlatMapConcatStage[A, B](f, stream => compile(stream)))
 
   def evalMap[A, B](
     up: Source[A, NotUsed],

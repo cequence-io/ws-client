@@ -8,7 +8,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.{ConcurrentLinkedQueue, TimeUnit}
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future, Promise}
@@ -179,10 +179,103 @@ class Fs2InteropSpec extends AnyWordSpec with Matchers {
           .take(2)
       ) shouldBe
         Seq(1, 2)
-      closes.get() shouldBe 1
+      // after an early stop the close runs on the blocking pool: not awaited by the stream's end
+      eventually(closes.get() shouldBe 1)
 
       def ones: AsyncStream[Int] = AsyncStream.single(1) ++ ones
       runFs2(ones.take(100000).toFs2[IO]).size shouldBe 100000
+    }
+
+    "read a blocking source through the neutral blocking cursor - without a bridge" in {
+      // a throwing close() is logged: never a failure of the (finished) stream
+      val closes = new AtomicInteger()
+      val throwingClose = AsyncStream.fromBlockingIterator[Int](
+        () => Iterator(1, 2),
+        () => { closes.incrementAndGet(); throw new RuntimeException("close") }
+      )
+      val (compiled, bridges) = StreamDiagnostics.counted(throwingClose.toFs2[IO])
+      runFs2(compiled) shouldBe Seq(1, 2)
+      bridges.get shouldBe 0
+      closes.get() shouldBe 1
+
+      // a stalled read: the cancel does not wait for it; the source is closed once it returned
+      val reading = new CountDownLatch(1)
+      val release = new CountDownLatch(1)
+      val stalledCloses = new AtomicInteger()
+      val stalled = AsyncStream.fromBlockingIterator[Int](
+        () =>
+          new Iterator[Int] {
+            def hasNext: Boolean = { reading.countDown(); release.await(); false }
+            def next(): Int = throw new NoSuchElementException
+          },
+        () => stalledCloses.incrementAndGet()
+      )
+      try {
+        runFs2(
+          stalled.toFs2[IO].interruptWhen(IO.blocking(reading.await()).attempt)
+        ) shouldBe Seq.empty
+        stalledCloses.get() shouldBe 0 // the read is still in progress
+      } finally release.countDown()
+      eventually(stalledCloses.get() shouldBe 1)
+    }
+
+    "treat a throw while building a per-run stream as a failure of the stream" in {
+      val boom = new RuntimeException("boom")
+      def failing: AsyncStream[Int] = throw boom
+      def recovered(stream: AsyncStream[Int]): Seq[Int] =
+        runFs2(stream.recover { case e if e eq boom => -1 }.toFs2[IO])
+
+      // behind a `++` and below a stage that steps its upstream, fs2 hands a throw out of a
+      // suspended stream's thunk to no later error handler
+      recovered(AsyncStream.single(1) ++ failing) shouldBe Seq(1, -1)
+      recovered(AsyncStream.single(1) ++ AsyncStream.defer(failing)) shouldBe Seq(1, -1)
+      recovered(AsyncStream.defer(failing).map(_ + 1)) shouldBe Seq(-1)
+      recovered(AsyncStream(1, 2).flatMapConcat(_ => failing).map(_ + 1)) shouldBe Seq(-1)
+      recovered(
+        AsyncStream.single(1) ++ AsyncStream.futureStream(
+          Future.successful(1).map(_ => failing)
+        )
+      ) shouldBe Seq(1, -1)
+      recovered(
+        AsyncStream.single(1) ++
+          AsyncStream.failed[Int](new RuntimeException("first")).recoverWith { case _ =>
+            failing
+          }
+      ) shouldBe Seq(1, -1)
+      recovered(
+        AsyncStream.single(1) ++
+          AsyncStream(2).stateful[Int, Int](() => throw boom)(
+            (
+              s,
+              a
+            ) => Step(s, List(a)),
+            _ => Nil
+          )
+      ) shouldBe Seq(1, -1)
+
+      val mapped = new RuntimeException("mapped")
+      Try(
+        runFs2((AsyncStream.single(1) ++ failing).mapError { case _ => mapped }.toFs2[IO])
+      ).failed.get shouldBe theSameInstanceAs(mapped)
+    }
+
+    "read an iterator's first element alone, and emit the elements before a failing read" in {
+      val produced = new AtomicInteger()
+      val counting =
+        AsyncStream.fromIterator(() =>
+          Iterator.from(0).map { i => produced.incrementAndGet(); i }
+        )
+      runFs2(counting.toFs2[IO].take(1)) shouldBe Seq(0)
+      produced.get shouldBe 1 // a slow iterator's head is not held back for a full chunk
+
+      val boom = new RuntimeException("boom")
+      val failing = AsyncStream.fromIterator(() =>
+        Iterator(1, 2) ++ new Iterator[Int] {
+          def hasNext: Boolean = true
+          def next(): Int = throw boom
+        }
+      )
+      runFs2(failing.recover { case e if e eq boom => -1 }.toFs2[IO]) shouldBe Seq(1, 2, -1)
     }
 
     "read a lazy or infinite expansion lazily - at most one chunk ahead" in {

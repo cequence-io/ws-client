@@ -1,6 +1,7 @@
 package io.cequence.wsclient.stream.impl
 
 import com.typesafe.scalalogging.Logger
+import io.cequence.wsclient.domain.CequenceWSException
 import io.cequence.wsclient.stream.{AsyncStream, NativePipe, NativeStream, Termination}
 import org.slf4j.LoggerFactory
 
@@ -21,6 +22,10 @@ import scala.util.{Failure, Success, Try}
  * hop, no recursion); consecutive `map` / `mapConcat` / `stateful` nodes fuse into one cursor;
  * consecutive concats into one multi-concat cursor, which also flattens a next stream that is
  * itself a concat (so `def loop = single(1) ++ loop` runs in constant stack and memory).
+ * Recursion in tail position through `flatMapConcat`, `recoverWith` and `futureStream` runs at
+ * a constant depth too: a cursor that only passes its calls on says so (`Cursor.forwardsTo`)
+ * and its holder skips it; a `flatMapConcat` whose upstream has ended continues in place with
+ * a stream that is itself a `flatMapConcat` (see `FlatMapConcatCursor`).
  */
 private[wsclient] object NeutralCompiler extends StreamCompiler {
 
@@ -31,7 +36,13 @@ private[wsclient] object NeutralCompiler extends StreamCompiler {
   def emits[A](as: immutable.Iterable[A]): Opener[A] =
     new Opener[A] {
       def open(ctx: RunContext): Cursor[A] =
-        try new IteratorCursor(as.iterator)
+        try
+          // only a strict collection may be asked for its end ahead of the pull (a lazy one -
+          // a LazyList, fromIterator's per-run iterable - would run user code early)
+          new IteratorCursor(
+            as.iterator,
+            strict = as.isInstanceOf[List[_]] || as.isInstanceOf[Vector[_]]
+          )
         catch { case NonFatal(e) => new FailedCursor(e) }
     }
 
@@ -137,7 +148,8 @@ private[wsclient] object NeutralCompiler extends StreamCompiler {
     f: A => AsyncStream[B]
   ): Opener[B] =
     new Opener[B] {
-      def open(ctx: RunContext): Cursor[B] = new FlatMapConcatCursor(up.open(ctx), f, ctx)
+      def open(ctx: RunContext): Cursor[B] =
+        new FlatMapConcatCursor[B](up.open(ctx), f.asInstanceOf[Any => AsyncStream[B]], ctx)
     }
 
   def evalMap[A, B](
@@ -219,6 +231,40 @@ private[wsclient] object Cursors {
     try StreamCompiler.compile(NeutralCompiler, stream).open(ctx)
     catch { case NonFatal(e) => new FailedCursor(e) }
 
+  /**
+   * `cursor.next()` for the root of a run. Recursion that is NOT in tail position (an operator
+   * applied to the recursive call's result) nests one cursor per level, and a pull walks them
+   * all: nested deeper than the thread's stack it fails the run with an ordinary exception - a
+   * StackOverflowError is not NonFatal and would leave the run's future incomplete forever.
+   */
+  def pull[A](cursor: Cursor[A]): Future[Option[A]] =
+    try cursor.next()
+    catch {
+      case e: StackOverflowError =>
+        // best effort: the cancel walks the same cursors
+        try cursor.cancel()
+        catch { case NonFatal(_) | _: StackOverflowError => }
+        Future.failed(
+          new CequenceWSException(
+            "Stream nested too deeply: a pull overflowed the thread's stack. Recursive " +
+              "streams run at a constant depth only when the recursive call is in tail " +
+              "position (the last stream of a concat / flatMapConcat / recoverWith).",
+            e
+          )
+        )
+    }
+
+  /** `cursor`, past the cursors that only pass their calls on (`Cursor.forwardsTo`). */
+  def resolve[A](cursor: Cursor[A]): Cursor[A] = {
+    var current = cursor
+    var target = current.forwardsTo
+    while (target != null) {
+      current = target
+      target = current.forwardsTo
+    }
+    current
+  }
+
   def nonNull[T](
     value: T,
     what: String
@@ -236,8 +282,13 @@ private[wsclient] final class FailedCursor[A](error: Throwable) extends Cursor[A
   def cancel(): Unit = ()
 }
 
-private[wsclient] final class IteratorCursor[A](iterator: Iterator[A]) extends Cursor[A] {
+private[wsclient] final class IteratorCursor[A](
+  iterator: Iterator[A],
+  strict: Boolean
+) extends Cursor[A] {
   @volatile private var cancelled = false
+
+  override def exhausted: Boolean = strict && (cancelled || !iterator.hasNext)
 
   def next(): Future[Option[A]] =
     if (cancelled)
@@ -303,6 +354,14 @@ private[wsclient] final class FutureStreamCursor[A](
     if (cancelled) cursor.cancel()
     cursor
   }
+
+  override def exhausted: Boolean = {
+    val current = inner
+    current != null && current.exhausted
+  }
+
+  // once the stream is open, this cursor only passes on to it
+  override def forwardsTo: Cursor[A] = inner
 
   def cancel(): Unit = {
     cancelled = true
@@ -498,6 +557,11 @@ private[wsclient] final class FusedCursor(
   private var terminated = false
   @volatile private var cancelled = false
 
+  // maps only: one output per input, nothing held between two next() calls, no end hook
+  private val mapsOnly = stages.forall(_.isInstanceOf[MapStage])
+
+  override def exhausted: Boolean = mapsOnly && upstream.exhausted
+
   def next(): Future[Option[Any]] =
     if (cancelled || terminated)
       Cursors.NoneFuture
@@ -675,12 +739,28 @@ private[wsclient] final class ConcatCursor[A](
   @volatile private var current: Cursor[A] = initial
   @volatile private var cancelled = false
 
+  override def exhausted: Boolean = queue.isEmpty && current.exhausted
+
+  // the last stream: this cursor only passes on to it
+  override def forwardsTo: Cursor[A] = if (queue.isEmpty) current else null
+
+  // the current stream, past the cursors that only pass on (a tail-recursive stream)
+  private def live(): Cursor[A] = {
+    val held = current
+    val resolved = Cursors.resolve(held)
+    if (resolved ne held) {
+      current = resolved
+      if (cancelled) resolved.cancel()
+    }
+    resolved
+  }
+
   def next(): Future[Option[A]] = {
     while (true) {
       if (cancelled)
         return Cursors.NoneFuture
 
-      val future = current.next()
+      val future = live().next()
       future.value match {
         case Some(Success(None)) =>
           if (cancelled || !advance())
@@ -741,21 +821,59 @@ private[wsclient] final class ConcatCursor[A](
 
 // ----------------------------------------------------------------------- other operators
 
-private[wsclient] final class FlatMapConcatCursor[A, B](
-  upstream: Cursor[A],
-  f: A => AsyncStream[B],
+/**
+ * `flatMapConcat`. Recursion in tail position runs in constant stack and memory, as in fs2:
+ *   - an inner stream opened after the upstream has ended (`exhausted`) is all that is left:
+ *     this cursor then only passes on to it (`forwardsTo`), and whatever holds this cursor
+ *     skips it - `def page(i) = load(i).flatMapConcat(p => items(p) ++ page(i + 1))`
+ *   - when that inner stream is itself a `flatMapConcat`, this cursor continues IN PLACE with
+ *     its upstream and function (no cursor per level, synchronous results in one loop) - `def
+ *     poll = check().flatMapConcat(done => if (done) result else poll)`
+ *
+ * Both are unobservable: an ended upstream (`Cursor.exhausted`) has nothing left to run.
+ */
+private[wsclient] final class FlatMapConcatCursor[B](
+  initialUpstream: Cursor[Any],
+  initialF: Any => AsyncStream[B],
   ctx: RunContext
 ) extends Cursor[B] {
 
+  // replaced only by a tail call, on the pulling side (as `f` and `tail` are)
+  @volatile private var upstream: Cursor[Any] = initialUpstream
+  private var f: Any => AsyncStream[B] = initialF
   @volatile private var inner: Cursor[B] = _
   @volatile private var cancelled = false
+  // the upstream is known to have ended: `inner` is the rest of this stream
+  private var tail = false
+
+  override def exhausted: Boolean = {
+    val currentInner = inner
+    (currentInner == null || currentInner.exhausted) && (tail || upstream.exhausted)
+  }
+
+  override def forwardsTo: Cursor[B] = if (tail) inner else null
+
+  // the inner stream, past the cursors that only pass on (a tail-recursive inner stream)
+  private def liveInner(): Cursor[B] = {
+    val held = inner
+    if (held == null)
+      null
+    else {
+      val resolved = Cursors.resolve(held)
+      if (resolved ne held) {
+        inner = resolved
+        if (cancelled) resolved.cancel()
+      }
+      resolved
+    }
+  }
 
   def next(): Future[Option[B]] = {
     while (true) {
       if (cancelled)
         return Cursors.NoneFuture
 
-      val currentInner = inner
+      val currentInner = liveInner()
       if (currentInner != null) {
         val future = currentInner.next()
         future.value match {
@@ -804,18 +922,16 @@ private[wsclient] final class FlatMapConcatCursor[A, B](
         }
     }
 
-  // null: continue with the opened inner stream
-  private def onOuter(result: Try[Option[A]]): Future[Option[B]] =
+  // null: continue - with the opened inner stream, or (a tail call) with the new upstream
+  private def onOuter(result: Try[Option[Any]]): Future[Option[B]] =
     result match {
       case Success(Some(element)) =>
         if (cancelled)
           Cursors.NoneFuture
         else
           try {
-            val cursor =
-              Cursors.open(Cursors.nonNull(f(element), "The flatMapConcat function"), ctx)
-            inner = cursor
-            if (cancelled) cursor.cancel()
+            val stream = Cursors.nonNull(f(element), "The flatMapConcat function")
+            if (upstream.exhausted) openLast(stream) else open(stream)
             null
           } catch {
             case NonFatal(e) =>
@@ -826,6 +942,33 @@ private[wsclient] final class FlatMapConcatCursor[A, B](
       case Failure(e) =>
         if (cancelled) Cursors.NoneFuture else Future.failed(e)
     }
+
+  private def open(stream: AsyncStream[B]): Unit = {
+    val cursor = Cursors.open(stream, ctx)
+    inner = cursor
+    if (cancelled) cursor.cancel()
+  }
+
+  // the inner stream of the last outer element (the upstream has ended)
+  private def openLast(stream: AsyncStream[B]): Unit = {
+    // a defer runs when its stream is opened - which is now, either way
+    var resolved = stream
+    while (resolved.isInstanceOf[Defer[_]])
+      resolved = resolved.asInstanceOf[Defer[B]].thunk()
+
+    resolved match {
+      case tailCall: FlatMapConcat[_, _] =>
+        // what the inner cursor would do with its upstream and function, this one does itself
+        val typed = tailCall.asInstanceOf[FlatMapConcat[Any, B]]
+        val opened = Cursors.open(typed.upstream, ctx)
+        upstream = opened
+        f = typed.f
+        if (cancelled) opened.cancel()
+      case other =>
+        open(other)
+        tail = true
+    }
+  }
 
   def cancel(): Unit = {
     cancelled = true
@@ -854,6 +997,8 @@ private[wsclient] final class EvalMapCursor[A, B](
         case None         => future.transformWith(handle)(Trampoline)
       }
     }
+
+  override def exhausted: Boolean = upstream.exhausted
 
   private def handle(result: Try[Option[A]]): Future[Option[B]] =
     result match {
@@ -917,6 +1062,8 @@ private[wsclient] final class MapErrorCursor[A](
     }
   }
 
+  override def exhausted: Boolean = upstream.exhausted
+
   private def mapped(e: Throwable): Future[Option[A]] =
     if (cancelled)
       Cursors.NoneFuture
@@ -942,8 +1089,25 @@ private[wsclient] final class RecoverWithCursor[A](
   @volatile private var cancelled = false
   private var switched = false
 
+  // an ended stream fails no more: nothing to recover
+  override def exhausted: Boolean = current.exhausted
+
+  // the recovery stream is the rest of this one (its failures are not recovered again)
+  override def forwardsTo: Cursor[A] = if (switched) current else null
+
+  // the current stream, past the cursors that only pass on (a recovery that recovers again)
+  private def live(): Cursor[A] = {
+    val held = current
+    val resolved = Cursors.resolve(held)
+    if (resolved ne held) {
+      current = resolved
+      if (cancelled) resolved.cancel()
+    }
+    resolved
+  }
+
   def next(): Future[Option[A]] = {
-    val future = current.next()
+    val future = live().next()
     future.value match {
       case Some(Failure(e)) => recover(e, future)
       case Some(_)          => future
@@ -1107,15 +1271,35 @@ private[wsclient] final class ConcurrentlyCursor[A](
     }(ctx.ec)
   }
 
+  // the task's failure as soon as the task HAS failed - read from the future itself: the
+  // callback of `start` runs on `ec`, after any number of results of a synchronous upstream (a
+  // task that threw, or was failed when it was returned, then never failed the stream)
+  private def taskFailure: Throwable = {
+    val error = taskError
+    if (error != null)
+      error
+    else
+      taskFuture.value match {
+        case Some(Failure(e)) => e
+        case _                => null
+      }
+  }
+
+  private def failWith(error: Throwable): Future[Option[A]] = {
+    ended = true // the callback of `start` now leaves the run alone
+    val upstreamCursor = upstream
+    if (upstreamCursor != null) upstreamCursor.cancel()
+    Future.failed(error)
+  }
+
   def next(): Future[Option[A]] =
     if (cancelled)
       Cursors.NoneFuture
     else {
-      val error = taskError
-      if (error != null) {
-        ended = true
-        Future.failed(error)
-      } else {
+      val error = taskFailure
+      if (error != null)
+        failWith(error)
+      else {
         val future = upstream.next()
         future.value match {
           case Some(result) => handle(result)
@@ -1132,11 +1316,10 @@ private[wsclient] final class ConcurrentlyCursor[A](
     if (cancelled)
       Cursors.NoneFuture
     else {
-      val error = taskError
-      if (error != null) {
-        ended = true
-        Future.failed(error)
-      } else
+      val error = taskFailure
+      if (error != null)
+        failWith(error)
+      else
         result match {
           case Success(Some(element)) => Future.successful(Some(element))
           case Success(None) =>

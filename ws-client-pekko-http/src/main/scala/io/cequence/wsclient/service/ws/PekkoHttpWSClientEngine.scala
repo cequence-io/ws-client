@@ -6,6 +6,7 @@ import io.cequence.wsclient.service.{
   SourcePublishersPekko,
   StreamErrorBody,
   StreamFailures,
+  StreamedBody,
   WSClientEngine,
   WSClientInputStreamExtraPekko,
   WSClientOutputStreamExtraPekko
@@ -654,15 +655,15 @@ class PekkoHttpWSClientEngine(
           )
     }
 
-    // a failure is logged once, by its kind (`StreamFailures.log`: a non-2xx status at DEBUG,
-    // anything else at ERROR) - no `.log` stage: it would log every body chunk at DEBUG
-    Source
-      .futureSource(source)
-      .recover { case e: Throwable =>
-        StreamFailures.log(streamLogger, s"$svc: execRawStream failed: ${e.getMessage}.", e)
-        throw e
-      }
-      .mapMaterializedValue(_ => NotUsed)
+    // a run that ends before the response head arrived still aborts the request at once
+    // (`StreamedBody` - otherwise only pekko-http's response-entity-subscription-timeout
+    // would, with a warning). A failure is logged once, by its kind (`StreamFailures.log`: a
+    // non-2xx status at DEBUG, anything else at ERROR) - no `.log` stage: it would log every
+    // body chunk at DEBUG
+    StreamedBody.of(source).recover { case e: Throwable =>
+      StreamFailures.log(streamLogger, s"$svc: execRawStream failed: ${e.getMessage}.", e)
+      throw e
+    }
   }
 
   // frame semantics (data:-prefix, [DONE], strip, error mapping) live in the shared,

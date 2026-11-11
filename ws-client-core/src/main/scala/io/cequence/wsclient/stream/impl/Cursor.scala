@@ -23,6 +23,24 @@ private[wsclient] trait Cursor[+A] {
   def next(): Future[Option[A]]
 
   def cancel(): Unit
+
+  /**
+   * True only when this cursor is KNOWN to have ended: its next `next()` would return `None`
+   * at once, and neither that call nor `cancel()` would do anything observable (no user
+   * function, hook, read or request). Asked only by the pulling side, between two `next()`
+   * calls. The default - never known - is always correct.
+   */
+  def exhausted: Boolean = false
+
+  /**
+   * The cursor this one has BECOME, or null: every further `next()` / `cancel()` of this
+   * cursor would only be passed on to it (and after its end this one ends, with nothing
+   * observable). A cursor that holds this one may hold that one instead (`Cursors.resolve`) -
+   * which keeps a tail-recursive stream (`def page(i) = load(i).flatMapConcat(p => items(p) ++
+   * page(i + 1))`, a `recoverWith` that reconnects) at a constant depth. Asked only by the
+   * pulling side, between two `next()` calls. The default - never - is always correct.
+   */
+  def forwardsTo: Cursor[A] = null
 }
 
 /**

@@ -147,6 +147,27 @@ class AsyncStreamLifecycleSpec extends AnyWordSpec with Matchers with StreamTest
       eventually(publisher.cancellations.get() shouldBe 1)
     }
 
+    "fail the stream when the task threw or had failed already - a synchronous upstream too" in {
+      val taskError = new RuntimeException("kickoff failed")
+      runFailure(AsyncStream(1, 2, 3).concurrently(() => throw taskError)) shouldBe
+        theSameInstanceAs(taskError)
+      runFailure(
+        AsyncStream.fromIterable(1 to 1000).concurrently(() => Future.failed(taskError))
+      ) shouldBe theSameInstanceAs(taskError)
+      runFailure(
+        AsyncStream(1).concurrently(() => Future.failed(taskError), awaitCompletion = true)
+      ) shouldBe theSameInstanceAs(taskError)
+
+      // the upstream is cancelled, once
+      val causes = new ConcurrentLinkedQueue[Termination]()
+      runFailure(
+        AsyncStream(1, 2, 3)
+          .onTerminate(cause => causes.add(cause))
+          .concurrently(() => Future.failed(taskError))
+      ) shouldBe theSameInstanceAs(taskError)
+      eventually(causes.toArray.toSeq shouldBe Seq(Termination.Cancelled))
+    }
+
     "with awaitCompletion: complete only after the task, fail if it fails" in {
       val task = Promise[Unit]()
       val result =

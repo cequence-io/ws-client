@@ -3,10 +3,12 @@ package io.cequence.wsclient.stream
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 
-import java.util.concurrent.TimeUnit
+import io.cequence.wsclient.stream.impl.{Cursor, FromCursor}
+
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.{Future, Promise}
-import scala.util.Try
+import scala.util.{Failure, Success, Try}
 
 class AsyncBroadcastHubSpec extends AnyWordSpec with Matchers with StreamTestSupport {
 
@@ -25,7 +27,7 @@ class AsyncBroadcastHubSpec extends AnyWordSpec with Matchers with StreamTestSup
 
   // a source the test feeds element by element
   private final class Feed {
-    @volatile private var promises = Vector.fill(1000)(Promise[Option[Int]]())
+    private val promises = Vector.fill(1000)(Promise[Option[Int]]())
     private val index = new AtomicInteger()
     val pulled = new AtomicInteger()
     def emit(i: Int): Unit = promises(index.getAndIncrement()).success(Some(i))
@@ -151,6 +153,32 @@ class AsyncBroadcastHubSpec extends AnyWordSpec with Matchers with StreamTestSup
       hub.shutdown()
       await(a) shouldBe Nil
       await(hub.completion) shouldBe (())
+    }
+
+    "keep the shutdown when the cancelled pull ends in a failure or an element" in {
+      // an upstream whose pending pull answers the cancel with `late` - a result already in
+      // flight when the shutdown came
+      def hubOver(late: Try[Option[Int]]): (AsyncBroadcastHub[Int], CountDownLatch) = {
+        val pulled = new CountDownLatch(1)
+        val pending = Promise[Option[Int]]()
+        val cursor = new Cursor[Int] {
+          def next(): Future[Option[Int]] = { pulled.countDown(); pending.future }
+          def cancel(): Unit = pending.tryComplete(late)
+        }
+        (AsyncBroadcastHub(FromCursor[Int](_ => cursor, "test"), bufferSize = 4), pulled)
+      }
+
+      Seq[Try[Option[Int]]](Failure(new RuntimeException("late")), Success(Some(1))).foreach {
+        late =>
+          val (hub, pulled) = hubOver(late)
+          val a = hub.source().runToSeq
+          eventually(hub.consumerCount shouldBe 1)
+          pulled.await(10, TimeUnit.SECONDS) shouldBe true
+          hub.shutdown()
+          await(a) shouldBe Nil
+          await(hub.completion) shouldBe (())
+          run(hub.source()) shouldBe Nil // a later consumer: completed, as the shutdown said
+      }
     }
   }
 }

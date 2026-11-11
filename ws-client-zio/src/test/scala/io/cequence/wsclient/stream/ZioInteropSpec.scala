@@ -8,7 +8,7 @@ import zio.stream.{ZPipeline, ZStream}
 import zio.{Runtime, Unsafe, ZIO}
 
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.{ConcurrentLinkedQueue, TimeUnit}
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future, Promise}
@@ -212,6 +212,58 @@ class ZioInteropSpec extends AnyWordSpec with Matchers {
       runZio(ones.take(100000).toZStream).size shouldBe 100000
     }
 
+    "read a blocking source through the neutral blocking cursor - without a bridge" in {
+      // a throwing close() is logged: never a failure of the (finished) stream
+      val closes = new AtomicInteger()
+      val throwingClose = AsyncStream.fromBlockingIterator[Int](
+        () => Iterator(1, 2),
+        () => { closes.incrementAndGet(); throw new RuntimeException("close") }
+      )
+      val (compiled, bridges) = StreamDiagnostics.counted(throwingClose.toZStream)
+      runZio(compiled) shouldBe Seq(1, 2)
+      bridges.get shouldBe 0
+      closes.get() shouldBe 1
+
+      // a stalled read: the cancel does not wait for it; the source is closed once it returned
+      val reading = new CountDownLatch(1)
+      val release = new CountDownLatch(1)
+      val stalledCloses = new AtomicInteger()
+      val stalled = AsyncStream.fromBlockingIterator[Int](
+        () =>
+          new Iterator[Int] {
+            def hasNext: Boolean = { reading.countDown(); release.await(); false }
+            def next(): Int = throw new NoSuchElementException
+          },
+        () => stalledCloses.incrementAndGet()
+      )
+      try {
+        runZio(
+          stalled.toZStream.interruptWhen(ZIO.attemptBlocking(reading.await()))
+        ) shouldBe Seq.empty
+        stalledCloses.get() shouldBe 0 // the read is still in progress
+      } finally release.countDown()
+      eventually(stalledCloses.get() shouldBe 1)
+    }
+
+    "read an iterator's first element alone, and emit the elements before a failing read" in {
+      val produced = new AtomicInteger()
+      val counting =
+        AsyncStream.fromIterator(() =>
+          Iterator.from(0).map { i => produced.incrementAndGet(); i }
+        )
+      runZio(counting.toZStream.take(1)) shouldBe Seq(0)
+      produced.get shouldBe 1 // a slow iterator's head is not held back for a full chunk
+
+      val boom = new RuntimeException("boom")
+      val failing = AsyncStream.fromIterator(() =>
+        Iterator(1, 2) ++ new Iterator[Int] {
+          def hasNext: Boolean = true
+          def next(): Int = throw boom
+        }
+      )
+      runZio(failing.recover { case e if e eq boom => -1 }.toZStream) shouldBe Seq(1, 2, -1)
+    }
+
     "read a lazy or infinite expansion lazily - at most one chunk ahead" in {
       val produced = new AtomicInteger()
       val infinite = new scala.collection.immutable.Iterable[Int] {
@@ -283,6 +335,94 @@ class ZioInteropSpec extends AnyWordSpec with Matchers {
         acquired.get shouldBe 1
         released.get shouldBe 1
       }
+    }
+
+    "keep a fiber the stream forked alive for its whole run - behind the bridge and after a preflight" in {
+      val stopped = new AtomicInteger()
+      // the first pull forks the producer (a plain fork: a child of the fiber that pulls) and
+      // returns; every later element needs the producer still running
+      def produced: ZStream[Any, Throwable, Int] = ZStream.unwrap(
+        for {
+          queue <- zio.Queue.bounded[Int](1)
+          _ <- ZIO
+            .foreachDiscard(1 to 5)(i =>
+              ZIO.sleep(zio.Duration.fromMillis(20)) *> queue.offer(i)
+            )
+            .zipRight(ZIO.never)
+            .onInterrupt(ZIO.succeed(stopped.incrementAndGet()))
+            .fork
+        } yield ZStream.fromQueue(queue)
+      )
+
+      // behind the bridge: every pull of the neutral run
+      Await.result(produced.toAsyncStream.take(5).runToSeq, 10.seconds) shouldBe (1 to 5)
+      eventually(stopped.get shouldBe 1) // the run's end stops the producer
+
+      // preflighted (the first pull), then run natively and neutrally
+      val native = Await.result(produced.toAsyncStream.preflight, 10.seconds)
+      runZio(native.take(5).toZStream) shouldBe (1 to 5)
+      eventually(stopped.get shouldBe 2)
+
+      val neutral = Await.result(produced.toAsyncStream.preflight, 10.seconds)
+      Await.result(neutral.take(5).runToSeq, 10.seconds) shouldBe (1 to 5)
+      eventually(stopped.get shouldBe 3)
+    }
+
+    "end a bridged run as its stream ends - a defect and the stream's own interruption are failures, after the elements before them" in {
+      def bridged(stream: ZStream[Any, Throwable, Int]): (Seq[Int], Try[Unit]) = {
+        val seen = new ConcurrentLinkedQueue[Int]()
+        val run = stream.toAsyncStream.run(i => { seen.add(i); () })
+        val result = Try(Await.result(run.done, 10.seconds))
+        (seen.asScala.toSeq, result)
+      }
+
+      val boom = new RuntimeException("defect")
+      val (beforeDefect, died) = bridged(ZStream(1, 2) ++ ZStream.die(boom))
+      beforeDefect shouldBe Seq(1, 2)
+      died.failed.get should be theSameInstanceAs boom
+
+      val (beforeInterrupt, interrupted) =
+        bridged(ZStream(1, 2) ++ ZStream.fromZIO(ZIO.interrupt))
+      beforeInterrupt shouldBe Seq(1, 2)
+      // a Scala future boxes an InterruptedException (it is not NonFatal)
+      interrupted.failed.get.getCause shouldBe an[InterruptedException]
+
+      // the finalizers have run when the end (or the failure) is signalled
+      val released = new AtomicInteger()
+      def releasing(stream: ZStream[Any, Throwable, Int]): ZStream[Any, Throwable, Int] =
+        ZStream
+          .acquireReleaseWith(ZIO.unit)(_ =>
+            ZIO.sleep(zio.Duration.fromMillis(100)) *> ZIO.succeed(released.incrementAndGet())
+          )
+          .flatMap(_ => stream)
+      bridged(releasing(ZStream(1)))._2 shouldBe Success(())
+      released.get shouldBe 1
+      bridged(releasing(ZStream.fail(boom)))._2.failed.get should be theSameInstanceAs boom
+      released.get shouldBe 2
+    }
+
+    "complete a cancelled run at once - also before its first pull and while a pull cannot be interrupted" in {
+      val pulled = new AtomicInteger()
+      val idle = ZStream.fromZIO(ZIO.succeed(pulled.incrementAndGet())).toAsyncStream
+      // a cursor nobody asked: the stream is never pulled
+      val cursor =
+        new ZioCursor(ZioCompiler.toZStream(idle), runtime, impl.StreamRuntime.context(ec))
+      cursor.cancel()
+      Await.result(cursor.next(), 10.seconds) shouldBe None
+      cursor.cancel() // idempotent
+      pulled.get shouldBe 0
+
+      val entered, finished = new CountDownLatch(1)
+      val stuck = ZStream.fromZIO(
+        (ZIO.succeed(entered.countDown()) *> ZIO.sleep(zio.Duration.fromMillis(500)) *>
+          ZIO.succeed(finished.countDown())).uninterruptible
+      )
+      val run = stuck.toAsyncStream.run(_ => ())
+      entered.await(10, TimeUnit.SECONDS) shouldBe true
+      run.cancel()
+      Await.result(run.done, 10.seconds)
+      finished.getCount shouldBe 1 // the run is over, the pull still on its way
+      finished.await(10, TimeUnit.SECONDS) shouldBe true
     }
 
     "cancel a scheduled task exactly when cancel() wins - never both, never neither" in {

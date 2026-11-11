@@ -193,7 +193,7 @@ private[wsclient] final class CursorSubscription[A](
               continue = true
             }
           } else if (!inFlight && current != null) {
-            val future = current.next()
+            val future = Cursors.pull(current)
             future.value match {
               case Some(result) =>
                 accept(result)
