@@ -2,7 +2,9 @@ import sbt.Keys.scalaVersion
 
 // Supported versions
 val scala212 = "2.12.18"
-val scala213 = "2.13.11"
+// 2.13.18: play-ws 2.2.18 (the Akka flavor on 2.13) depends on scala-library 2.13.18, and sbt
+// >= 1.10 fails a build whose scalaVersion is below a dependency's scala-library (SIP-51)
+val scala213 = "2.13.18"
 val scala32 = "3.2.2"
 // Scala 3.3 LTS: only for the modules whose own dependencies are built with 3.3 (Pekko, play-ws
 // 3.x, fs2, ZIO). Every other module's `_3` artifact stays compiled with 3.2.2 (TASTy 28.2), so
@@ -58,7 +60,9 @@ inThisBuild(
     scalacOptions += "-Ywarn-unused",
     //    scalaVersion := "2.12.15",
     semanticdbEnabled := true,
-    semanticdbVersion := scalafixSemanticdb.revision
+    // not scalafixSemanticdb.revision (4.9.3 with sbt-scalafix 0.12.1): semanticdb-scalac is
+    // published per Scala patch version, and Scala 2.13.18 starts at 4.13.9
+    semanticdbVersion := "4.13.9"
   )
 )
 
@@ -98,7 +102,9 @@ lazy val akkaStreamLibs = Def.setting {
       )
     case Some((2, 13)) =>
       Seq(
-        "com.typesafe.akka" %% "akka-stream" % "2.6.20" exclude ("com.typesafe.play", "play-json")
+        // 2.6.21: the version play-ws 2.2.18 brings, so core-akka is compiled and tested against
+        // the Akka its Play modules run on
+        "com.typesafe.akka" %% "akka-stream" % "2.6.21" exclude ("com.typesafe.play", "play-json")
       )
     case Some((3, 2)) =>
       // because of the conflicting cross-version suffixes 2.13 vs 3
@@ -166,26 +172,33 @@ lazy val pekkoScalaVersions = List(scala213, scala33)
 
 // Play WS
 
-def typesafePlayWS(version: String) = Seq(
-  "com.typesafe.play" %% "play-ahc-ws-standalone" % version exclude ("com.typesafe.play", "play-json"),
-  "com.typesafe.play" %% "play-ws-standalone-json" % version exclude ("com.typesafe.play", "play-json")
-//  "com.typesafe.play" % "shaded-asynchttpclient" % version,
-//  "io.netty" % "netty-tcnative-boringssl-static" % "2.0.69.Final"
-)
+// play-json comes from ws-client-core (playJsonVersion): Play WS's own play-json dependency is
+// excluded, so core's version is the one on the classpath (play-ws 2.2.18 would otherwise pull
+// play-json 2.10.x onto Scala 2.13). The rule must name the artifact with its Scala suffix - a
+// bare "play-json" matches nothing
+def typesafePlayWS(
+  version: String,
+  scalaBinary: String
+) = Seq(
+  "com.typesafe.play" %% "play-ahc-ws-standalone" % version,
+  "com.typesafe.play" %% "play-ws-standalone-json" % version
+).map(_.excludeAll(ExclusionRule("com.typesafe.play", s"play-json_$scalaBinary")))
 
 lazy val playWsDependencies = Def.setting {
+  val scalaBinary = scalaBinaryVersion.value
+
   CrossVersion.partialVersion(scalaVersion.value) match {
     case Some((2, 12)) =>
-      // play json - 2.8.2
-      typesafePlayWS("2.1.11")
+      // the last Play WS 2.x for Scala 2.12 (shaded AHC 2.10.5 / Netty 4.1.45)
+      typesafePlayWS("2.1.11", scalaBinary)
 
     case Some((2, 13)) =>
-      // play json - 2.10.0
-      typesafePlayWS("2.1.11")
+      // shaded AHC 2.16.1 / Netty 4.1.138, Akka 2.6.21; class files need Java 11
+      typesafePlayWS("2.2.18", scalaBinary)
 
     case Some((3, 2)) =>
-      // Version "2.2.0-M3" was produced by an unstable release: Scala 3.3.0-RC3 - // play json - 2.10.0-RC6
-      typesafePlayWS("2.2.0-M2")
+      // 2.2.0-M3 and later need Scala 3.3 (M3 was built with 3.3.0-RC3)
+      typesafePlayWS("2.2.0-M2", scalaBinary)
 
     case _ =>
       throw new Exception("Unsupported scala version")

@@ -111,21 +111,28 @@ testkit and verification modules):
      because those point the JVM-global default trust store at a test cert
    - Redirects are off explicitly (`.setFollowRedirect(false)`): the AHC builder's default comes
      from the JVM-wide property `play.shaded.ahc.org.asynchttpclient.followRedirect`. Response
-     decompression: AHC < 2.16.1 (play-ws 2.1.11 / 2.2.0-M2 - the Akka flavor) inflates gzip /
+     decompression: AHC < 2.16.1 (play-ws 2.1.11 / 2.2.0-M2 - the Akka flavor on Scala 2.12 / 3)
+     inflates gzip /
      deflate bodies without any limit (CVE-2026-85721), so `PlayWSClientEngine.boundedInflater`
      replaces AHC's `inflater` handler with AHC 2.16.1's own design (`maxDecompressedResponseSize`
      property, default 256 MiB, 0 or less = no limit - keep AHC's `> 0` guard;
      `DecompressionException`, rest of the body dropped; counted per response, so a long
      compressed stream fails too). It is installed only when the shaded AHC lacks the limit (no
-     `getMaxDecompressedResponseSize` on `AsyncHttpClientConfig`), so the Pekko flavor keeps
-     AHC's own. The provider specs cover both (redirect with the property set; a gzip bomb under
+     `getMaxDecompressedResponseSize` on `AsyncHttpClientConfig`), so the Pekko flavor - and,
+     since 1.2.0, the Akka flavor on Scala 2.13 (play-ws 2.2.18) - keeps AHC's own. The provider specs cover both (redirect with the property set; a gzip bomb under
      a lowered limit, and with 0 / -1)
    - Known CVEs (reachability checked 2026-10-24): the Akka flavor's shaded Netty 4.1.45 / 4.1.60
-     and AHC 2.10.5 / 2.12.3 carry dozens; reachable were only the cookie store (now off),
+     and AHC 2.10.5 / 2.12.3 (Scala 2.12 / 3) carry dozens; reachable were only the cookie store (now off),
      redirects (only with the property) and decompression - all three now closed in code.
      The rest (HTTP/2, SPDY, SNI, CORS, server decoders, Realm / NTLM, WebSocket) is unused by
-     the engine. play-ws 2.2.18 (still Akka 2.6.21; AHC 2.16.1, Netty 4.1.138) is the Scala 2.13
-     upgrade path; 2.12 has none (2.1.11 is the last), Scala 3 needs 3.3+
+     the engine. Scala 2.13 is on play-ws 2.2.18 since 1.2.0 (Akka 2.6.21; AHC 2.16.1, Netty
+     4.1.138; class files need Java 11); 2.12 has no upgrade path (2.1.11 is the last), Scala 3
+     needs 3.3+
+   - play-json comes from core only: `typesafePlayWS` excludes Play WS's own play-json by its
+     suffixed artifact name (`play-json_2.13` - a bare `play-json` matches nothing, as up to
+     1.1.5), so play-ws 2.2.18 links against core's play-json 2.8.2. Do not bump play-json to
+     2.10.x on 2.12 / 2.13 with it (Java 11, MiMa problems, NoSuchMethodError for users pinning
+     2.8)
 
    - Scala 3 trap: with `play.api.libs.ws.JsonBodyReadables._` in scope, a bare
      `rawResponse.body` with no expected type resolves to `body[JsValue]` on Scala 3 (to the
@@ -330,9 +337,13 @@ Client-level settings (timeouts, proxy) live in `TransportSettings` instead. Use
 
 The build manages different dependency versions for Scala 2.12, 2.13, and 3.2:
 - Play JSON: 2.8.2 (Scala 2.12/2.13), 2.10.0-RC6 (Scala 3.2)
-- Akka Stream: 2.6.20 (not 2.6.1 on Scala 2.12: its akka-protobuf-v3 POM pulls protobuf-java
+- Akka Stream: 2.6.20, on Scala 2.13 2.6.21 (what play-ws 2.2.18 brings; not 2.6.1 on Scala 2.12: its akka-protobuf-v3 POM pulls protobuf-java
   3.10.0); Akka HTTP 10.5.3 (ws-client-play-akka-stream only; BUSL-1.1 licensed)
-- Play WS (Akka): 2.1.11 (Scala 2.12/2.13), 2.2.0-M2 (Scala 3.2)
+- Play WS (Akka): 2.1.11 (Scala 2.12), 2.2.18 (Scala 2.13, since 1.2.0 - Java 11+),
+  2.2.0-M2 (Scala 3.2)
+- Scala 2.13.18 (play-ws 2.2.18 depends on that scala-library; SIP-51). `semanticdbVersion` is
+  pinned in build.sbt: semanticdb-scalac is published per Scala patch version, so a Scala bump
+  needs a semanticdb version that has it (for 2.12 AND 2.13)
 - Play WS (Pekko, `org.playframework`): 3.0.14 (shaded AHC 2.16.1 / Netty 4.1.138 - stricter HTTP response parsing than 3.0.7's 4.1.118: bare-LF lines, CL + TE, control chars in headers are rejected); Pekko Stream: 1.6.0; Pekko HTTP: 1.3.0 (Scala 2.13 / 3.3)
 
 Scala 3 requires manual cross-version suffix handling (e.g., `akka-stream_2.13` for Scala 3).
@@ -407,9 +418,10 @@ Three layers beyond the example-based and random specs:
   those classes' synchronization changes its spec first; a new invariant gets a mutant that
   violates it. See `formal/tla/README.md`.
 
-CI runs the last two in a job of their own (`verification`; added with the layers and not yet
-run on GitHub - watch its first run: timing on 2 - 4 cores, the tools-jar download, TLC's disk
-use).
+CI runs the last two in a job of their own (`verification`; first run on GitHub 2026-11-11:
+13 minutes on the hosted runner, tools-jar download included). The `test` job takes about 20
+minutes there; tests whose run time depends on the shared `ExecutionContext.global` need
+generous timeouts (the fs2 100,000-element concat run: 1 s locally, over 15 s on the runner).
 
 #### State of the formalization (2026-11-11) - continue from here
 

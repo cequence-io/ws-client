@@ -18,8 +18,13 @@ class Fs2InteropSpec extends AnyWordSpec with Matchers {
 
   implicit private val ec: ExecutionContext = ExecutionContext.global
 
-  private def runFs2[A](stream: fs2.Stream[IO, A]): Seq[A] =
-    stream.compile.toVector.unsafeRunTimed(15.seconds).getOrElse(fail("timed out"))
+  private def runFs2[A](
+    stream: fs2.Stream[IO, A],
+    timeout: FiniteDuration = 15.seconds
+  ): Seq[A] =
+    stream.compile.toVector
+      .unsafeRunTimed(timeout)
+      .getOrElse(fail(s"timed out after $timeout"))
 
   private def nativeOnly[A](stream: fs2.Stream[IO, A]): AsyncStream[A] =
     AsyncStream.fromNative(new Fs2Leaf(stream, IO.asyncForIO, Fs2Runner.none[IO]))
@@ -183,7 +188,9 @@ class Fs2InteropSpec extends AnyWordSpec with Matchers {
       eventually(closes.get() shouldBe 1)
 
       def ones: AsyncStream[Int] = AsyncStream.single(1) ++ ones
-      runFs2(ones.take(100000).toFs2[IO]).size shouldBe 100000
+      // 100,000 pulls, each through the run's ec: 1 s on an idle machine, but the ec is shared
+      // with every suite running next to this one (it timed out at 15 s on a loaded CI runner)
+      runFs2(ones.take(100000).toFs2[IO], 2.minutes).size shouldBe 100000
     }
 
     "read a blocking source through the neutral blocking cursor - without a bridge" in {

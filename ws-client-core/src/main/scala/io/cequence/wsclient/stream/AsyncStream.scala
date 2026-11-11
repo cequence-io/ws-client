@@ -458,13 +458,35 @@ object AsyncStream {
 
   /**
    * The result of one `stateful` step: the next state, the elements to emit, and whether the
-   * stream completes after them.
+   * stream completes after them. Built with `Step(state, emit, stop)`.
    */
-  final case class Step[+S, +B](
-    state: S,
-    emit: immutable.Iterable[B] = Nil,
-    stop: Boolean = false
-  )
+  // a plain class, not a case class: a case class's apply / copy / unapply would be frozen
+  // by binary compatibility, so the type could never grow
+  final class Step[+S, +B] private (
+    val state: S,
+    val emit: immutable.Iterable[B],
+    val stop: Boolean
+  ) {
+
+    override def equals(other: Any): Boolean =
+      other match {
+        case that: Step[_, _] => state == that.state && emit == that.emit && stop == that.stop
+        case _                => false
+      }
+
+    override def hashCode: Int = (state, emit, stop).hashCode
+
+    override def toString: String = s"Step($state, $emit, $stop)"
+  }
+
+  object Step {
+
+    def apply[S, B](
+      state: S,
+      emit: immutable.Iterable[B] = Nil,
+      stop: Boolean = false
+    ): Step[S, B] = new Step(state, emit, stop)
+  }
 
   private object NoMatch
   private val NoMatchFunction: Any => Any = _ => NoMatch

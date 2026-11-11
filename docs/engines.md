@@ -39,12 +39,15 @@ Which one?
 - **ws-client-play-akka / ws-client-play-akka-stream** - Play WS 2.x; named `ws-client-play` /
   `ws-client-play-stream` before 1.0.0 (see
   [Compatibility and upgrading](compatibility.md#artifacts-renamed-in-100)). The `-stream`
-  module adds SSE / JSON response streaming.
+  module adds SSE / JSON response streaming. Play WS per Scala version: 2.2.18 on Scala 2.13
+  (since 1.2.0; it needs Java 11+), 2.1.11 on Scala 2.12 and 2.2.0-M2 on Scala 3 (the last
+  releases for those Scala versions).
 - **ws-client-play-pekko / ws-client-play-pekko-stream** - Play WS 3.x (`org.playframework`);
   the sources are generated from the Akka modules at build time, so both flavors behave alike.
 - **ws-client-jdk** - no Akka / Pekko / Play WS: it needs only `ws-client-core` (play-json,
   Jackson, Typesafe config, scala-logging). Multipart bodies are built in memory.
-  `TransportSettings.httpVersion` selects HTTP/1.1 or HTTP/2.
+  `TransportSettings.httpVersion` pins HTTP/1.1 or HTTP/2; unset (the default) it is
+  `java.net.http`'s own choice - HTTP/2 where the server offers it, else HTTP/1.1.
 - **ws-client-sttp** - over [sttp client4](https://sttp.softwaremill.com), unlocking any sttp
   `Future` backend (OkHttp, Armeria, Pekko-HTTP, ...) through `SttpWSClientEngine(...)`.
 - **ws-client-pekko-http** - a direct pekko-http client, no Play WS / shaded AsyncHttpClient

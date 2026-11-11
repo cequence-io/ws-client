@@ -76,6 +76,8 @@ own dependencies need it - build theirs with Scala 3.3 LTS.
 
 - `ws-client-jdk` - and `ws-client-sttp` on its default backend - run on `java.net.http`, which
   needs JDK 11+.
+- `ws-client-play-akka` / `ws-client-play-akka-stream` on Scala 2.13 need Java 11+ since
+  1.2.0 (Play WS 2.2.18). Their Scala 2.12 and Scala 3 artifacts still run on Java 8.
 - On the Play engines, TLS 1.3 needs JDK 11+ (on Java 8 the Akka flavor negotiates TLS 1.2).
 
 ## Binary compatibility

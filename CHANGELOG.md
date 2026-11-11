@@ -14,7 +14,8 @@ Use one version for all ws-client artifacts on a classpath (see
   engine's `Source`, the `zio-http` engine's `ZStream` (no bridge).
 - Binary-safe `Response.bytes` on every engine, and download helpers on the service bases
   (`execGETBytes`, `execGETStream`, ...).
-- `TransportSettings.httpVersion`: HTTP/1.1 or HTTP/2 on `jdk`.
+- `TransportSettings.httpVersion`: pins HTTP/1.1 or HTTP/2 on `jdk`; unset, the default, it
+  stays `java.net.http`'s own choice as in 1.1.x (HTTP/2 where the server offers it).
 - A neutral `AsyncScheduler` (timers without an actor system), `PollingHelperCore` and
   `ParallelServiceAdapters.parallelTakeFirst` in the Akka-free core.
 - Scala 3 (3.3+) artifacts of the Pekko modules and `pekko-http`.
@@ -36,6 +37,19 @@ Use one version for all ws-client artifacts on a classpath (see
   `CequenceWSException`; message unchanged); a stream's non-2xx failure is logged at DEBUG
   instead of ERROR (it still reaches the caller as `CequenceWSHttpStatusException`).
 
+- **Play WS 2.2.18 on the Akka flavor, Scala 2.13** (`play-akka`, `play-akka-stream`; was
+  2.1.11): the shaded AsyncHttpClient / Netty move from 2.10.5 / 4.1.45 to 2.16.1 / 4.1.138 -
+  the line the Pekko flavor is on - and Akka to 2.6.21. **These two artifacts now need Java
+  11+ on Scala 2.13.** Netty 4.1.138 parses responses more strictly (bare-LF line ends,
+  `Content-Length` together with `Transfer-Encoding`, control characters in headers are
+  rejected). The decompression limit is now AsyncHttpClient's own - same property
+  (`play.shaded.ahc.org.asynchttpclient.maxDecompressedResponseSize`), same default. Scala 2.12
+  stays on Play WS 2.1.11 and Scala 3 on 2.2.0-M2, the last releases for them.
+- **Play WS no longer brings its own play-json:** the Akka-flavor Play modules excluded it under
+  a name that matched nothing; they now exclude `play-json_<scala version>`, so the play-json on
+  the classpath is the one `ws-client-core` declares (2.8.2 on Scala 2.12 / 2.13), unless your
+  build asks for a newer one.
+
 **Fixes**
 
 - A deadlock of `jdk` / `zio-http` streams - a downstream cancel or request racing the next
@@ -48,6 +62,8 @@ Use one version for all ws-client artifacts on a classpath (see
   `unapply`, whose result is now a three-element tuple.
 - Use one version for all ws-client artifacts on a classpath: the interop modules call core
   internals.
+- The Scala 2.13 artifacts are built with Scala 2.13.18 (was 2.13.11) and depend on that
+  scala-library; sbt 1.10+ asks for a `scalaVersion` of at least 2.13.18 then.
 
 ## 1.1.5 (2026-11-05) - security fixes
 
