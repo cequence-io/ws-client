@@ -104,9 +104,7 @@ private[wsclient] object NeutralRunner {
         if (used.compareAndSet(false, true))
           new ReplayCursor(first, cursor)
         else
-          new FailedCursor(
-            new IllegalStateException("A preflighted stream supports a single run only")
-          ),
+          new FailedCursor(NativePreflight.singleRunOnly()),
       "preflight"
     )
   }

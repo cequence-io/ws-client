@@ -5,6 +5,7 @@ import akka.stream.scaladsl.{Flow, JavaFlowSupport, Keep, Sink, Source}
 import akka.stream.{
   ActorAttributes,
   Attributes,
+  Materializer,
   StreamSubscriptionTimeoutTerminationMode,
   SystemMaterializer
 }
@@ -72,12 +73,7 @@ private[wsclient] object SourceCompiler {
           .prefixAndTail(0)
           // no subscription timeout on the input: a pipe may open it only after its first
           // outputs went downstream (a leading concat, e.g. scan, under a slow consumer)
-          .addAttributes(
-            ActorAttributes.streamSubscriptionTimeout(
-              1.hour,
-              StreamSubscriptionTimeoutTerminationMode.noop
-            )
-          )
+          .addAttributes(NoSubscriptionTimeout)
           .flatMapConcat { case (_, tail) =>
             Source.fromMaterializer {
               (
@@ -116,6 +112,50 @@ private[wsclient] object SourceCompiler {
           }
           .mapMaterializedValue(_ => NotUsed)
     }
+
+  /**
+   * `stream` preflighted natively (see `NativePreflight`): compiled whole and run at once on
+   * `materializer`; its first element is held back, the rest stays in the running graph - the
+   * tail of a `prefixAndTail(1)`, which the returned (native, single-run) source continues.
+   * Never throws.
+   */
+  def preflight[A](
+    stream: AsyncStream[A],
+    materializer: () => Materializer
+  ): Future[AsyncStream[A]] =
+    try
+      toSource(stream)
+        // no subscription timeout on the tail: a preflighted stream is run whenever its
+        // caller gets to it (and holds its run until then, like a neutral one)
+        .via(Flow[A].prefixAndTail(1).addAttributes(NoSubscriptionTimeout))
+        .runWith(Sink.head)(materializer())
+        .map { case (first, tail) =>
+          val used = new AtomicBoolean(false)
+          // claimed when a run is materialized (not at its first demand): a run cancelled
+          // before it pulled must still cancel the tail
+          def claim(): Source[A, NotUsed] =
+            if (used.compareAndSet(false, true)) Source(first).concatLazy(tail)
+            else Source.failed[A](NativePreflight.singleRunOnly())
+          val replay =
+            Source
+              .fromMaterializer(
+                (
+                  _,
+                  _
+                ) => claim()
+              )
+              .mapMaterializedValue(_ => NotUsed)
+
+          AsyncStream.fromNative(new SourceLeaf[A](replay, materializer))
+        }(Trampoline)
+    catch { case NonFatal(e) => Future.failed(e) }
+
+  // a substream (a prefixAndTail tail) that may be subscribed late, or never
+  private val NoSubscriptionTimeout: Attributes =
+    ActorAttributes.streamSubscriptionTimeout(
+      1.hour,
+      StreamSubscriptionTimeoutTerminationMode.noop
+    )
 
   // Akka's input buffer (the demand of a publisher bridge) must be a power of two, and Akka
   // preallocates it per materialization: capped at MaxInputBuffer

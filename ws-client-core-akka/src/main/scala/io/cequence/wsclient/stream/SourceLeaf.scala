@@ -3,21 +3,28 @@ package io.cequence.wsclient.stream
 import akka.NotUsed
 import akka.stream.Materializer
 import akka.stream.scaladsl.{JavaFlowSupport, Source}
+import io.cequence.wsclient.stream.impl.NativePreflight
 
 import java.util.concurrent.{Flow => JFlow}
+import scala.concurrent.Future
 
 /**
  * An Akka `Source` kept native inside an [[AsyncStream]] (see `SourceInterop.toAsyncStream`):
  * compiled for Akka (`toSource`) it is `source` itself - no bridge; any other consumer runs it
- * through the fallback publisher, materialized on `fallbackMaterializer` (one bridge).
+ * through the fallback publisher, materialized on `fallbackMaterializer` (one bridge). A
+ * stream over it is preflighted as an Akka graph, on the same materializer.
  */
 private[wsclient] final class SourceLeaf[A] private[wsclient] (
   val source: Source[A, NotUsed],
   fallbackMaterializer: () => Materializer
-) extends NativeStream[A] {
+) extends NativeStream[A]
+    with NativePreflight {
 
   override def openPublisher(): JFlow.Publisher[_ <: A] =
     source.runWith(JavaFlowSupport.Sink.asPublisher[A](fanout = false))(fallbackMaterializer())
+
+  override def preflight[B](stream: AsyncStream[B]): Future[AsyncStream[B]] =
+    SourceCompiler.preflight(stream, fallbackMaterializer)
 
   override def backend: String = SourceLeaf.Backend
 }

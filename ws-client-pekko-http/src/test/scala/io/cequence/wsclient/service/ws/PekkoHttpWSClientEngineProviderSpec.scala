@@ -120,6 +120,25 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
           ) should be > 0
           rawBridges.get shouldBe 0
 
+          // a download: its 404 preflight runs in pekko streams too, so the body stays the
+          // engine's own source - through a materializer of another actor system as well
+          val (download, downloadBridges) = counted {
+            val body = Await
+              .result(AsyncStreamContract.streamedDownload(engine, site, "sse"), 30.seconds)
+              .get
+            body.describe shouldBe "native(pekko) -> mapError"
+            body.toByteStringSource
+          }
+          Await.result(
+            download.runWith(org.apache.pekko.stream.scaladsl.Sink.fold(0)(_ + _.length)),
+            30.seconds
+          ) should be > 0
+          downloadBridges.get shouldBe 0
+          Await.result(
+            AsyncStreamContract.streamedDownload(engine, site, "missing"),
+            30.seconds
+          ) shouldBe None
+
           // consumed outside the backend: the engine's materializer runs it (one bridge)
           val (neutral, neutralBridges) = counted(stream.runToSeq)
           Await.result(neutral, 30.seconds) shouldBe Seq(1, 2)
@@ -146,8 +165,11 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
         WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
       // the engine's streams are native leaves: a neutral consumer bridges once per stream
       try
-        asyncStreamContract(engine) shouldBe AsyncStreamContract.expected
-          .copy(endpointQueryVerbatim = false, neutralBridges = 2)
+        asyncStreamContract(engine) shouldBe AsyncStreamContract.expected.copy(
+          endpointQueryVerbatim = false,
+          neutralBridges = 2,
+          downloadPlan = "native(pekko) -> mapError"
+        )
       finally engine.close()
     }
 

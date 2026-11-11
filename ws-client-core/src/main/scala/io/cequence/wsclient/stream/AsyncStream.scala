@@ -5,6 +5,7 @@ import io.cequence.wsclient.stream.impl._
 import java.util.concurrent.{ConcurrentLinkedQueue, Flow}
 import scala.collection.immutable
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.control.NonFatal
 
 /**
  * A backend-neutral, asynchronous stream of `A`s - the stream type every ws-client engine can
@@ -307,11 +308,22 @@ abstract class AsyncStream[+A] private[wsclient] () {
    * and fails if the run fails before. A second run of the returned stream fails with an
    * `IllegalStateException`. A preflighted stream that is never run holds its connection until
    * the server or an idle timeout closes it - run or cancel it.
+   *
+   * A stream whose source is a native Akka / Pekko or ZIO stream (an engine's stream, a
+   * converted `Source` / `ZStream`) is preflighted by that backend, on the source's own
+   * materializer / runtime, and comes back native: a consumer of the same backend runs it
+   * without a bridge. Any other stream runs on the neutral interpreter, on `ec`.
    */
   def preflight(
     implicit ec: ExecutionContext
   ): Future[AsyncStream[A]] =
-    NeutralRunner.preflight(this)
+    StreamCompiler.leafOf(this) match {
+      case Native(leaf: NativePreflight) =>
+        try leaf.preflight(this)
+        catch { case NonFatal(e) => Future.failed(e) }
+      case _ =>
+        NeutralRunner.preflight(this)
+    }
 
   // ---------------------------------------------------------------------------- running
 

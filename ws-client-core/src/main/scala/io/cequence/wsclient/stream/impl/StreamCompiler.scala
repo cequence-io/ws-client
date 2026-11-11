@@ -130,6 +130,16 @@ private[wsclient] object StreamCompiler {
     (current.asInstanceOf[Leaf[Any]], ops)
   }
 
+  /** The leaf of `s`. */
+  def leafOf(s: AsyncStream[_]): Leaf[Any] = {
+    var current: AsyncStream[Any] = s
+
+    while (current.isInstanceOf[Op[_, _]])
+      current = current.asInstanceOf[Op[Any, Any]].upstream
+
+    current.asInstanceOf[Leaf[Any]]
+  }
+
   /**
    * Compiles `s` with `c`: an iterative walk down the spine to the leaf, then a fold of the
    * operators over the compiled leaf - stack-safe at any depth.

@@ -7,7 +7,7 @@ import io.cequence.wsclient.service.{
   WSClientOutputStreamCore,
   WSClientWithEngineAsyncStreamingBase
 }
-import io.cequence.wsclient.stream.{Bytes, StreamDiagnostics}
+import io.cequence.wsclient.stream.{AsyncStream, Bytes, StreamDiagnostics}
 import play.api.libs.json.{JsValue, Json}
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
@@ -34,6 +34,9 @@ final case class AsyncStreamContract(
   postDownloadBytesIntact: Boolean,
   streamedDownloadIntact: Boolean,
   notFoundDownload: Option[String],
+  // the plan (`describe`) of a streamed download: its 404 preflight replays a neutral stream,
+  // or - on an engine whose streams are native Akka / Pekko / ZIO leaves - stays native
+  downloadPlan: String,
   // the bridges of the neutral runs of the engine's JSON and raw streams
   neutralBridges: Long,
   wireUrlMatchesRequest: Boolean,
@@ -56,6 +59,7 @@ object AsyncStreamContract {
     postDownloadBytesIntact = true,
     streamedDownloadIntact = true,
     notFoundDownload = Some("None"),
+    downloadPlan = "preflight -> mapError",
     neutralBridges = 0,
     wireUrlMatchesRequest = true,
     endpointQueryVerbatim = true,
@@ -103,6 +107,20 @@ object AsyncStreamContract {
     override protected type PT = String
     override protected def ownsEngine: Boolean = false
   }
+
+  /**
+   * A streamed GET download of `endPoint`, as a service on `engine` returns it
+   * (`execGETStream` of `WSClientWithEngineAsyncStreamingBase`): `None` for a 404, else the
+   * body as a single-run stream.
+   */
+  def streamedDownload(
+    engine: WSClientEngine with WSClientOutputStreamCore,
+    site: SiteBinding,
+    endPoint: String
+  )(
+    implicit ec: ExecutionContext
+  ): Future[Option[AsyncStream[Bytes]]] =
+    new ContractService(engine, site).execGETStream(endPoint)
 
   /** Runs the contract on `engine` (which must stream), against an embedded server. */
   def run(engine: WSClientEngine with WSClientOutputStreamCore): AsyncStreamContract = {
@@ -232,10 +250,10 @@ object AsyncStreamContract {
       val download = await(service.execGETBytes("raw"))
       val postDownload =
         await(service.execPOSTBytes("raw", bodyParams = Seq("a" -> Some(Json.toJson(1)))))
+      val downloadStream = await(service.execGETStream("raw"))
+      val downloadPlan = downloadStream.map(_.describe).getOrElse("None")
       val streamedDownload =
-        await(service.execGETStream("raw"))
-          .map(s => await(s.runToBytes()))
-          .map(_.toArray.toSeq)
+        downloadStream.map(s => await(s.runToBytes())).map(_.toArray.toSeq)
       val notFound = await(service.execGETStream("missing")).map(_ => "Some").getOrElse("None")
 
       val neutralBridges = bridges.get + rawBridges.get
@@ -269,6 +287,7 @@ object AsyncStreamContract {
         postDownloadBytesIntact = postDownload == Bytes(AllBytes),
         streamedDownloadIntact = streamedDownload.contains(AllBytes.toSeq),
         notFoundDownload = Some(notFound),
+        downloadPlan = downloadPlan,
         neutralBridges = neutralBridges,
         wireUrlMatchesRequest = wireTarget == target,
         endpointQueryVerbatim = target.startsWith(s"/echo?$EndpointQuery&"),

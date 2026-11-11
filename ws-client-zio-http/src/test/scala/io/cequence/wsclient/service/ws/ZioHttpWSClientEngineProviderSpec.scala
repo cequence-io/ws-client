@@ -170,8 +170,11 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       // - wireUrl reports that rendering. The streams are native ZIO leaves (since 1.2.0): a
       // neutral run bridges each once (a ZIO consumer none - see the native-stream test)
       try
-        asyncStreamContract(engine) shouldBe AsyncStreamContract.expected
-          .copy(endpointQueryVerbatim = false, neutralBridges = 2)
+        asyncStreamContract(engine) shouldBe AsyncStreamContract.expected.copy(
+          endpointQueryVerbatim = false,
+          neutralBridges = 2,
+          downloadPlan = "native(zio) -> mapError"
+        )
       finally engine.close()
     }
 
@@ -739,6 +742,24 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
           requestCount.get() shouldBe 3
           jsonBridges.get shouldBe 0
           rawBridges.get shouldBe 0
+
+          // a download: its 404 preflight runs in ZIO too, so the body stays the engine's own
+          // stream
+          val (download, downloadBridges) = StreamDiagnostics.counted {
+            val stream = Await
+              .result(AsyncStreamContract.streamedDownload(engine, site, "events"), 30.seconds)
+              .get
+            stream.describe shouldBe "native(zio) -> mapError"
+            stream.toZByteStream
+          }
+          requestCount.get() shouldBe 4 // started by the preflight
+          new String(runZio(download).toArray, "UTF-8") shouldBe body
+          requestCount.get() shouldBe 4
+          downloadBridges.get shouldBe 0
+          Await.result(
+            AsyncStreamContract.streamedDownload(engine, site, "missing"),
+            30.seconds
+          ) shouldBe None
         } finally engine.close()
       }
     }

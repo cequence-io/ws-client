@@ -821,6 +821,20 @@ Style" and Odersky's "Lean Scala".
   returns native ZIO leaves (`ZioInterop.byteChunkEngineLeaf` over `ZStream.suspend` - the
   request context and request are evaluated per run; the JSON stream is that leaf +
   `JsonStreamPipes.jsonFrames`, compiled natively): `toZStream` / `toZByteStream` cost 0 bridges,
-  a neutral run 1 per stream. `toZByteStream` peepholes the `Mapped(ZioLeaf, FromChunk)` shape
+  a neutral run 1 per stream. `preflight` (the 404 check of `execStreamDownload`) keeps such
+  a stream native: a native leaf that mixes in the core hook `NativePreflight`
+  (`private[wsclient]`; `SourceLeaf`, `ZioLeaf` - not fs2, which takes the neutral preflight)
+  preflights the WHOLE stream with its backend's compiler, on the leaf's own materializer /
+  runtime (the caller's `ec` is not used), and returns a native single-run leaf - a download's
+  plan is `native(<backend>) -> mapError`, 0 bridges for a native consumer (pinned per engine:
+  the contract's `downloadPlan`, the provider specs). Akka / Pekko: `prefixAndTail(1)` +
+  `Sink.head`; the tail has NO subscription timeout (the caller may hold the stream for any
+  time - with the default 5 s cancel mode the held run would be torn down) and the replay
+  claims its single run in `Source.fromMaterializer` - at materialization, not on first demand
+  (a `lazySource` there would leak the held request when a run is cancelled before it pulls).
+  ZIO: the stream's `toPull` in a `Scope` of its own, closed with the run's exit (or at once
+  when the stream is empty / failed); the future fails with the stream's own exception
+  (`start.either` - no fiber-trace suppressed exception attached). An unrun preflighted stream
+  holds its request open, as on the neutral path. `toZByteStream` peepholes the `Mapped(ZioLeaf, FromChunk)` shape
   back to the chunk stream (as `toByteStringSource` does for Akka). jdk inherits the
   publisher-wrapping defaults of `WSClientOutputStreamCore`

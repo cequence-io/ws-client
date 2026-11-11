@@ -382,6 +382,41 @@ class AsyncStreamOperatorsSpec extends AnyWordSpec with Matchers with StreamTest
       ).failed.get shouldBe theSameInstanceAs(boom)
     }
 
+    "hand a preflight to a native leaf that runs it itself, whole" in {
+      val handed = new java.util.concurrent.atomic.AtomicReference[AsyncStream[_]]()
+      val own = new NativeStream[Int] with impl.NativePreflight {
+        def openPublisher() = AsyncStream(1).toPublisher[Int]
+        def backend = "test"
+        def preflight[A](stream: AsyncStream[A]): Future[AsyncStream[A]] = {
+          handed.set(stream)
+          Future.successful(stream)
+        }
+      }
+      val stream = AsyncStream.fromNative(own).map(_ + 1).mapError { case e => e }
+      await(stream.preflight) should be theSameInstanceAs stream
+      handed.get should be theSameInstanceAs stream
+
+      // a hook that throws: a failed future, never a throw
+      val boom = new RuntimeException("no runtime")
+      val throwing = new NativeStream[Int] with impl.NativePreflight {
+        def openPublisher() = AsyncStream(1).toPublisher[Int]
+        def backend = "test"
+        def preflight[A](stream: AsyncStream[A]): Future[AsyncStream[A]] = throw boom
+      }
+      Try(
+        await(AsyncStream.fromNative(throwing).preflight)
+      ).failed.get should be theSameInstanceAs boom
+
+      // a native leaf without the hook: a run of the neutral interpreter
+      val plain = new NativeStream[Int] {
+        def openPublisher() = AsyncStream(1, 2).toPublisher[Int]
+        def backend = "test"
+      }
+      val preflighted = await(AsyncStream.fromNative(plain).map(_ + 1).preflight)
+      preflighted.describe shouldBe "preflight"
+      run(preflighted) shouldBe Seq(2, 3)
+    }
+
     "convert to a publisher: one independent run per subscription" in {
       val counter = new Counter
       val publisher = AsyncStream.defer {

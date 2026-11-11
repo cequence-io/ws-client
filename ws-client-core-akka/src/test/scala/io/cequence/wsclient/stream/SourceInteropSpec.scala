@@ -393,6 +393,132 @@ class SourceInteropSpec extends AnyWordSpec with Matchers with BeforeAndAfterAll
     }
   }
 
+  "a preflight of a native stream" should {
+
+    // counts the runs of `source`, completes `ended` when a run is cancelled or ends
+    def tracked[A](
+      source: Source[A, NotUsed],
+      runs: AtomicInteger,
+      ended: Promise[Unit] = Promise[Unit]()
+    ): Source[A, NotUsed] =
+      Source.fromMaterializer {
+        (
+          _,
+          _
+        ) =>
+          runs.incrementAndGet()
+          source
+      }.watchTermination() {
+        (
+          _,
+          done
+        ) =>
+          done.onComplete(_ => ended.trySuccess(()))
+          NotUsed
+      }
+
+    "stay native: no bridge at the preflight or at the run, one run, the first element replayed" in {
+      val runs = new AtomicInteger()
+      val stream = tracked(Source(1 to 5), runs).toAsyncStream.map(_ * 2)
+
+      val (preflighted, preflightBridges) = bridges(await(stream.preflight))
+      preflightBridges shouldBe 0
+      runs.get shouldBe 1
+      preflighted.describe shouldBe s"native(${SourceLeaf.Backend})"
+      // its own leaf, as is
+      preflighted.toSource should be theSameInstanceAs preflighted.toSource
+
+      val (result, runBridges) = bridges(runAkka(preflighted.map(_ + 1).toSource))
+      result shouldBe Seq(3, 5, 7, 9, 11)
+      runBridges shouldBe 0
+      runs.get shouldBe 1
+
+      // a single run only: the second one fails, without an element
+      val second = Try(runAkka(preflighted.toSource)).failed.get
+      second shouldBe an[IllegalStateException]
+      second.getMessage shouldBe "A preflighted stream supports a single run only"
+      runs.get shouldBe 1
+    }
+
+    "complete for an empty stream, fail with the failure before a first element, deliver a later one in the run" in {
+      val empty = await(Source.empty[Int].toAsyncStream.preflight)
+      runAkka(empty.toSource) shouldBe Nil
+      Try(runAkka(empty.toSource)).failed.get shouldBe an[IllegalStateException]
+
+      val boom = new RuntimeException("404")
+      Try(
+        await(Source.failed[Int](boom).toAsyncStream.map(identity).preflight)
+      ).failed.get should be theSameInstanceAs boom
+
+      val late = await(
+        Source(1 to 3).map(i => if (i == 3) throw boom else i).toAsyncStream.preflight
+      )
+      val seen = new ConcurrentLinkedQueue[Int]()
+      Try(
+        await(late.toSource.runWith(Sink.foreach[Int](i => seen.add(i))))
+      ).failed.get should be theSameInstanceAs boom
+      seen.asScala.toSeq shouldBe Seq(1, 2)
+    }
+
+    "run on the neutral interpreter through the fallback (one bridge)" in {
+      val runs = new AtomicInteger()
+      val preflighted = await(tracked(Source(1 to 3), runs).toAsyncStream.preflight)
+      val (result, count) = bridges(await(preflighted.map(_ * 10).runToSeq))
+      result shouldBe Seq(10, 20, 30)
+      count shouldBe 1
+      runs.get shouldBe 1
+      Try(await(preflighted.runToSeq)).failed.get shouldBe an[IllegalStateException]
+    }
+
+    "hold its run beyond the subscription timeout until it is run" in {
+      val backend = SourceLeaf.Backend
+      val shortTimeouts = ActorSystem(
+        "preflight-timeout-spec",
+        com.typesafe.config.ConfigFactory
+          .parseString(
+            s"$backend.stream.materializer.subscription-timeout { mode = cancel, timeout = 100ms }"
+          )
+          .withFallback(com.typesafe.config.ConfigFactory.load())
+      )
+      try {
+        val shortMaterializer = Materializer(shortTimeouts)
+        val preflighted =
+          await(Source(1 to 100).toAsyncStream(shortMaterializer).preflight)
+        Thread.sleep(
+          400
+        ) // well beyond the 100 ms after which a waiting substream is cancelled
+        await(preflighted.toSource.runWith(Sink.seq)(shortMaterializer)) shouldBe (1 to 100)
+      } finally Await.result(shortTimeouts.terminate(), 30.seconds)
+    }
+
+    "cancel the held run with the run of the preflighted stream - stopped early, or before its first demand" in {
+      def held(ended: Promise[Unit]): AsyncStream[Int] =
+        await(
+          tracked(
+            Source(1 to 3) ++ Source.maybe[Int],
+            new AtomicInteger(),
+            ended
+          ).toAsyncStream.preflight
+        )
+
+      val stopped = Promise[Unit]()
+      runAkka(held(stopped).take(2).toSource) shouldBe Seq(1, 2)
+      Await.result(stopped.future, 3.seconds) shouldBe (())
+
+      val unpulled = Promise[Unit]()
+      val preflighted = held(unpulled)
+      unpulled.isCompleted shouldBe false // held until it is run
+      preflighted.toSource.runWith(Sink.cancelled)
+      Await.result(unpulled.future, 3.seconds) shouldBe (())
+    }
+
+    "fail the future, never throw, when the leaf has no materializer" in {
+      val unrunnable =
+        AsyncStream.fromNative(new SourceLeaf(Source(1 to 3), SourceLeaf.NoFallback))
+      Try(await(unrunnable.preflight)).failed.get shouldBe an[IllegalStateException]
+    }
+  }
+
   "the opt-in conversions" should {
 
     "let 1.x Source code compile against an AsyncStream" in {

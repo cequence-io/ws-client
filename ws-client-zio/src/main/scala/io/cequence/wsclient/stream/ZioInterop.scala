@@ -13,14 +13,19 @@ import scala.util.{Failure, Success, Try}
 
 /**
  * A ZIO stream kept native inside an [[AsyncStream]]: compiled for ZIO it is `stream` itself -
- * no bridge; any other consumer runs it on `runtime` (one bridge).
+ * no bridge; any other consumer runs it on `runtime` (one bridge). A stream over it is
+ * preflighted as a ZIO stream, on the same runtime.
  */
 private[wsclient] final class ZioLeaf[A] private[wsclient] (
   val stream: ZStream[Any, Throwable, A],
   runtime: Runtime[Any]
-) extends NativeStream[A] {
+) extends NativeStream[A]
+    with NativePreflight {
   override def openPublisher(): JFlow.Publisher[_ <: A] = ZioBridges.publisher(stream, runtime)
   override def backend: String = "zio"
+
+  override def preflight[B](whole: AsyncStream[B]): Future[AsyncStream[B]] =
+    ZioBridges.preflight(ZioCompiler.toZStream(whole), runtime)
 }
 
 /** A ZIO pipeline kept native inside an [[AsyncPipe]]. */
@@ -188,6 +193,76 @@ private[wsclient] object ZioBridges {
         }
       )
     }
+
+  /**
+   * `stream` preflighted natively (see `NativePreflight`): pulled at once on `runtime`, in its
+   * own scope, up to its first non-empty chunk; the returned (native, single-run) stream
+   * replays that chunk and continues the same pull, and closes the scope - the stream's
+   * finalizers - when its run ends, however it ends. A stream that ended or failed before a
+   * first element has its scope closed here.
+   */
+  def preflight[A](
+    stream: ZStream[Any, Throwable, A],
+    runtime: Runtime[Any]
+  ): Future[AsyncStream[A]] = {
+    val start: ZIO[Any, Throwable, ZStream[Any, Throwable, A]] =
+      ZIO.uninterruptibleMask { restore =>
+        for {
+          scope <- Scope.make
+          started <- restore(
+            scope
+              .extend[Any](stream.toPull)
+              .flatMap(pull => pull.repeatUntil(_.nonEmpty).unsome.map(first => (first, pull)))
+          ).exit
+          rest <- started match {
+            case Exit.Success((Some(first), pull)) =>
+              ZIO.succeed(singleRun(first, pull, scope.close(_)))
+            case Exit.Success((None, _)) =>
+              scope
+                .close(Exit.unit)
+                .as(singleRun[A](Chunk.empty, ZIO.fail(None), _ => ZIO.unit))
+            case Exit.Failure(cause) =>
+              scope.close(started) *> ZIO.failCause(cause)
+          }
+        } yield rest
+      }
+
+    // through `either`: a failure reaches the future as the stream's own exception (a failed
+    // effect run to a future gets its trace attached as a suppressed exception)
+    Unsafe
+      .unsafe(implicit unsafe => runtime.unsafe.runToFuture(start.either))
+      .flatMap {
+        case Right(rest) =>
+          Future.successful(AsyncStream.fromNative(new ZioLeaf(rest, runtime)))
+        case Left(error) =>
+          Future.failed(error)
+      }(Trampoline)
+  }
+
+  // the rest of a preflighted run: one run only; `release` runs when that run ends
+  private def singleRun[A](
+    first: Chunk[A],
+    pull: ZIO[Any, Option[Throwable], Chunk[A]],
+    release: Exit[Any, Any] => UIO[Any]
+  ): ZStream[Any, Throwable, A] = {
+    val used = new AtomicBoolean(false)
+
+    ZStream.unwrapScoped[Any](
+      ZIO
+        .acquireReleaseExit(ZIO.succeed(used.compareAndSet(false, true)))(
+          (
+            claimed,
+            exit
+          ) => release(exit).when(claimed)
+        )
+        .map { claimed =>
+          if (claimed)
+            ZStream.fromChunk(first) ++ ZStream.repeatZIOChunkOption(pull)
+          else
+            ZStream.fail(NativePreflight.singleRunOnly())
+        }
+    )
+  }
 
   /** A ZIO stream as a cold publisher: one run (on `runtime`) per subscription. */
   def publisher[A](

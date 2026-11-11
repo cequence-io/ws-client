@@ -303,6 +303,107 @@ class ZioInteropSpec extends AnyWordSpec with Matchers {
       done.isCancelled shouldBe false
     }
 
+    "preflight a native stream natively: no bridge, one run, the first element replayed" in {
+      val runs = new AtomicInteger()
+      val released = new AtomicInteger()
+      val source = ZStream
+        .acquireReleaseWith(ZIO.succeed(runs.incrementAndGet()))(_ =>
+          ZIO.succeed(released.incrementAndGet())
+        )
+        .flatMap(_ => ZStream.fromChunks(zio.Chunk.empty, zio.Chunk(1, 2), zio.Chunk(3, 4, 5)))
+      val stream = source.toAsyncStream.map(_ * 2)
+
+      val (preflighted, preflightBridges) =
+        StreamDiagnostics.counted(Await.result(stream.preflight, 10.seconds))
+      preflightBridges.get shouldBe 0
+      runs.get shouldBe 1
+      released.get shouldBe 0 // held until it is run
+      preflighted.describe shouldBe "native(zio)"
+      preflighted.toZStream should be theSameInstanceAs preflighted.toZStream
+
+      val (compiled, runBridges) = StreamDiagnostics.counted(preflighted.map(_ + 1).toZStream)
+      runZio(compiled) shouldBe Seq(3, 5, 7, 9, 11)
+      runBridges.get shouldBe 0
+      runs.get shouldBe 1
+      released.get shouldBe 1 // the finalizers ran before the run completed
+
+      // a single run only: the second one fails, without an element
+      val second = Try(runZio(preflighted.toZStream)).failed.get
+      second shouldBe an[IllegalStateException]
+      second.getMessage shouldBe "A preflighted stream supports a single run only"
+      runs.get shouldBe 1
+      released.get shouldBe 1
+    }
+
+    "preflight an empty and a failing native stream, releasing each at once; deliver a later failure in the run" in {
+      def releasing(
+        released: AtomicInteger,
+        stream: ZStream[Any, Throwable, Int]
+      ): ZStream[Any, Throwable, Int] =
+        ZStream
+          .acquireReleaseWith(ZIO.unit)(_ => ZIO.succeed(released.incrementAndGet()))
+          .flatMap(_ => stream)
+
+      val emptyReleased = new AtomicInteger()
+      val empty = Await.result(
+        releasing(emptyReleased, ZStream.fromChunk(zio.Chunk.empty)).toAsyncStream.preflight,
+        10.seconds
+      )
+      emptyReleased.get shouldBe 1 // nothing left to hold
+      runZio(empty.toZStream) shouldBe Nil
+      Try(runZio(empty.toZStream)).failed.get shouldBe an[IllegalStateException]
+      emptyReleased.get shouldBe 1
+
+      val boom = new RuntimeException("404")
+      val failedReleased = new AtomicInteger()
+      val failure = Try(
+        Await.result(
+          releasing(failedReleased, ZStream.fail(boom)).toAsyncStream.map(identity).preflight,
+          10.seconds
+        )
+      ).failed.get
+      failure should be theSameInstanceAs boom
+      failure.getSuppressed.length shouldBe 0 // the stream's own exception, nothing attached
+      failedReleased.get shouldBe 1
+
+      val lateReleased = new AtomicInteger()
+      val late = Await.result(
+        releasing(lateReleased, ZStream(1, 2) ++ ZStream.fail(boom)).toAsyncStream.preflight,
+        10.seconds
+      )
+      val seen = new ConcurrentLinkedQueue[Int]()
+      Try(
+        unsafeRun(late.toZStream.runForeach(i => ZIO.succeed(seen.add(i))))
+      ).failed.get.getMessage shouldBe "404"
+      seen.asScala.toSeq shouldBe Seq(1, 2)
+      lateReleased.get shouldBe 1
+    }
+
+    "release a preflighted run that is stopped early, and run it neutrally through one bridge" in {
+      val released = new AtomicInteger()
+      def held: AsyncStream[Int] = Await.result(
+        ZStream
+          .acquireReleaseWith(ZIO.unit)(_ => ZIO.succeed(released.incrementAndGet()))
+          .flatMap(_ => ZStream(1, 2, 3) ++ ZStream.never)
+          .toAsyncStream
+          .preflight,
+        10.seconds
+      )
+
+      runZio(held.take(2).toZStream) shouldBe Seq(1, 2)
+      released.get shouldBe 1
+
+      // an interrupted run (the stream never ends)
+      unsafeRun(held.toZStream.runDrain.timeout(zio.Duration.fromMillis(200))) shouldBe None
+      released.get shouldBe 2
+
+      val (result, bridges) =
+        StreamDiagnostics.counted(Await.result(held.take(3).runToSeq, 10.seconds))
+      result shouldBe Seq(1, 2, 3)
+      bridges.get shouldBe 1
+      eventually(released.get shouldBe 3)
+    }
+
     "agree with the neutral interpreter on random operator chains (200 seeds)" in {
       (1 to 200).foreach { seed =>
         def chain(): AsyncStream[Int] = {
