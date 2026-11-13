@@ -32,7 +32,7 @@ object ReleaseChecks extends AutoPlugin {
   override def requires = MimaPlugin
   override def trigger = allRequirements
 
-  val previousVersion = "1.2.0"
+  val previousVersion = "1.2.1"
 
   /** The Scala binary versions each module was published for in [[previousVersion]]. */
   val publishedInPrevious: Map[String, Set[String]] = Map(
