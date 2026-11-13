@@ -4,7 +4,50 @@ Release notes of ws-client, newest first. **Behavior change** marks what existin
 Use one version for all ws-client artifacts on a classpath (see
 [Compatibility and upgrading](docs/compatibility.md)).
 
-## 1.2.0 (2026-11-11) - backend-neutral streaming
+## 1.2.1 (unreleased) - Java 11 again, repeated headers
+
+**Fixes**
+
+- **Java 11:** `ws-client-core` 1.2.0 shipped one class compiled for Java 17
+  (`StackWalkerUtil`, used by the `log` service adapter): on Java 11 it failed with
+  `UnsupportedClassVersionError`. Java sources now target Java 11 whatever JDK builds the
+  release, and a release check fails on any published class for a newer Java.
+- **Repeated header names** keep every value on `zio-http` and `sttp` (only the last one was
+  sent): Anthropic's one `anthropic-beta` header per beta flag lost all flags but one there.
+  `zio-http` sends the values joined into one header (`, `; `; ` for `Cookie`) - its client
+  keeps one header per name. `Content-Type` stays single on every engine: its last value wins,
+  so a per-call value overrides the site's (**behavior change** on the Play engines, where the
+  site's - the first - won up to 1.2.0). A caller's header still replaces a default the HTTP
+  library sets itself (sttp's `Accept-Encoding: gzip, deflate`).
+- **Failure messages no longer read "null":** `java.net.http` throws without messages (a
+  refused connection, a DNS failure), and so do some Netty exceptions. Every engine now
+  describes such a failure from its cause chain. On `jdk` a refused connection is still a
+  `java.net.ConnectException` - now with a message ("cannot connect") and the original as its
+  cause - and in a stream a `CequenceWSException` ("Cannot connect") with that cause; every
+  mapped `jdk` stream failure now carries the original exception as its cause.
+- **ZIO: a preflighted stream is released when its run is cancelled at once.** A preflighted
+  ZIO stream (the `zio-http` engine's streams and downloads after their status check) claimed
+  its single run only when the run's fiber first evaluated it: a run outside ZIO (the neutral
+  runner, Akka, fs2) cancelled before that never released it - the HTTP response stayed open.
+  The run is now claimed when such a consumer opens it, and released however it ends.
+- **`jdk`: a URL without a valid host** (e.g. a host name with `_`) or without an `http` /
+  `https` scheme fails with "Invalid request URL" without quoting it - `java.net.http`'s own
+  error quoted the whole URL, query parameters (API keys) included.
+
+**Docs**
+
+- A refused connection is not a `CequenceWSException` on every engine (Play, `pekko-http`,
+  `zio-http`, `jdk`: a `ConnectException` or a wrapper of it; `sttp`: a `CequenceWSException`) -
+  the architecture and sites pages said failures were typed the same on every engine.
+- `zio-http` re-encodes the sub-delimiters `! $ & ' ( ) + , ; =` inside a path segment and a
+  `%20` in an endpoint's query as `+` (`wireUrl` reports what is sent) - zio-http's client has
+  no way to send a path as given.
+- `jdk`: a burst of many first calls to an HTTP/2 host can hit the connect timeout - until its
+  first connection is up, `java.net.http` opens one per request.
+- `SttpWSClientEngine` closes the sttp backend it is given (the engines-page said no explicit
+  factory's engine touches its environment on `close()`).
+
+## 1.2.0 (2026-11-12) - backend-neutral streaming
 
 **New**
 

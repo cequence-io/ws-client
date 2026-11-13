@@ -363,9 +363,20 @@ final class SttpWSClientEngine private[ws] (
     val allHeaders = requestContext.authHeaders ++ extraHeaders
     val headers =
       if (filterRestrictedHeaders) JdkRestrictedHeaders.filter(allHeaders) else allHeaders
-    val withHeaders = headers.foldLeft(basicRequest) { case (request, (key, value)) =>
-      request.header(key, value)
-    }
+    // a name the caller repeats (e.g. Anthropic's one `anthropic-beta` line per flag) keeps
+    // every value - up to 1.2.0 (sttp's default Replace) only the last one went out. A name's
+    // FIRST caller value still replaces what basicRequest pre-sets (Accept-Encoding), and
+    // Content-Type, a single-valued field, keeps last-wins as on jdk / pekko-http (sttp's JDK
+    // backend would send only the first): a per-call value overrides the site's
+    val (withHeaders, _) =
+      headers.foldLeft((basicRequest, Set.empty[String])) {
+        case ((request, seen), (key, value)) =>
+          val name = key.toLowerCase(java.util.Locale.ROOT)
+          val onDuplicate =
+            if (seen(name) && name != "content-type") DuplicateHeaderBehavior.Add
+            else DuplicateHeaderBehavior.Replace
+          (request.header(key, value, onDuplicate), seen + name)
+      }
 
     withHeaders
       .readTimeout(requestTimeoutMs.millis)
@@ -582,10 +593,11 @@ object SttpWSClientEngine {
       .flatMap(name => scala.util.Try(java.nio.charset.Charset.forName(name)).toOption)
       .getOrElse(java.nio.charset.StandardCharsets.UTF_8)
 
+  // the transport cause as every engine describes a failure (ThrowableUtil.describe: its first
+  // message down the chain, else the chain's class names) - never `e` itself, whose sttp
+  // wrapper message carries the URI
   private def describe(e: Throwable): String =
-    transportCause(e)
-      .map(cause => Option(cause.getMessage).getOrElse(cause.getClass.getName))
-      .getOrElse(e.getClass.getName)
+    transportCause(e).map(ThrowableUtil.describe).getOrElse(e.getClass.getName)
 
   private[ws] def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
     (serviceEndPointName: String) =>

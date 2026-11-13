@@ -19,10 +19,24 @@ import scala.util.{Failure, Success, Try}
  */
 private[wsclient] final class ZioLeaf[A] private[wsclient] (
   val stream: ZStream[Any, Throwable, A],
-  runtime: Runtime[Any]
+  runtime: Runtime[Any],
+  preflighted: Option[ZioBridges.PreflightedRun[A]]
 ) extends NativeStream[A]
     with NativePreflight {
-  override def openPublisher(): JFlow.Publisher[_ <: A] = ZioBridges.publisher(stream, runtime)
+
+  private[wsclient] def this(
+    stream: ZStream[Any, Throwable, A],
+    runtime: Runtime[Any]
+  ) =
+    this(stream, runtime, None)
+
+  // a preflighted stream claims its single run HERE - when a consumer outside ZIO starts the
+  // run (the neutral runner, Akka, fs2 call it as the run opens) - not when the run's fiber
+  // first evaluates `stream`: a run cancelled before that would hold the response forever
+  override def openPublisher(): JFlow.Publisher[_ <: A] =
+    preflighted.fold[JFlow.Publisher[_ <: A]](ZioBridges.publisher(stream, runtime))(
+      _.publisher(runtime)
+    )
   override def backend: String = "zio"
 
   override def preflight[B](whole: AsyncStream[B]): Future[AsyncStream[B]] =
@@ -211,9 +225,9 @@ private[wsclient] object ZioBridges {
   ): Future[AsyncStream[A]] = {
     val result = scala.concurrent.Promise[AsyncStream[A]]()
 
-    def hand(rest: ZStream[Any, Throwable, A]): UIO[Unit] =
+    def hand(run: PreflightedRun[A]): UIO[Unit] =
       ZIO.succeed {
-        result.trySuccess(AsyncStream.fromNative(new ZioLeaf(rest, runtime)))
+        result.trySuccess(AsyncStream.fromNative(new ZioLeaf(run.native, runtime, Some(run))))
         ()
       }
 
@@ -229,15 +243,14 @@ private[wsclient] object ZioBridges {
           ).exit
           _ <- started match {
             case Exit.Success((Some(first), pull)) =>
-              val rest = singleRun(
-                first,
-                pull,
+              val run = new PreflightedRun[A](
+                ZStream.fromChunk(first) ++ ZStream.repeatZIOChunkOption(pull),
                 exit => scope.close(exit).ensuring(runEnded.succeed(()))
               )
-              hand(rest) *> restore(runEnded.await)
+              hand(run) *> restore(runEnded.await)
             case Exit.Success((None, _)) =>
               scope.close(Exit.unit) *>
-                hand(singleRun[A](Chunk.empty, ZIO.fail(None), _ => ZIO.unit))
+                hand(new PreflightedRun[A](ZStream.empty, _ => ZIO.unit))
             case Exit.Failure(cause) =>
               // the stream's own exception, as it is (nothing attached)
               scope.close(started) *> ZIO.succeed(result.tryFailure(cause.squash))
@@ -253,46 +266,80 @@ private[wsclient] object ZioBridges {
     result.future
   }
 
-  // the rest of a preflighted run: one run only; `release` runs when that run ends
-  private def singleRun[A](
-    first: Chunk[A],
-    pull: ZIO[Any, Option[Throwable], Chunk[A]],
+  /**
+   * The rest of a preflighted stream (`body`: the replayed first chunk, then the same pull)
+   * and how to release what the preflight holds (`release`: closes its scope). ONE run only,
+   * claimed by whichever starts first: a native ZIO consumer when its run evaluates `native`,
+   * any other consumer when its run opens the leaf's publisher (`publisher`) - and released
+   * when that run ends, however it ends: also when it is cancelled before its fiber started
+   * (the claim is then made already) or before the publisher opened it (`Opener.unopened`).
+   */
+  private[wsclient] final class PreflightedRun[A](
+    body: ZStream[Any, Throwable, A],
     release: Exit[Any, Any] => UIO[Any]
-  ): ZStream[Any, Throwable, A] = {
-    val used = new AtomicBoolean(false)
+  ) {
+    private val claimed = new AtomicBoolean(false)
 
-    ZStream.unwrapScoped[Any](
-      ZIO
-        .acquireReleaseExit(ZIO.succeed(used.compareAndSet(false, true)))(
-          (
-            claimed,
-            exit
-          ) => release(exit).when(claimed)
-        )
-        .map { claimed =>
-          if (claimed)
-            ZStream.fromChunk(first) ++ ZStream.repeatZIOChunkOption(pull)
-          else
-            ZStream.fail(NativePreflight.singleRunOnly())
-        }
-    )
+    private def claim(): Boolean = claimed.compareAndSet(false, true)
+
+    val native: ZStream[Any, Throwable, A] =
+      ZStream.unwrapScoped[Any](
+        ZIO
+          .acquireReleaseExit(ZIO.succeed(claim()))(
+            (
+              won,
+              exit
+            ) => release(exit).when(won)
+          )
+          .map(won => if (won) body else ZStream.fail(NativePreflight.singleRunOnly()))
+      )
+
+    def publisher(runtime: Runtime[Any]): JFlow.Publisher[A] =
+      if (claim()) ZioBridges.publisher(body, runtime, release)
+      else ZioBridges.publisher(ZStream.fail(NativePreflight.singleRunOnly()), runtime)
   }
 
   /** A ZIO stream as a cold publisher: one run (on `runtime`) per subscription. */
   def publisher[A](
     stream: ZStream[Any, Throwable, A],
     runtime: Runtime[Any]
-  ): JFlow.Publisher[A] = {
-    val ec = Unsafe.unsafe { implicit unsafe =>
-      runtime.unsafe.run(ZIO.executor.map(_.asExecutionContext)).getOrThrowFiberFailure()
-    }
+  ): JFlow.Publisher[A] =
     new CursorPublisher[A](
       new Opener[A] {
         def open(ctx: RunContext): Cursor[A] = new ZioCursor(stream, runtime, ctx)
       },
-      StreamRuntime.context(ec, BridgeCounter.Global)
+      StreamRuntime.context(executionContext(runtime), BridgeCounter.Global)
+    )
+
+  /**
+   * A ZIO stream that holds a resource for its ONE run (a preflighted stream) as a publisher:
+   * `release` runs once, when the run's fiber ended - or at once when the subscription ended
+   * before the run was opened. A second subscription fails (a single run only).
+   */
+  def publisher[A](
+    stream: ZStream[Any, Throwable, A],
+    runtime: Runtime[Any],
+    release: Exit[Any, Any] => UIO[Any]
+  ): JFlow.Publisher[A] = {
+    val opened = new AtomicBoolean(false)
+    new CursorPublisher[A](
+      new Opener[A] {
+        def open(ctx: RunContext): Cursor[A] =
+          if (opened.compareAndSet(false, true)) new ZioCursor(stream, runtime, ctx, release)
+          else new ZioCursor(ZStream.fail(NativePreflight.singleRunOnly()), runtime, ctx)
+
+        override def unopened(): Unit =
+          if (opened.compareAndSet(false, true))
+            Unsafe.unsafe(implicit unsafe => runtime.unsafe.fork(release(Exit.unit)))
+      },
+      StreamRuntime.context(executionContext(runtime), BridgeCounter.Global)
     )
   }
+
+  private def executionContext(runtime: Runtime[Any]): scala.concurrent.ExecutionContext =
+    Unsafe.unsafe { implicit unsafe =>
+      runtime.unsafe.run(ZIO.executor.map(_.asExecutionContext)).getOrThrowFiberFailure()
+    }
 }
 
 /**
@@ -311,10 +358,18 @@ private[wsclient] object ZioBridges {
 private[wsclient] final class ZioCursor[A](
   stream: ZStream[Any, Throwable, A],
   runtime: Runtime[Any],
-  ctx: RunContext
+  ctx: RunContext,
+  release: Exit[Any, Any] => UIO[Any]
 ) extends Cursor[A] {
 
   import ZioCursor._
+
+  def this(
+    stream: ZStream[Any, Throwable, A],
+    runtime: Runtime[Any],
+    ctx: RunContext
+  ) =
+    this(stream, runtime, ctx, ZioCursor.NoRelease)
 
   private type Pull = ZIO[Any, Option[Throwable], Chunk[A]]
   private type Asked = scala.concurrent.Promise[Option[Chunk[A]]]
@@ -372,8 +427,19 @@ private[wsclient] final class ZioCursor[A](
       )
     }
 
-  // a fiber that ended without a result was interrupted before it started
-  fiber.onComplete(result => finish(result.flatten))(ctx.ec)
+  // a fiber that ended without a result was interrupted before it started. A resource held
+  // for the run (`release`) is released after the fiber ended - so never under a pull in
+  // flight, and also when the fiber never started - and before the run's end is signalled
+  fiber.onComplete { result =>
+    val outcome = result.flatten
+    if (release eq NoRelease) finish(outcome)
+    else {
+      val exit = outcome.fold(e => Exit.fail(e), _ => Exit.unit)
+      Unsafe
+        .unsafe(implicit unsafe => runtime.unsafe.runToFuture(release(exit)))
+        .onComplete(_ => finish(outcome))(ctx.ec)
+    }
+  }(ctx.ec)
 
   // a failing finalizer fails a completed stream and is attached as suppressed to a failure
   private def ended(
@@ -450,6 +516,9 @@ private[wsclient] final class ZioCursor[A](
 }
 
 private[wsclient] object ZioCursor {
+  // no resource held for the run (every stream but a preflighted one)
+  private val NoRelease: Exit[Any, Any] => UIO[Any] = _ => ZIO.unit
+
   private val Idle = new AnyRef
   private val Demand = new AnyRef
   private val Closed = new AnyRef

@@ -9,7 +9,7 @@ import io.cequence.wsclient.domain.{
   CequenceWSTimeoutException,
   CequenceWSUnknownHostException
 }
-import io.cequence.wsclient.service.ws.ThrowableUtil.hasCause
+import io.cequence.wsclient.service.ws.ThrowableUtil.{describe, hasCause}
 import org.slf4j.Logger
 
 import java.net.UnknownHostException
@@ -74,17 +74,17 @@ private[wsclient] object StreamFailures {
     // UnknownHostException), so classify on the whole cause chain - as the engines' unary
     // defaultRecoverErrors do
     case e if hasCause(e, classOf[TimeoutException]) =>
-      val message = s"$label: Time out. ${e.getMessage}."
+      val message = s"$label: Time out. ${describe(e)}."
       logger.error(message)
       throw new CequenceWSTimeoutException(message, e)
     case e
         if hasCause(e, classOf[UnknownHostException]) ||
           hasCause(e, classOf[UnresolvedAddressException]) =>
-      val message = s"$label: Host name cannot be resolved. ${e.getMessage}."
+      val message = s"$label: Host name cannot be resolved. ${describe(e)}."
       logger.error(message)
       throw new CequenceWSUnknownHostException(message, e)
     case e: Throwable =>
-      val message = s"$label: Fatal problem! ${e.getMessage}."
+      val message = s"$label: Fatal problem! ${describe(e)}."
       logger.error(message)
       throw new CequenceWSException(message, e)
   }

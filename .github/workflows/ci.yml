@@ -28,9 +28,10 @@ jobs:
       # binary compatibility against the previous release (project/ReleaseChecks.scala)
       - name: Binary compatibility
         run: sbt +mimaReportBinaryIssues
-      # the published Scala 3 jars of the 3.2-line modules must stay TASTy 28.2
-      - name: TASTy versions
-        run: sbt +tastyCheck
+      # the published Scala 3 jars of the 3.2-line modules must stay TASTy 28.2, and no
+      # published class may target a Java newer than 11
+      - name: TASTy and class file versions
+        run: sbt +tastyCheck +classVersionCheck
 
   # beyond the tests: the concurrent stream classes under a model checker
   verification:

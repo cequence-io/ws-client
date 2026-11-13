@@ -1128,6 +1128,121 @@ object TestServers {
     }
   }
 
+  /**
+   * Sends one header name three times - twice from the site's request context, once as an
+   * extra header spelled in another case - and returns the values the server received for it,
+   * in order (since 1.2.1). Every field line is split at commas: by RFC 9110, `a, b` on one
+   * line is the same as two lines, so an engine may send either. Anthropic sends each beta
+   * flag as its own `anthropic-beta` line; up to 1.2.0 zio-http and sttp kept only the last
+   * one.
+   */
+  def repeatedHeaders(engine: WSClientEngine): Seq[String] =
+    withServer("/" -> { (exchange: HttpExchange) =>
+      val lines = Option(exchange.getRequestHeaders.get("anthropic-beta"))
+      val values = lines.toSeq
+        .flatMap(list => (0 until list.size).map(list.get))
+        .flatMap(_.split(','))
+        .map(_.trim)
+      respond(exchange, 200, Json.toJson(values).toString)
+    }) { port =>
+      val site = SiteBinding(
+        s"http://localhost:$port",
+        WsRequestContext(authHeaders =
+          Seq("anthropic-beta" -> "first-2025-01-01", "anthropic-beta" -> "second")
+        )
+      )
+      val rich = Await.result(
+        engine.execGETRich(site, "resource", extraHeaders = Seq("Anthropic-Beta" -> "third")),
+        30.seconds
+      )
+      engine.getResponseOrError(rich).json.as[Seq[String]]
+    }
+
+  /**
+   * The `Content-Type` and `Accept-Encoding` lines the server received for a url-encoded POST
+   * whose site sets `Content-Type: text/plain` and whose call sets `Content-Type:
+   * application/x-www-form-urlencoded` and `Accept-Encoding: identity` (since 1.2.1).
+   * Expected: exactly the per-call values - Content-Type is single-valued, so the last one
+   * wins (joined it is malformed), and a caller's header replaces a default the HTTP library
+   * sets itself (sttp pre-sets `Accept-Encoding: gzip, deflate`). Every line is split at
+   * commas.
+   */
+  def headerOverrides(engine: WSClientEngine): (Seq[String], Seq[String]) =
+    withServer("/" -> { (exchange: HttpExchange) =>
+      def values(name: String) =
+        Option(exchange.getRequestHeaders.get(name)).toSeq
+          .flatMap(list => (0 until list.size).map(list.get))
+          .flatMap(_.split(','))
+          .map(_.trim)
+      exchange.getRequestBody.readAllBytes()
+      respond(
+        exchange,
+        200,
+        Json
+          .obj(
+            "contentTypes" -> values("Content-Type"),
+            "acceptEncodings" -> values("Accept-Encoding")
+          )
+          .toString
+      )
+    }) { port =>
+      val site = SiteBinding(
+        s"http://localhost:$port",
+        WsRequestContext(authHeaders = Seq("Content-Type" -> "text/plain"))
+      )
+      val rich = Await.result(
+        engine.execPOSTURLEncodedRich(
+          site,
+          "form",
+          bodyParams = Seq("a" -> Some("1")),
+          extraHeaders = Seq(
+            "Content-Type" -> "application/x-www-form-urlencoded",
+            "Accept-Encoding" -> "identity"
+          )
+        ),
+        30.seconds
+      )
+      val json = engine.getResponseOrError(rich).json
+      ((json \ "contentTypes").as[Seq[String]], (json \ "acceptEncodings").as[Seq[String]])
+    }
+
+  /**
+   * What is wrong with the failures of a request to a port nothing listens on and of one to an
+   * unresolvable host (since 1.2.1) - empty when both messages say what happened and the
+   * second is a `CequenceWSUnknownHostException`. java.net.http throws both without a message,
+   * which up to 1.2.0 the jdk engine rendered as "null". The refused connection's TYPE is not
+   * uniform: the Play, pekko-http and zio-http engines fail with their client's own exception
+   * (a `ConnectException` or a wrapper of it), jdk and sttp with a `CequenceWSException`.
+   */
+  def connectionFailures(engine: WSClientEngine): Seq[String] = {
+    val closedPort = {
+      val socket = new ServerSocket(0)
+      try socket.getLocalPort
+      finally socket.close()
+    }
+
+    def problem(
+      url: String,
+      expected: Class[_ <: Throwable]
+    ): Option[String] =
+      Try(Await.result(engine.execGETRich(SiteBinding(url), "resource"), 30.seconds)) match {
+        case Failure(e)
+            if expected
+              .isInstance(e) && e.getMessage != null && !e.getMessage.contains("null") =>
+          None
+        case Failure(e)    => Some(s"$url: ${e.getClass.getName}: ${e.getMessage}")
+        case Success(rich) => Some(s"$url: HTTP ${rich.status.code}")
+      }
+
+    Seq(
+      problem(s"http://localhost:$closedPort", classOf[Exception]),
+      problem(
+        "http://unresolvable.invalid",
+        classOf[io.cequence.wsclient.domain.CequenceWSUnknownHostException]
+      )
+    ).flatten
+  }
+
   // `form-data; key=token; key="quoted \" string"` -> the (key, value) pairs
   private def dispositionParams(value: String): Seq[(String, String)] = {
     val params = Seq.newBuilder[(String, String)]

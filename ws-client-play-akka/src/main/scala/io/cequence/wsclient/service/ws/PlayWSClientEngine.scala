@@ -610,9 +610,14 @@ class PlayWSClientEngine(
       request.withProxyServer(DefaultWSProxyServer(host, port))
     }.getOrElse(request)
 
-    requestWithProxy.addHttpHeaders(
-      (requestContext.authHeaders ++ extraHeaders): _*
-    )
+    // Content-Type is single-valued and Play WS uses the FIRST one it holds: keep only the last
+    // (since 1.2.1), so a per-call value overrides the site's - as on every other engine. Any
+    // other repeated name keeps every value
+    val headers = requestContext.authHeaders ++ extraHeaders
+    val (contentTypes, others) =
+      headers.partition { case (name, _) => name.equalsIgnoreCase("Content-Type") }
+
+    requestWithProxy.addHttpHeaders(others ++ contentTypes.lastOption: _*)
   }
 
   private def execRequestAux(
@@ -971,11 +976,11 @@ object PlayWSClientEngine {
       {
         case e: TimeoutException =>
           throw new CequenceWSTimeoutException(
-            s"${serviceEndPointName} timed out: ${e.getMessage}."
+            s"${serviceEndPointName} timed out: ${ThrowableUtil.describe(e)}."
           )
         case e: UnknownHostException =>
           throw new CequenceWSUnknownHostException(
-            s"${serviceEndPointName} cannot resolve a host name: ${e.getMessage}."
+            s"${serviceEndPointName} cannot resolve a host name: ${ThrowableUtil.describe(e)}."
           )
       }
   }

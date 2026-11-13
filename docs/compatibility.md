@@ -79,6 +79,8 @@ own dependencies need it - build theirs with Scala 3.3 LTS.
 - `ws-client-play-akka` / `ws-client-play-akka-stream` on Scala 2.13 need Java 11+ since
   1.2.0 (Play WS 2.2.18). Their Scala 2.12 and Scala 3 artifacts still run on Java 8.
 - On the Play engines, TLS 1.3 needs JDK 11+ (on Java 8 the Akka flavor negotiates TLS 1.2).
+- The `log` service adapter (`LogServiceAdapter`) needs Java 11+. 1.2.0 needed Java 17 for it
+  by mistake (`UnsupportedClassVersionError` on Java 11) - use 1.2.1.
 
 ## Binary compatibility
 
