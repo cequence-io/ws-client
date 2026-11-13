@@ -368,7 +368,7 @@ on any published class whose class file targets a Java newer than 11 (major > 55
 built on JDK 17 and shipped core's one Java class (`StackWalkerUtil`, Java 9+ API, used by
 `LogServiceAdapter`) for Java 17 - `javacOptions ++= Seq("--release", "11")` (build.sbt,
 `inThisBuild`) pins it; Scala classes target Java 8. Run both staged checks before
-`sonatypeBundleRelease`. MiMa's previous artifacts are the exact 1.2.0 module x Scala matrix
+`sonatypeBundleRelease`. MiMa's previous artifacts are the exact 1.2.1 module x Scala matrix
 (`publishedInPrevious`); the 3.2 line (`scala32Line`) is a fixed set.
 
 ## Testing
@@ -383,7 +383,7 @@ built on JDK 17 and shipped core's one Java class (`StackWalkerUtil`, Java 9+ AP
 - Test logging: logback is a `% Test` dependency of every module with tests (`testLoggingSettings`
   in build.sbt), configured by the shared `test-resources/logback-test.xml`
 - CI: `.github/workflows/ci.yml` runs `sbt scalafmtCheckAll scalafmtSbtCheck`, `sbt +test`,
-  `sbt +mimaReportBinaryIssues` (against 1.2.0, see `project/ReleaseChecks.scala`) and
+  `sbt +mimaReportBinaryIssues` (against 1.2.1, see `project/ReleaseChecks.scala`) and
   `sbt +tastyCheck +classVersionCheck`. CI runs on Java 17 only: nothing but
   `classVersionCheck` catches a class Java 11 cannot load
 - The forked test JVMs of core, core-akka and core-pekko run in `target/`: TestNG (the Reactive
