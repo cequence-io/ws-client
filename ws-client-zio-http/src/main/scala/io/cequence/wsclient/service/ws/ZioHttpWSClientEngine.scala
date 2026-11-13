@@ -595,13 +595,14 @@ final class ZioHttpWSClientEngine private[ws] (
       // publisher) are caller errors, not transport failures - pass them through unmapped
       case ise: IllegalStateException => ise
       case e if isTimeout(e) =>
-        new CequenceWSTimeoutException(s"$label: Time out. ${e.getMessage}.", e)
+        new CequenceWSTimeoutException(s"$label: Time out. ${ThrowableUtil.describe(e)}.", e)
       case e if isUnknownHost(e) =>
         new CequenceWSUnknownHostException(
-          s"$label: Host name cannot be resolved. ${e.getMessage}.",
+          s"$label: Host name cannot be resolved. ${ThrowableUtil.describe(e)}.",
           e
         )
-      case e => new CequenceWSException(s"$label: Fatal problem! ${e.getMessage}.", e)
+      case e =>
+        new CequenceWSException(s"$label: Fatal problem! ${ThrowableUtil.describe(e)}.", e)
     }
   }
 
@@ -662,10 +663,33 @@ final class ZioHttpWSClientEngine private[ws] (
     } yield Request(
       method = method,
       url = url,
-      headers = Headers(headers.map { case (name, value) => Header.Custom(name, value) }),
+      headers = Headers(joinRepeated(headers).map { case (name, value) =>
+        Header.Custom(name, value)
+      }),
       body = requestBody
     )
   }
+
+  // zio-http's Netty conversion keeps ONE value per header name (`set`; only a few response
+  // headers are added): a name the caller repeats - Anthropic sends one `anthropic-beta` line
+  // per flag - goes out as one line with its values joined, which RFC 9110 defines as the same
+  // field (`; ` for Cookie, RFC 6265). Content-Type is single-valued - joined it would be
+  // malformed - so its LAST value wins, as on jdk / pekko-http and as here up to 1.2.0: a
+  // per-call value overrides the site's. Names compare case-insensitively; the first spelling
+  // and the order of first appearance are kept. Up to 1.2.0 only the last value went out
+  private[ws] def joinRepeated(headers: Seq[(String, String)]): Seq[(String, String)] =
+    headers.foldLeft(Vector.empty[(String, String)]) { case (joined, (name, value)) =>
+      joined.indexWhere { case (seen, _) => seen.equalsIgnoreCase(name) } match {
+        case -1 => joined :+ (name -> value)
+        case i =>
+          val (seen, values) = joined(i)
+          val combined =
+            if (isContentType(seen)) value
+            else if (seen.equalsIgnoreCase("cookie")) values + "; " + value
+            else values + ", " + value
+          joined.updated(i, seen -> combined)
+      }
+    }
 
   private def toRichResponse(
     site: SiteBinding,
@@ -1113,12 +1137,12 @@ object ZioHttpWSClientEngine {
       {
         case e: Exception if isTimeout(e) =>
           throw new CequenceWSTimeoutException(
-            s"${serviceEndPointName} timed out: ${e.getMessage}.",
+            s"${serviceEndPointName} timed out: ${ThrowableUtil.describe(e)}.",
             e
           )
         case e: Exception if isUnknownHost(e) =>
           throw new CequenceWSUnknownHostException(
-            s"${serviceEndPointName} cannot resolve a host name: ${e.getMessage}.",
+            s"${serviceEndPointName} cannot resolve a host name: ${ThrowableUtil.describe(e)}.",
             e
           )
       }

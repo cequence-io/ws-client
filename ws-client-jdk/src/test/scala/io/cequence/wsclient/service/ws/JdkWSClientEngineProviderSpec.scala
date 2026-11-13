@@ -135,6 +135,28 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       finally engine.close()
     }
 
+    "send every value of a repeated header name" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        io.cequence.wsclient.testkit.TestServers.repeatedHeaders(engine) shouldBe
+          Seq("first-2025-01-01", "second", "third")
+      finally engine.close()
+    }
+
+    "let a per-call Content-Type and Accept-Encoding override, not join" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        io.cequence.wsclient.testkit.TestServers.headerOverrides(engine) shouldBe
+          (Seq("application/x-www-form-urlencoded") -> Seq("identity"))
+      finally engine.close()
+    }
+
+    "describe a refused connection and an unresolvable host" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try io.cequence.wsclient.testkit.TestServers.connectionFailures(engine) shouldBe empty
+      finally engine.close()
+    }
+
     "honor the AsyncStream contract (cold, framing, cancel, downloads, wire format)" in {
       val engine =
         WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
@@ -349,6 +371,71 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       subscriber.error.get shouldBe a[CequenceWSException]
       subscriber.error.get.getMessage should include("Invalid request URL")
       subscriber.error.get.getMessage should not include "s3cr3t-key"
+
+      engine.close()
+    }
+
+    "fail a URL without a valid host without quoting it (java.net.http's check quotes it whole)" in {
+      val engine =
+        WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+      // '_' is not a host-name character: URI parses the authority as registry-based, no host
+      val site = SiteBinding(
+        "http://my_service.internal/api",
+        WsRequestContext(extraParams = Seq("api_key" -> "s3cr3t-key"))
+      )
+
+      val failure = intercept[CequenceWSException](
+        Await.result(engine.execGETRich(site, "items"), 30.seconds)
+      )
+      failure.getMessage should include("No valid host name")
+      failure.getMessage should not include "s3cr3t-key"
+      failure.getMessage should not include "my_service"
+
+      val subscriber = new LatchedSubscriber[JsValue]
+      engine.execJsonStreamPublisher(site, "items", "POST").subscribe(subscriber)
+      subscriber.awaitDone(30) shouldBe true
+      subscriber.error.get shouldBe a[CequenceWSException]
+      subscriber.error.get.getMessage should include("No valid host name")
+      subscriber.error.get.getMessage should not include "s3cr3t-key"
+
+      engine.close()
+    }
+
+    "fail a refused connection with a described ConnectException - a site's recoverErrors on it still applies" in {
+      val engine =
+        WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
+      val closedPort = {
+        val socket = new java.net.ServerSocket(0)
+        try socket.getLocalPort
+        finally socket.close()
+      }
+      val site = SiteBinding(s"http://localhost:$closedPort")
+
+      // buffered: still a ConnectException (as up to 1.2.0 and on the Play / pekko-http /
+      // zio-http engines), now with a message, the original as its cause
+      val refused = intercept[java.net.ConnectException](
+        Await.result(engine.execGETRich(site, "ping"), 30.seconds)
+      )
+      refused.getMessage should include("cannot connect")
+      refused.getMessage should not include "null"
+      refused.getCause shouldBe a[java.net.ConnectException]
+
+      val recovering = site.copy(recoverErrors = Some((_: String) => {
+        case _: java.net.ConnectException =>
+          SimpleRichResponse(None, StatusData(599, "connect-fallback"), Map.empty)
+      }))
+      Await.result(engine.execGETRich(recovering, "ping"), 30.seconds).status.message shouldBe
+        "connect-fallback"
+
+      // streamed: a CequenceWSException, the ConnectException as its cause
+      val subscriber = new LatchedSubscriber[JsValue]
+      engine.execJsonStreamPublisher(site, "events", "GET").subscribe(subscriber)
+      subscriber.awaitDone(30) shouldBe true
+      val streamFailure = subscriber.error.get
+      streamFailure shouldBe a[CequenceWSException]
+      streamFailure.getMessage should include("Cannot connect")
+      streamFailure.getMessage should not include "null"
+      streamFailure.getCause shouldBe a[java.net.ConnectException]
 
       engine.close()
     }

@@ -16,7 +16,7 @@ ThisBuild / description := "Generic WebServices client library for Scala with pl
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala213
-ThisBuild / version := "1.2.0"
+ThisBuild / version := "1.2.1"
 ThisBuild / isSnapshot := version.value.endsWith("-SNAPSHOT")
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 
@@ -62,7 +62,11 @@ inThisBuild(
     semanticdbEnabled := true,
     // not scalafixSemanticdb.revision (4.9.3 with sbt-scalafix 0.12.1): semanticdb-scalac is
     // published per Scala patch version, and Scala 2.13.18 starts at 4.13.9
-    semanticdbVersion := "4.13.9"
+    semanticdbVersion := "4.13.9",
+    // the Java sources (core's StackWalkerUtil, Java 9+ API) target Java 11 whatever JDK runs
+    // the build: 1.2.0 was built on JDK 17 without this and shipped a class Java 11 cannot load
+    // (`classVersionCheck` guards it). Scala classes target Java 8 (scalac's default)
+    javacOptions ++= Seq("--release", "11")
   )
 )
 

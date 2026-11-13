@@ -59,6 +59,14 @@ private[wsclient] trait Opener[+A] {
 
   /** Starts a run. Never throws: a failure to start is a cursor whose first `next()` fails. */
   def open(ctx: RunContext): Cursor[A]
+
+  /**
+   * Called (once) instead of `open` by a [[CursorPublisher]] subscription that ends before its
+   * run was opened - a cancel or an invalid request from inside `onSubscribe`, a throwing
+   * `onSubscribe`, an `ec` that rejected the start (since 1.2.1). For an opener that holds a
+   * resource for its run (a preflighted stream's response): release it here. Never throws.
+   */
+  def unopened(): Unit = ()
 }
 
 /**

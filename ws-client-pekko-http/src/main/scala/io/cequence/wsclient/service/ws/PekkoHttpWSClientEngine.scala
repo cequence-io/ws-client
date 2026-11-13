@@ -951,13 +951,13 @@ object PekkoHttpWSClientEngine {
       {
         case e: TimeoutException =>
           throw new CequenceWSTimeoutException(
-            s"${serviceEndPointName} timed out: ${e.getMessage}."
+            s"${serviceEndPointName} timed out: ${ThrowableUtil.describe(e)}."
           )
         case e: Exception
             if ThrowableUtil.hasCause(e, classOf[UnknownHostException]) ||
               ThrowableUtil.hasCause(e, classOf[UnresolvedAddressException]) =>
           throw new CequenceWSUnknownHostException(
-            s"${serviceEndPointName} cannot resolve a host name: ${e.getMessage}."
+            s"${serviceEndPointName} cannot resolve a host name: ${ThrowableUtil.describe(e)}."
           )
       }
   }

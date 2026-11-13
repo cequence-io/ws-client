@@ -95,6 +95,15 @@ refuses (JDK 11 before 11.0.14 also refuses e.g. `Referer` and `Origin`) still f
 request. The other engines hand the header to their HTTP library, which may still set its own
 value (e.g. `Host` from the URL).
 
+**Repeated header names**: a header name given more than once - in `WsRequestContext.authHeaders`,
+`extraHeaders` or both - keeps every value, in order. Most engines send one header line per value;
+`zio-http`, whose client keeps one line per name, sends one line with the values joined by `, `
+(`; ` for `Cookie`), which HTTP defines as the same field. Up to 1.2.0 `zio-http` and `sttp` sent
+only the last value - Anthropic's one `anthropic-beta` line per beta flag lost all flags but one.
+`Content-Type` is the exception: it is single-valued, so its last value wins on every engine - a
+per-call `Content-Type` overrides the site's. A header the HTTP library sets by default (sttp's
+`Accept-Encoding: gzip, deflate`) is replaced by the caller's.
+
 **Proxy support**: `TransportSettings.proxyURL` (accepted forms: `host:port` or
 `scheme://host:port`; only the host and port are used - the proxy is always a plain HTTP proxy,
 even with an `https://` scheme (`https` targets are still tunnelled through it), and
@@ -105,8 +114,11 @@ ignores it (pekko-http only supports CONNECT-tunneling proxies).
 
 **Custom error recovery** (`SiteBinding.recoverErrors`) composes with the engine's built-in
 transport-failure normalization: your partial function sees the Cequence exception taxonomy
-(`CequenceWSTimeoutException`, `CequenceWSUnknownHostException`, ...) for failures the backend
-recognizes, so the same recovery logic is portable across engines.
+(`CequenceWSTimeoutException`, `CequenceWSUnknownHostException`, ...) for timeouts and
+unresolvable hosts on every engine, so recovery written for those is portable. Other failures
+reach it as the engine reports them - a refused connection is a `java.net.ConnectException` (or
+a wrapper of it) on the Play, `pekko-http`, `zio-http` and `jdk` engines and a
+`CequenceWSException` on `sttp`, so match on the cause chain there.
 
 **Dynamic request context** (`SiteBinding.requestContextFun`): when set, the request context is
 re-evaluated on every request - e.g. to refresh an expiring auth token - on all engines.
@@ -136,7 +148,9 @@ For signers such as AWS SigV4: `engine.renderJsonBody(json)` is the exact JSON t
 sends - every engine renders bodies the same way, as Play WS does (`WireFormat.jsonBody`) - and
 `engine.wireUrl(site, endPoint, endPointParam, params)` the exact URL, query parameters
 included. The Play and `jdk` engines send a query written into the endpoint string byte for
-byte; `sttp`, `pekko-http` and `zio-http` re-render URLs, which `wireUrl` reflects. With a
+byte; `sttp`, `pekko-http` and `zio-http` re-render URLs, which `wireUrl` reflects (`zio-http`
+also percent-encodes the sub-delimiters `! $ & ' ( ) + , ; =` inside a path segment - its client
+has no way to send a path as given - and a `%20` in the endpoint's query as `+`). With a
 `requestContextFun`, `wireUrl` and the request each evaluate it - sign and send with one fixed
 binding: `site.copy(requestContext = site.requestContextFn(), requestContextFun = None)`.
 `TransportSettings.httpVersion` selects HTTP/1.1 or HTTP/2 on the `jdk` engine.

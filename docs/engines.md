@@ -47,7 +47,11 @@ Which one?
 - **ws-client-jdk** - no Akka / Pekko / Play WS: it needs only `ws-client-core` (play-json,
   Jackson, Typesafe config, scala-logging). Multipart bodies are built in memory.
   `TransportSettings.httpVersion` pins HTTP/1.1 or HTTP/2; unset (the default) it is
-  `java.net.http`'s own choice - HTTP/2 where the server offers it, else HTTP/1.1.
+  `java.net.http`'s own choice - HTTP/2 where the server offers it, else HTTP/1.1. A burst of
+  concurrent calls to a slow-to-handshake host can hit the connect timeout (5 s by default):
+  over HTTP/1.1 every concurrent call opens its own connection, and over HTTP/2 so does every
+  call made before the first connection to that host is up. Raise `Timeouts.connectTimeout`;
+  for an HTTP/2 host, sending one call first also helps - later calls share its connection.
 - **ws-client-sttp** - over [sttp client4](https://sttp.softwaremill.com), unlocking any sttp
   `Future` backend (OkHttp, Armeria, Pekko-HTTP, ...) through `SttpWSClientEngine(...)`.
 - **ws-client-pekko-http** - a direct pekko-http client, no Play WS / shaded AsyncHttpClient
@@ -155,7 +159,8 @@ Engines created through discovery own their execution environment (actor system 
   `PlayWSStreamClientEngine(...)`, `JdkWSClientEngine(...)`, `SttpWSClientEngine(...)`,
   `PekkoHttpWSClientEngine(...)`, `ZioHttpWSClientEngine(client)` /
   `ZioHttpWSClientEngine.layer()`. They take only client-level `TransportSettings`; the site is
-  per call. Engines built that way never touch your environment on `close()`.
+  per call. Engines built that way never touch your environment on `close()` - except
+  `SttpWSClientEngine`, which owns the sttp backend it is given and closes it.
 
 One engine serves any number of sites, and a copy of an engine gets its own client-level
 settings - see [Sites and requests](sites-and-requests.md).

@@ -19,4 +19,17 @@ private[wsclient] object ThrowableUtil {
     clazz: Class[_ <: Throwable]
   ): Boolean =
     causeChain(e).exists(clazz.isInstance)
+
+  /**
+   * A description of `e` for a failure message: the first non-blank message in its cause
+   * chain, else the class names of the chain. java.net.http throws without messages - a
+   * refused connection is a `ConnectException` caused by a `ClosedChannelException`, a DNS
+   * failure one caused by an `UnresolvedAddressException`, none of them with a message - so a
+   * bare `getMessage` reads "null" there.
+   */
+  def describe(e: Throwable): String =
+    causeChain(e)
+      .map(_.getMessage)
+      .find(message => message != null && message.trim.nonEmpty)
+      .getOrElse(causeChain(e).map(_.getClass.getSimpleName).mkString(" caused by "))
 }

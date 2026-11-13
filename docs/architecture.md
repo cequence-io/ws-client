@@ -197,11 +197,14 @@ flowchart TD
   redirects (never followed), cookies (never stored), timeouts covering the response body, the
   status check before a streamed body, SSE frame parsing - each is one shared implementation or
   one shared test scenario that every engine passes.
-- **Failures are typed.** Transport and HTTP failures arrive as a failed `Future` with a
-  `CequenceWSException` subclass (`CequenceWSTimeoutException`,
-  `CequenceWSUnknownHostException`, `CequenceWSHttpStatusException`,
-  `CequenceWSFrameTooLongException`), the same on every engine; messages never carry the request
-  URL (query parameters may hold API keys).
+- **Failures are typed.** Timeouts, unresolvable hosts, HTTP status failures and oversized
+  frames arrive as a failed `Future` with a `CequenceWSException` subclass
+  (`CequenceWSTimeoutException`, `CequenceWSUnknownHostException`,
+  `CequenceWSHttpStatusException`, `CequenceWSFrameTooLongException`), the same on every
+  engine. Other transport failures are not uniform yet: a refused connection is a
+  `java.net.ConnectException` (or a wrapper of it) on the Play, `pekko-http`, `zio-http` and
+  `jdk` engines and a `CequenceWSException` on `sttp`. Messages never carry the request URL
+  (query parameters may hold API keys).
 - **Discovery over wiring.** Backends register through `java.util.ServiceLoader`; code that
   asks the registry for an engine does not name a backend class.
 - **Streams are plans.** An `AsyncStream` is an immutable description; whoever consumes it

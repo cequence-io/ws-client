@@ -163,6 +163,28 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       finally engine.close()
     }
 
+    "send every value of a repeated header name" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        io.cequence.wsclient.testkit.TestServers.repeatedHeaders(engine) shouldBe
+          Seq("first-2025-01-01", "second", "third")
+      finally engine.close()
+    }
+
+    "let a per-call Content-Type and Accept-Encoding override, not join" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try
+        io.cequence.wsclient.testkit.TestServers.headerOverrides(engine) shouldBe
+          (Seq("application/x-www-form-urlencoded") -> Seq("identity"))
+      finally engine.close()
+    }
+
+    "describe a refused connection and an unresolvable host" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try io.cequence.wsclient.testkit.TestServers.connectionFailures(engine) shouldBe empty
+      finally engine.close()
+    }
+
     "honor the AsyncStream contract (cold, framing, cancel, downloads, wire format)" in {
       val engine =
         WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))

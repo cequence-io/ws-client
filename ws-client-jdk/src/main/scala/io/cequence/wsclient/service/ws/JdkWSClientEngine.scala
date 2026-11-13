@@ -512,21 +512,27 @@ final class JdkWSClientEngine private[ws] (
       // Reactive Streams contract violations (e.g. a second subscription to a one-shot
       // publisher) are caller errors, not transport failures - pass them through unmapped
       case ise: IllegalStateException => ise
+      // java.net.http's exceptions often carry no message: describe them from the cause chain;
+      // the original is the cause of every mapped failure
       case e: HttpTimeoutException =>
-        new CequenceWSTimeoutException(s"$label: Time out. ${e.getMessage}.")
+        new CequenceWSTimeoutException(s"$label: Time out. ${ThrowableUtil.describe(e)}.", e)
       case e: java.util.concurrent.TimeoutException =>
-        new CequenceWSTimeoutException(s"$label: Time out. ${e.getMessage}.")
+        new CequenceWSTimeoutException(s"$label: Time out. ${ThrowableUtil.describe(e)}.", e)
       case e: UnknownHostException =>
         new CequenceWSUnknownHostException(
-          s"$label: Host name cannot be resolved. ${e.getMessage}."
+          s"$label: Host name cannot be resolved. ${ThrowableUtil.describe(e)}.",
+          e
         )
       case e: ConnectException
           if ThrowableUtil.hasCause(e, classOf[UnresolvedAddressException]) =>
         new CequenceWSUnknownHostException(
-          s"$label: Host name cannot be resolved. ${e.getMessage}."
+          s"$label: Host name cannot be resolved. ${ThrowableUtil.describe(e)}.",
+          e
         )
+      case e: ConnectException =>
+        new CequenceWSException(s"$label: Cannot connect. ${ThrowableUtil.describe(e)}.", e)
       case e: Throwable =>
-        new CequenceWSException(s"$label: Fatal problem! ${e.getMessage}.")
+        new CequenceWSException(s"$label: Fatal problem! ${ThrowableUtil.describe(e)}.", e)
     }
   }
 
@@ -660,19 +666,33 @@ final class JdkWSClientEngine private[ws] (
 
   // URI.create's message quotes the whole URL - whose query may hold an API key: only the
   // reason and the position are reported
+  // the URL never enters a message (query params may hold API keys): java.net.http's own checks
+  // quote it whole - URI's syntax error, and HttpRequest.newBuilder's "unsupported URI <url>"
+  // for a URI without a host (e.g. a host name with '_', which URI parses as a registry-based
+  // authority) or without an http / https scheme - so both are checked here first
   private def requestUri(
     url: String,
     site: SiteBinding,
     endPoint: String
-  ): URI =
-    try new URI(url)
-    catch {
-      case e: URISyntaxException =>
-        throw new CequenceWSException(
-          s"${serviceAndEndpoint(site, Some(endPoint))}: Invalid request URL. " +
-            s"${e.getReason} at index ${e.getIndex}."
-        )
-    }
+  ): URI = {
+    def invalid(reason: String) =
+      new CequenceWSException(
+        s"${serviceAndEndpoint(site, Some(endPoint))}: Invalid request URL. $reason."
+      )
+
+    val uri =
+      try new URI(url)
+      catch {
+        case e: URISyntaxException => throw invalid(s"${e.getReason} at index ${e.getIndex}")
+      }
+    val scheme = Option(uri.getScheme).map(_.toLowerCase(java.util.Locale.ROOT))
+
+    if (!scheme.exists(s => s == "http" || s == "https"))
+      throw invalid("The scheme must be http or https")
+    if (uri.getHost == null)
+      throw invalid("No valid host name (letters, digits, '-' and '.' only)")
+    uri
+  }
 
   private def isContentType(headerName: String) = headerName.equalsIgnoreCase("Content-Type")
 
@@ -765,25 +785,37 @@ object JdkWSClientEngine {
   private[ws] def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
     (serviceEndPointName: String) =>
       {
+        // java.net.http's exceptions often carry no message: describe them from the cause chain
         case e: HttpTimeoutException =>
           throw new CequenceWSTimeoutException(
-            s"${serviceEndPointName} timed out: ${e.getMessage}."
+            s"${serviceEndPointName} timed out: ${ThrowableUtil.describe(e)}."
           )
         case e: java.util.concurrent.TimeoutException =>
           throw new CequenceWSTimeoutException(
-            s"${serviceEndPointName} timed out: ${e.getMessage}."
+            s"${serviceEndPointName} timed out: ${ThrowableUtil.describe(e)}."
           )
         case e: UnknownHostException =>
           throw new CequenceWSUnknownHostException(
-            s"${serviceEndPointName} cannot resolve a host name: ${e.getMessage}."
+            s"${serviceEndPointName} cannot resolve a host name: ${ThrowableUtil.describe(e)}."
           )
         // java.net.http reports a DNS failure as ConnectException caused by
         // UnresolvedAddressException, never as UnknownHostException
         case e: ConnectException
             if ThrowableUtil.hasCause(e, classOf[UnresolvedAddressException]) =>
           throw new CequenceWSUnknownHostException(
-            s"${serviceEndPointName} cannot resolve a host name: ${e.getMessage}."
+            s"${serviceEndPointName} cannot resolve a host name: ${ThrowableUtil.describe(e)}."
           )
+        // any other connect failure (a refused connection): java.net.http's ConnectException
+        // has no message ("null" up to 1.2.0). It stays a ConnectException - as on the Play,
+        // pekko-http and zio-http engines, and so a site's recoverErrors matching it still
+        // does - with a message and the original as its cause
+        case e: ConnectException =>
+          val described =
+            new ConnectException(
+              s"${serviceEndPointName} cannot connect: ${ThrowableUtil.describe(e)}."
+            )
+          described.initCause(e)
+          throw described
       }
   }
 }

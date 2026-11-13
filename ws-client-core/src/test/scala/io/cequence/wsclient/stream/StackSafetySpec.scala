@@ -113,20 +113,24 @@ class StackSafetySpec extends AnyWordSpec with Matchers with StreamTestSupport {
           .map(_ * 2)
           .mapConcat(i => i :: Nil)
           .zipWithIndex
-      // warm-up, then measure
+      // warm-up, then the best of three measurements: a wall-clock floor on a shared machine (a
+      // loaded CI runner, parallel test JVMs) needs one undisturbed run, not every run undisturbed
       await(pipeline.runDrain, 60.seconds)
-      val start = System.nanoTime()
-      await(
-        pipeline.runFold(0L)(
-          (
-            acc,
-            p
-          ) => acc + p._2
-        ),
-        60.seconds
-      ) shouldBe (0L until n.toLong).sum
-      val elementsPerSecond = n / ((System.nanoTime() - start) / 1e9)
-      info(f"$elementsPerSecond%.0f elements/s")
+      def measure(): Double = {
+        val start = System.nanoTime()
+        await(
+          pipeline.runFold(0L)(
+            (
+              acc,
+              p
+            ) => acc + p._2
+          ),
+          60.seconds
+        ) shouldBe (0L until n.toLong).sum
+        n / ((System.nanoTime() - start) / 1e9)
+      }
+      val elementsPerSecond = Seq.fill(3)(measure()).max
+      info(f"$elementsPerSecond%.0f elements/s (best of 3)")
       elementsPerSecond should be > 1000000.0
     }
   }

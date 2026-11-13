@@ -16,7 +16,7 @@ The project includes:
 - A backend-neutral stream type (`AsyncStream`, since 1.2.0) with native Akka / Pekko / fs2 / ZIO interop
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 1.2.0
+Current version: 1.2.1
 
 ## Build Commands
 
@@ -363,7 +363,13 @@ on both sides, so core and the testkit ALSO build with 3.3.8 - in-build only
 A plain `+publishSigned` does the right thing. Guards (`project/ReleaseChecks.scala`):
 `tastyCheck` fails a publishable Scala 3 jar of the wrong line; `tastyCheckStaged [dir]` checks
 every `_3` jar of a staged release (default `target/sonatype-staging/<version>`) - run it before
-`sonatypeBundleRelease`. MiMa's previous artifacts are the exact 1.1.5 module x Scala matrix.
+`sonatypeBundleRelease`. `classVersionCheck` / `classVersionCheckStaged [dir]` (since 1.2.1) fail
+on any published class whose class file targets a Java newer than 11 (major > 55): 1.2.0 was
+built on JDK 17 and shipped core's one Java class (`StackWalkerUtil`, Java 9+ API, used by
+`LogServiceAdapter`) for Java 17 - `javacOptions ++= Seq("--release", "11")` (build.sbt,
+`inThisBuild`) pins it; Scala classes target Java 8. Run both staged checks before
+`sonatypeBundleRelease`. MiMa's previous artifacts are the exact 1.2.0 module x Scala matrix
+(`publishedInPrevious`); the 3.2 line (`scala32Line`) is a fixed set.
 
 ## Testing
 
@@ -377,8 +383,9 @@ every `_3` jar of a staged release (default `target/sonatype-staging/<version>`)
 - Test logging: logback is a `% Test` dependency of every module with tests (`testLoggingSettings`
   in build.sbt), configured by the shared `test-resources/logback-test.xml`
 - CI: `.github/workflows/ci.yml` runs `sbt scalafmtCheckAll scalafmtSbtCheck`, `sbt +test`,
-  `sbt +mimaReportBinaryIssues` (against 1.1.5, see `project/ReleaseChecks.scala`) and
-  `sbt +tastyCheck`
+  `sbt +mimaReportBinaryIssues` (against 1.2.0, see `project/ReleaseChecks.scala`) and
+  `sbt +tastyCheck +classVersionCheck`. CI runs on Java 17 only: nothing but
+  `classVersionCheck` catches a class Java 11 cannot load
 - The forked test JVMs of core, core-akka and core-pekko run in `target/`: TestNG (the Reactive
   Streams TCK suites) writes report files into the working directory
 
@@ -667,7 +674,11 @@ Style" and Odersky's "Lean Scala".
   value. A query written into the endpoint string is not a parameter - the caller encodes it.
   The Play engines send it byte for byte (openai-scala's SigV4-signed Bedrock GETs build their
   query there: the sent query must match the signed one); sttp / pekko-http / zio-http
-  re-encode it (`a%2Fb%20c` goes out as `a/b+c`, zio-http `a%2Fb+c` - pre-existing). Covered
+  re-encode it (`a%2Fb%20c` goes out as `a/b+c`, zio-http `a%2Fb+c` - pre-existing). zio-http
+  also re-encodes the PATH: `URL.decode` stores decoded segments and zio-http's Netty encoder
+  (`URL.encodeHttpPath`) re-encodes each one, keeping only unreserved, `*`, `:`, `@` - every
+  sub-delim (`!$&'()+,;=`) goes out %-encoded; zio-http 3.11.6 has no public way to send a raw
+  path (documented, `wireUrl` reports it). Covered
   on every engine by the shared testkit scenario `TestServers.queryEncoding`; the Play specs
   pin the endpoint query's bytes
 - `TransportSettings.proxyURL` ("host:port" or "scheme://host:port", port required; only
@@ -708,6 +719,33 @@ Style" and Odersky's "Lean Scala".
   frame-level, not a full SSE parser: multi-line `data:` events are not joined, field lines after
   the data line are not dropped, and the frame delimiter stays `\n\n` by default (servers that
   terminate events with `\r\n\r\n` need `framingDelimiter = "\r\n\r\n"`)
+- Repeated header NAMES keep every value on every engine (since 1.2.1; covered by
+  `TestServers.repeatedHeaders`): sttp adds each repeat with `DuplicateHeaderBehavior.Add` (its
+  default `header(k, v)` REPLACES), zio-http joins them into one field (`joinRepeated`: `, `,
+  `; ` for Cookie - its Netty conversion `set`s every name but a few response headers). Up to
+  1.2.0 both sent only the last value (Anthropic's per-flag `anthropic-beta` lines). EXCEPT
+  Content-Type, single-valued: last value wins on every engine (jdk `setHeader`, pekko-http
+  `.lastOption`, sttp Replace - its JDK backend sends only the FIRST Content-Type -, zio-http
+  `joinRepeated`, Play keeps only the last before `addHttpHeaders` - Play WS uses the FIRST, so
+  up to 1.2.0 the site's won there), so a per-call value overrides the site's; and a name's FIRST caller value
+  replaces a library default (sttp's basicRequest `Accept-Encoding: gzip, deflate`). Covered by
+  `TestServers.headerOverrides`. A joined `Authorization` (zio-http) vs two lines elsewhere:
+  both as given - not normalized
+- Failure messages describe message-less exceptions from the cause chain on every engine
+  (`ThrowableUtil.describe`, since 1.2.1: jdk, zio-http, Play, pekko-http, core-akka
+  `StreamFailures`; sttp applies it to the transport cause below its wrapper - never to the
+  wrapper, whose message carries the URI). java.net.http's `ConnectException` /
+  `UnresolvedAddressException` have no message (jdk said "null" up to 1.2.0). A refused
+  connection is NOT uniform: Play / pekko-http / zio-http / jdk fail with a `ConnectException`
+  (or a wrapper) - jdk re-throws a described `ConnectException` with the original as cause, so
+  a site's `recoverErrors` matching `ConnectException` keeps working (do not normalize it into
+  a `CequenceWSException` without a typed subclass for every engine) - sttp with a
+  `CequenceWSException`; jdk streams with a `CequenceWSException` ("Cannot connect", cause set).
+  `TestServers.connectionFailures` checks the messages and the unknown-host type
+- jdk `requestUri` rejects a URI without a host (a `_` in the host name makes it registry-based)
+  or without an http / https scheme BEFORE `HttpRequest.newBuilder`, whose own
+  IllegalArgumentException quotes the whole URL ("unsupported URI <url>", query params
+  included)
 - Form fields: repeated keys keep every value on every engine (`EngineSupport.groupValues`,
   never `.toMap`); multipart files go out under their BASE name (`FilePart.filenameAux`) unless
   a display name is given. Caller-supplied `Content-Disposition` values (data-part names, file
@@ -1009,7 +1047,14 @@ Style" and Odersky's "Lean Scala".
   (a `lazySource` there would leak the held request when a run is cancelled before it pulls).
   ZIO: the stream's `toPull` in a `Scope` of its own, closed with the run's exit (or at once
   when the stream is empty / failed); the future fails with the stream's own exception
-  (`start.either` - no fiber-trace suppressed exception attached). An unrun preflighted stream
+  (`start.either` - no fiber-trace suppressed exception attached). Its single run is claimed by
+  whichever starts first (`ZioBridges.PreflightedRun`): a native ZIO consumer when its run
+  evaluates the stream, any other consumer in `ZioLeaf.openPublisher()` - called as the neutral
+  runner / Akka / fs2 open the run - and released after that run's `ZioCursor` fiber ended
+  (also one interrupted before it started) or, for a subscription that ended before its run was
+  opened, through `Opener.unopened()` (core `CursorPublisher` calls it; since 1.2.1). Up to 1.2.0
+  the claim was lazy on every path: a run cancelled before its fiber evaluated the stream held
+  the zio-http response open forever (`ZioInteropSpec` "cancelled at once" pins it). An unrun preflighted stream
   holds its request open, as on the neutral path. `toZByteStream` peepholes the `Mapped(ZioLeaf, FromChunk)` shape
   back to the chunk stream (as `toByteStringSource` does for Akka). jdk inherits the
   publisher-wrapping defaults of `WSClientOutputStreamCore`

@@ -475,6 +475,64 @@ class ZioInteropSpec extends AnyWordSpec with Matchers {
       released.get shouldBe 1
     }
 
+    "release a preflighted stream whose run outside ZIO is cancelled at once - before its fiber or its open" in {
+      // up to 1.2.0 the single run was claimed when its fiber first evaluated the stream: a run
+      // cancelled before that never released the preflight (a zio-http response stayed open)
+      def preflighted(released: CountDownLatch): AsyncStream[Int] =
+        Await.result(
+          (ZStream(1) ++ ZStream.never)
+            .ensuring(ZIO.succeed(released.countDown()))
+            .toAsyncStream
+            .preflight,
+          10.seconds
+        )
+
+      (1 to 50).foreach { _ =>
+        val released = new CountDownLatch(1)
+        preflighted(released).run(_ => ()).cancel()
+        released.await(5, TimeUnit.SECONDS) shouldBe true
+      }
+
+      // the leaf's publisher, cancelled from inside onSubscribe: its run is never opened
+      (1 to 20).foreach { _ =>
+        val released = new CountDownLatch(1)
+        val publisher = ZioBridges.publisher[Int](
+          ZStream.never,
+          runtime,
+          (_: zio.Exit[Any, Any]) => ZIO.succeed(released.countDown())
+        )
+        publisher.subscribe(new java.util.concurrent.Flow.Subscriber[Int] {
+          def onSubscribe(s: java.util.concurrent.Flow.Subscription): Unit = s.cancel()
+          def onNext(item: Int): Unit = ()
+          def onError(t: Throwable): Unit = ()
+          def onComplete(): Unit = ()
+        })
+        released.await(5, TimeUnit.SECONDS) shouldBe true
+      }
+    }
+
+    "run a preflighted stream outside ZIO once: all elements, released at its end and at an early stop" in {
+      val released = new AtomicInteger()
+      def preflighted(): AsyncStream[Int] =
+        Await.result(
+          ZStream(1, 2, 3)
+            .ensuring(ZIO.succeed(released.incrementAndGet()))
+            .toAsyncStream
+            .preflight,
+          10.seconds
+        )
+
+      val whole = preflighted()
+      Await.result(whole.runToSeq, 10.seconds) shouldBe Seq(1, 2, 3)
+      eventually(released.get shouldBe 1)
+      val second = Try(Await.result(whole.runToSeq, 10.seconds)).failed.get
+      second shouldBe an[IllegalStateException]
+      second.getMessage shouldBe "A preflighted stream supports a single run only"
+
+      Await.result(preflighted().take(1).runToSeq, 10.seconds) shouldBe Seq(1)
+      eventually(released.get shouldBe 2)
+    }
+
     "preflight an empty and a failing native stream, releasing each at once; deliver a later failure in the run" in {
       def releasing(
         released: AtomicInteger,

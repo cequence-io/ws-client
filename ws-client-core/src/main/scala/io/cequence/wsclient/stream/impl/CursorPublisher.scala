@@ -86,7 +86,8 @@ private[wsclient] final class CursorSubscription[A](
           val opened = opener.open(ctx) // never throws
           cursor = opened
           if (cancelled) opened.cancel()
-        }
+        } else
+          unopened()
         drainLoop() // releases the count taken above
       }
     }
@@ -99,8 +100,14 @@ private[wsclient] final class CursorSubscription[A](
           initialSubscriber.onSubscribe(NoopSubscription)
           initialSubscriber.onError(e)
         } catch { case NonFatal(_) => }
+        unopened()
     }
   }
+
+  // the run ends without being opened: an opener holding a resource for it releases it
+  private def unopened(): Unit =
+    try opener.unopened()
+    catch { case NonFatal(e) => logger.warn("A stream's release of an unopened run threw", e) }
 
   // the drain loop on the run's ec; false when the ec rejected it (the caller runs it inline)
   private val drainOnEc: Runnable = new Runnable {
