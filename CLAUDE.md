@@ -16,7 +16,7 @@ The project includes:
 - A backend-neutral stream type (`AsyncStream`, since 1.2.0) with native Akka / Pekko / fs2 / ZIO interop
 - JSON repair utility for fixing malformed JSON from LLMs
 
-Current version: 1.2.0
+Current version: 1.2.1
 
 ## Build Commands
 

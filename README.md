@@ -1,5 +1,5 @@
 # WS Client
-[![version](https://img.shields.io/badge/version-1.2.0-green.svg)](https://cequence.io) [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](https://opensource.org/licenses/MIT) [![Follow on X](https://img.shields.io/badge/X-%400xbnd-black?logo=x)](https://x.com/0xbnd)
+[![version](https://img.shields.io/badge/version-1.2.1-green.svg)](https://cequence.io) [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](https://opensource.org/licenses/MIT) [![Follow on X](https://img.shields.io/badge/X-%400xbnd-black?logo=x)](https://x.com/0xbnd)
 
 A simple and efficient web-service client for Scala: one API to send requests to RESTful services, handle responses and manage errors - on the HTTP backend of your choice.
 
@@ -53,13 +53,13 @@ The currently supported Scala versions are **2.12, 2.13** and **3** for the core
 To install the library, add the following dependency to your *build.sbt*
 
 ```
-"io.cequence" %% "ws-client-play-akka" % "1.2.0"     // Akka-based (Play WS 2.x)
+"io.cequence" %% "ws-client-play-akka" % "1.2.1"     // Akka-based (Play WS 2.x)
 ```
 
 or, for the Pekko flavor:
 
 ```
-"io.cequence" %% "ws-client-play-pekko" % "1.2.0"    // Pekko-based (Play WS 3.x)
+"io.cequence" %% "ws-client-play-pekko" % "1.2.1"    // Pekko-based (Play WS 3.x)
 ```
 
 or to *pom.xml* (if you use maven)
@@ -68,14 +68,14 @@ or to *pom.xml* (if you use maven)
 <dependency>
     <groupId>io.cequence</groupId>
     <artifactId>ws-client-play-akka_2.12</artifactId>
-    <version>1.2.0</version>
+    <version>1.2.1</version>
 </dependency>
 ```
 
 If you only need the core abstractions without Akka/Pekko dependencies:
 
 ```
-"io.cequence" %% "ws-client-core" % "1.2.0"
+"io.cequence" %% "ws-client-core" % "1.2.1"
 ```
 
 Any other backend goes in the same way, by its module name from the table above - e.g. `ws-client-jdk` for a client without Akka, Pekko or Play WS. Use one version for all ws-client artifacts.
