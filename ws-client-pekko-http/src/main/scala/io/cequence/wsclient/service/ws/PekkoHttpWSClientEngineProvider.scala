@@ -2,6 +2,7 @@ package io.cequence.wsclient.service.ws
 
 import io.cequence.wsclient.service.WSClientEngine
 import io.cequence.wsclient.service.spi.{
+  ClassLoaders,
   EngineCapability,
   TransportSettings,
   WSClientEngineProvider
@@ -44,12 +45,20 @@ class PekkoHttpWSClientEngineProvider extends WSClientEngineProvider {
   // own config applicable to this system. Also used as the `newExecEnv` factory so
   // `copy(reuseExecContext = false)` can spin up further independent, equally daemonic
   // systems.
-  def newDaemonSystem(): ActorSystem = ActorSystem(
-    s"ws-client-$engineId-${PekkoHttpWSClientEngineProvider.systemCounter.getAndIncrement()}",
-    com.typesafe.config.ConfigFactory
-      .parseString("pekko.daemonic = on")
-      .withFallback(com.typesafe.config.ConfigFactory.load())
-  )
+  def newDaemonSystem(): ActorSystem = {
+    // the context class loader only when it can load this provider: one that belongs to
+    // someone else (sbt's own, on the pool threads of an in-process run) holds neither the
+    // reference.conf files nor the classes the system loads by name - up to 1.2.1 engine
+    // creation failed on such a thread
+    val classLoader = ClassLoaders.contextOr(getClass)
+    ActorSystem(
+      s"ws-client-$engineId-${PekkoHttpWSClientEngineProvider.systemCounter.getAndIncrement()}",
+      com.typesafe.config.ConfigFactory
+        .parseString("pekko.daemonic = on")
+        .withFallback(com.typesafe.config.ConfigFactory.load(classLoader)),
+      classLoader
+    )
+  }
 
   override def newEngine(settings: TransportSettings): WSClientEngine = {
     implicit val system: ActorSystem = newDaemonSystem()

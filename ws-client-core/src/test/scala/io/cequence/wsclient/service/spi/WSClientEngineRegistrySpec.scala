@@ -7,12 +7,14 @@ import org.scalatest.wordspec.AnyWordSpec
 import play.api.libs.json.Json
 
 import java.io.File
-import java.net.URL
+import java.net.{URL, URLClassLoader}
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.Await
 import scala.concurrent.duration._
+import scala.util.Try
 
 class WSClientEngineRegistrySpec extends AnyWordSpec with Matchers {
 
@@ -120,6 +122,32 @@ class WSClientEngineRegistrySpec extends AnyWordSpec with Matchers {
       exception.getMessage should include("tie-2")
     }
 
+    "discover the providers on a thread whose context class loader cannot see ws-client" in {
+      // sbt's own loader on the pool threads of an in-process run: up to 1.2.1 nothing was found
+      val foreign = new URLClassLoader(Array.empty[URL], null)
+      onThread(foreign) {
+        (
+          WSClientEngineRegistry.providers.map(_.engineId),
+          WSClientEngineRegistry.provider(Some("dummy-a")).engineId,
+          WSClientEngineRegistry.provider().engineId
+        )
+      } shouldBe ((Seq("dummy-b", "dummy-a"), "dummy-a", "dummy-b"))
+    }
+
+    "discover the providers on a thread without a context class loader" in {
+      // up to 1.2.1 reading the config key failed there (ConfigFactory.load() throws)
+      onThread(null)(WSClientEngineRegistry.provider().engineId) shouldBe "dummy-b"
+    }
+
+    "search a context class loader that sees ws-client as it is" in {
+      // not bypassed for ws-client's own loader (backends may live in a child loader): this one
+      // lists a single provider
+      val loader = new FixedServicesClassLoader(classOf[DummyEngineProviderA].getName + "\n")
+      onThread(loader)(WSClientEngineRegistry.providers.map(_.engineId)) shouldBe Seq(
+        "dummy-a"
+      )
+    }
+
     "detect duplicated flavored classes (mixed akka/pekko or old+renamed artifacts)" in {
       val duplicated = WSClientEngineRegistry.duplicatedFlavoredClasses(duplicatingLoader())
 
@@ -161,6 +189,16 @@ class WSClientEngineRegistrySpec extends AnyWordSpec with Matchers {
         ConfigFactory.invalidateCaches()
       }
     }
+  }
+
+  // runs `body` on a new thread with the given context class loader
+  private def onThread[T](contextClassLoader: ClassLoader)(body: => T): T = {
+    val result = new AtomicReference[Try[T]]()
+    val thread = new Thread(new Runnable { override def run(): Unit = result.set(Try(body)) })
+    thread.setContextClassLoader(contextClassLoader)
+    thread.start()
+    thread.join(30000)
+    Option(result.get).getOrElse(fail("the thread did not finish within 30 s")).get
   }
 
   private val duplicatedClassPath =

@@ -436,6 +436,11 @@ class PlayPekkoStreamWSClientEngineProviderSpec extends AnyWordSpec with Matcher
       finally engine.close()
     }
 
+    "be discovered and work on a thread whose context class loader cannot see ws-client" in {
+      io.cequence.wsclient.testkit.TestServers
+        .foreignContextClassLoader(expectedEngineId) shouldBe empty
+    }
+
     "fail a call whose response stalls after the headers within the request / read timeout" in {
       // up to 1.1.4 the jdk and sttp engines hung forever: java.net.http's HttpRequest.timeout
       // stops at the response headers

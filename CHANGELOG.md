@@ -4,6 +4,22 @@ Release notes of ws-client, newest first. **Behavior change** marks what existin
 Use one version for all ws-client artifacts on a classpath (see
 [Compatibility and upgrading](docs/compatibility.md)).
 
+## 1.2.2 (unreleased)
+
+**Fixes**
+
+- **Engine discovery on a thread whose context class loader cannot see ws-client.**
+  `WSClientEngineRegistry` searched only the thread's context class loader. sbt's in-process
+  `run` leaves its own loader on the `ExecutionContext.global` threads, so a service built
+  inside a `Future` callback failed with "No WS client engine found", even with an explicit
+  engine id. On a thread without a context class loader, resolution failed reading
+  `ws-client.engine` (Typesafe Config's `ConfigException.BugOrBroken`). Discovery and the config
+  keys now go through the context class loader when it can load ws-client's own classes, else
+  through ws-client's own class loader. The Akka / Pekko engines create their owned actor
+  system through the same loader: on such a thread they failed too ("No configuration setting
+  found for key 'akka.loggers'"). Nothing changes on a thread whose context class loader sees
+  ws-client, and the overloads taking a `ClassLoader` still search exactly that loader.
+
 ## 1.2.1 (2026-11-13) - Java 11 again, repeated headers
 
 **Fixes**
