@@ -1,8 +1,8 @@
 package io.cequence.wsclient.service.ws.stream
 
+import io.cequence.wsclient.ClassLoaders
 import io.cequence.wsclient.service.WSClientEngine
 import io.cequence.wsclient.service.spi.{
-  ClassLoaders,
   EngineCapability,
   TransportSettings,
   WSClientEngineProvider

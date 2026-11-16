@@ -129,6 +129,9 @@ loader. On such a thread the keys are read from the `application.conf` that ws-c
 loader sees: where the application's classes sit in a loader above ws-client's, pass the engine
 id or set the system property. The `provider` / `providers` overloads that take a `ClassLoader`
 search exactly that loader.
+The rule itself is public, `io.cequence.wsclient.ClassLoaders.contextOr(cls)`, for a library on
+top of ws-client that loads its own configuration or services: for example
+`ConfigFactory.load(ClassLoaders.contextOr(classOf[MyService]), "my-library.conf")`.
 
 Note for sbt-assembly users: ServiceLoader registrations live in `META-INF/services`, so fat
 jars need `MergeStrategy.concat` (or `filterDistinctLines`) for that path.

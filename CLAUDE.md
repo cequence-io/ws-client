@@ -270,7 +270,8 @@ val engine = WSClientEngineRegistry() // site-stateless: the target site rides o
 ```
 
 Class loader (since 1.2.2): the registry overloads without a `ClassLoader` go through
-`ClassLoaders.contextOr(classOf[WSClientEngineProvider])` (core, `private[wsclient]`) - the
+`io.cequence.wsclient.ClassLoaders.contextOr(classOf[WSClientEngineProvider])` (core; public API
+since 1.2.2, for libraries on top of ws-client that load their own configuration) - the
 thread's context class loader when it resolves that class to the same `Class`, else ws-client's
 own loader - for ServiceLoader AND the config keys (`ConfigFactory.load(loader)`:
 `ConfigFactory.load()` reads only the context class loader and throws `BugOrBroken` on a thread

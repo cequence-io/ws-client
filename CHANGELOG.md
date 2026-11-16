@@ -20,6 +20,14 @@ Use one version for all ws-client artifacts on a classpath (see
   found for key 'akka.loggers'"). Nothing changes on a thread whose context class loader sees
   ws-client, and the overloads taking a `ClassLoader` still search exactly that loader.
 
+**New**
+
+- `io.cequence.wsclient.ClassLoaders.contextOr(cls)` (ws-client-core), the rule above as public
+  API: the thread's context class loader when it resolves `cls` to the same class, else the
+  class loader of `cls`.
+  A library on top of ws-client can load its own configuration on any thread with
+  `ConfigFactory.load(ClassLoaders.contextOr(classOf[MyService]), "my-library.conf")`.
+
 ## 1.2.1 (2026-11-13) - Java 11 again, repeated headers
 
 **Fixes**

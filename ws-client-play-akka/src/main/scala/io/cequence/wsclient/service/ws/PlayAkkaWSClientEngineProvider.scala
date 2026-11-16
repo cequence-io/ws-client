@@ -2,9 +2,9 @@ package io.cequence.wsclient.service.ws
 
 import akka.actor.ActorSystem
 import akka.stream.Materializer
+import io.cequence.wsclient.ClassLoaders
 import io.cequence.wsclient.service.WSClientEngine
 import io.cequence.wsclient.service.spi.{
-  ClassLoaders,
   EngineCapability,
   TransportSettings,
   WSClientEngineProvider

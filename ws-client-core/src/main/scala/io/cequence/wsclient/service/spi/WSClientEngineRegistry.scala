@@ -1,6 +1,7 @@
 package io.cequence.wsclient.service.spi
 
 import com.typesafe.config.ConfigFactory
+import io.cequence.wsclient.ClassLoaders
 import io.cequence.wsclient.domain.CequenceWSException
 import io.cequence.wsclient.service.WSClientEngine
 import org.slf4j.LoggerFactory
@@ -25,11 +26,12 @@ import scala.collection.mutable.ListBuffer
  *
  * The overloads without a class loader search the thread's context class loader when it can
  * load ws-client's own classes, else the class loader of ws-client itself, and read the
- * configuration through the same loader (since 1.2.2). Up to 1.2.1 they searched only the
- * context class loader, so a thread whose context class loader belongs to someone else - sbt's
- * own loader on the pool threads of an in-process `run` - found no engine, and a thread
- * without one failed reading the configuration. The overloads taking a class loader search
- * exactly the given one.
+ * configuration through the same loader (since 1.2.2; the public rule
+ * `io.cequence.wsclient.ClassLoaders.contextOr`). Up to 1.2.1 they searched only the context
+ * class loader, so a thread whose context class loader belongs to someone else - sbt's own
+ * loader on the pool threads of an in-process `run` - found no engine, and a thread without
+ * one failed reading the configuration. The overloads taking a class loader search exactly the
+ * given one.
  */
 object WSClientEngineRegistry {
 
