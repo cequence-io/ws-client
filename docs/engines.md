@@ -118,6 +118,21 @@ Config keys:
 | `ws-client.engine` | (unset) | Engine id to use when none is passed explicitly |
 | `ws-client.strict-classpath` | `false` | Fail engine resolution (instead of logging a warning) when mutually exclusive ws-client artifacts are detected on the classpath - mixed Akka / Pekko flavors, or a pre-1.0 artifact (`ws-client-play`, `ws-client-play-stream`) next to its renamed successor |
 
+Class loaders: discovery and these keys go through the thread's context class loader when it
+can load ws-client's own classes, else through the class loader that loaded ws-client (since
+1.2.2). So an engine is found on any thread: also on one whose context class loader belongs to
+someone else, such as sbt's own loader on the `ExecutionContext.global` threads of an
+in-process `sbt run`, and on one without a context class loader. Up to 1.2.1 discovery searched
+only the context class loader and failed there with "No WS client engine found", even for an
+explicit engine id. The Akka / Pekko engines create their owned actor system through the same
+loader. On such a thread the keys are read from the `application.conf` that ws-client's own
+loader sees: where the application's classes sit in a loader above ws-client's, pass the engine
+id or set the system property. The `provider` / `providers` overloads that take a `ClassLoader`
+search exactly that loader.
+The rule itself is public, `io.cequence.wsclient.ClassLoaders.contextOr(cls)`, for a library on
+top of ws-client that loads its own configuration or services: for example
+`ConfigFactory.load(ClassLoaders.contextOr(classOf[MyService]), "my-library.conf")`.
+
 Note for sbt-assembly users: ServiceLoader registrations live in `META-INF/services`, so fat
 jars need `MergeStrategy.concat` (or `filterDistinctLines`) for that path.
 

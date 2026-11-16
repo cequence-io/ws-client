@@ -16,11 +16,11 @@ import io.cequence.wsclient.service.ws.Timeouts
 import play.api.libs.json.{JsValue, Json}
 
 import java.io.File
-import java.net.{InetSocketAddress, ServerSocket, URLDecoder}
+import java.net.{InetSocketAddress, ServerSocket, URL, URLClassLoader, URLDecoder}
 import java.nio.file.Files
 import java.security.KeyStore
 import java.util.concurrent.{Executors, ThreadFactory, TimeoutException}
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import javax.net.ssl.{KeyManagerFactory, SSLContext}
 import scala.concurrent.{Await, ExecutionContext}
 import scala.concurrent.duration._
@@ -1241,6 +1241,59 @@ object TestServers {
         classOf[io.cequence.wsclient.domain.CequenceWSUnknownHostException]
       )
     ).flatten
+  }
+
+  /**
+   * What goes wrong when a thread whose context class loader cannot see ws-client - and one
+   * without a context class loader - creates the engine `engineId` by discovery and sends a
+   * GET with it (since 1.2.2): empty when both work. sbt's in-process `run` leaves its own
+   * loader on the pool threads of `ExecutionContext.global`: up to 1.2.1 discovery found no
+   * engine there, and the Akka / Pekko engines could not create their actor system either.
+   */
+  def foreignContextClassLoader(engineId: String): Seq[String] =
+    withServer("/" -> { (exchange: HttpExchange) => respond(exchange, 200, "\"pong\"") }) {
+      port =>
+        // a null parent: the loader sees the JDK's classes only
+        val foreign = new URLClassLoader(Array.empty[URL], null)
+        Seq("a foreign" -> foreign, "no" -> null).flatMap { case (label, contextClassLoader) =>
+          val body = onThread(contextClassLoader) {
+            val engine = WSClientEngineRegistry(TransportSettings(), Some(engineId))
+            try {
+              val site = SiteBinding(s"http://localhost:$port")
+              val rich = Await.result(engine.execGETRich(site, "ping"), 30.seconds)
+              engine.getResponseOrError(rich).string
+            } finally engine.close()
+          }
+          body match {
+            case Success("\"pong\"") => None
+            case Success(other)      => Some(s"$label context class loader: body $other")
+            case Failure(e) =>
+              Some(s"$label context class loader: ${e.getClass.getName}: ${e.getMessage}")
+          }
+        }
+    }
+
+  // runs `body` on a new thread with the given context class loader; a Throwable that escapes
+  // `Try` (a LinkageError) is reported through the thread's uncaught-exception handler
+  private def onThread[T](contextClassLoader: ClassLoader)(body: => T): Try[T] = {
+    val result = new AtomicReference[Try[T]](
+      Failure(new TimeoutException("the thread did not finish within 60 s"))
+    )
+    val thread = new Thread(
+      new Runnable { override def run(): Unit = result.set(Try(body)) },
+      "ws-client-context-class-loader-test"
+    )
+    thread.setContextClassLoader(contextClassLoader)
+    thread.setUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler {
+      override def uncaughtException(
+        t: Thread,
+        e: Throwable
+      ): Unit = result.set(Failure(e))
+    })
+    thread.setDaemon(true)
+    thread.start()
+    thread.join(60000)
+    result.get
   }
 
   // `form-data; key=token; key="quoted \" string"` -> the (key, value) pairs

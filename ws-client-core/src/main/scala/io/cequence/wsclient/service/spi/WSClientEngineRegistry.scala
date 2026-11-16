@@ -1,6 +1,7 @@
 package io.cequence.wsclient.service.spi
 
 import com.typesafe.config.ConfigFactory
+import io.cequence.wsclient.ClassLoaders
 import io.cequence.wsclient.domain.CequenceWSException
 import io.cequence.wsclient.service.WSClientEngine
 import org.slf4j.LoggerFactory
@@ -14,7 +15,7 @@ import scala.collection.mutable.ListBuffer
  *
  * Provider resolution order:
  *   1. explicit engine id passed to [[provider]] / [[apply]]
- *   1. the config key `ws-client.engine` looked up via `ConfigFactory.load()` - note that
+ *   1. the config key `ws-client.engine` looked up via `ConfigFactory.load` - note that
  *      standard Typesafe Config semantics apply, so a system property
  *      (`-Dws-client.engine=...`) overrides `application.conf`
  *   1. auto-selection: a single discovered provider is used as is; with several, the one with
@@ -22,6 +23,15 @@ import scala.collection.mutable.ListBuffer
  *
  * A tie or an empty classpath fails with a [[CequenceWSException]] naming the available engine
  * ids / backend artifacts.
+ *
+ * The overloads without a class loader search the thread's context class loader when it can
+ * load ws-client's own classes, else the class loader of ws-client itself, and read the
+ * configuration through the same loader (since 1.2.2; the public rule
+ * `io.cequence.wsclient.ClassLoaders.contextOr`). Up to 1.2.1 they searched only the context
+ * class loader, so a thread whose context class loader belongs to someone else - sbt's own
+ * loader on the pool threads of an in-process `run` - found no engine, and a thread without
+ * one failed reading the configuration. The overloads taking a class loader search exactly the
+ * given one.
  */
 object WSClientEngineRegistry {
 
@@ -87,7 +97,8 @@ object WSClientEngineRegistry {
     }
 
   /**
-   * All providers found on the classpath, ordered by descending priority.
+   * All providers found on the classpath, ordered by descending priority - see the class doc
+   * for the class loader searched.
    */
   def providers: Seq[WSClientEngineProvider] = providers(defaultClassLoader)
 
@@ -143,7 +154,7 @@ object WSClientEngineRegistry {
     }
 
   private def strictClasspath: Boolean = {
-    val config = ConfigFactory.load()
+    val config = ConfigFactory.load(defaultClassLoader)
     config.hasPath(StrictClasspathConfigKey) && config.getBoolean(StrictClasspathConfigKey)
   }
 
@@ -203,7 +214,7 @@ object WSClientEngineRegistry {
   }
 
   private def configuredEngineId: Option[String] = {
-    val config = ConfigFactory.load()
+    val config = ConfigFactory.load(defaultClassLoader)
     if (config.hasPath(ConfigKey)) Some(config.getString(ConfigKey)) else None
   }
 
@@ -235,7 +246,9 @@ object WSClientEngineRegistry {
   private def idsOrNone(providers: Seq[WSClientEngineProvider]) =
     if (providers.isEmpty) "(none)" else providers.map(_.engineId).mkString(", ")
 
-  private def defaultClassLoader =
-    Option(Thread.currentThread().getContextClassLoader)
-      .getOrElse(classOf[WSClientEngineProvider].getClassLoader)
+  // the context class loader when it sees ws-client, else ws-client's own (see the class doc).
+  // Configuration too: ConfigFactory.load() reads only the context class loader and throws
+  // when a thread has none
+  private def defaultClassLoader: ClassLoader =
+    ClassLoaders.contextOr(classOf[WSClientEngineProvider])
 }

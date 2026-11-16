@@ -2,6 +2,7 @@ package io.cequence.wsclient.service.ws
 
 import akka.actor.ActorSystem
 import akka.stream.Materializer
+import io.cequence.wsclient.ClassLoaders
 import io.cequence.wsclient.service.WSClientEngine
 import io.cequence.wsclient.service.spi.{
   EngineCapability,
@@ -44,7 +45,12 @@ class PlayAkkaWSClientEngineProvider extends WSClientEngineProvider {
   // handwritten HERE (not in the engine class, which is auto-translated to pekko) because the
   // "akka.daemonic = on" config literal must never pass through the akka -> pekko string
   // rewrite; the pekko twin hand-rolls its own copy of this with "pekko.daemonic = on"
-  private def newDaemonSystem(): ActorSystem =
+  private def newDaemonSystem(): ActorSystem = {
+    // the context class loader only when it can load this provider: one that belongs to
+    // someone else (sbt's own, on the pool threads of an in-process run) holds neither the
+    // reference.conf files nor the classes the system loads by name - up to 1.2.1 engine
+    // creation failed on such a thread
+    val classLoader = ClassLoaders.contextOr(getClass)
     ActorSystem(
       s"ws-client-$engineId-${PlayAkkaWSClientEngineProvider.systemCounter.getAndIncrement()}",
       // engine-OWNED systems must never hold the JVM hostage: with the default
@@ -53,8 +59,10 @@ class PlayAkkaWSClientEngineProvider extends WSClientEngineProvider {
       // fallback keeps the application's own config applicable to this system.
       com.typesafe.config.ConfigFactory
         .parseString("akka.daemonic = on")
-        .withFallback(com.typesafe.config.ConfigFactory.load())
+        .withFallback(com.typesafe.config.ConfigFactory.load(classLoader)),
+      classLoader
     )
+  }
 }
 
 object PlayAkkaWSClientEngineProvider {

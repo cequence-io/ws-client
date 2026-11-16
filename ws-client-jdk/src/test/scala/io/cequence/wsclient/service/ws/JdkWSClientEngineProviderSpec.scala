@@ -157,6 +157,11 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       finally engine.close()
     }
 
+    "be discovered and work on a thread whose context class loader cannot see ws-client" in {
+      io.cequence.wsclient.testkit.TestServers
+        .foreignContextClassLoader(expectedEngineId) shouldBe empty
+    }
+
     "honor the AsyncStream contract (cold, framing, cancel, downloads, wire format)" in {
       val engine =
         WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
