@@ -4,7 +4,7 @@ Release notes of ws-client, newest first. **Behavior change** marks what existin
 Use one version for all ws-client artifacts on a classpath (see
 [Compatibility and upgrading](docs/compatibility.md)).
 
-## 1.2.2 (unreleased)
+## 1.2.2 (2026-11-16) - engine discovery on any thread
 
 **Fixes**
 
