@@ -4,6 +4,16 @@ Release notes of ws-client, newest first. **Behavior change** marks what existin
 Use one version for all ws-client artifacts on a classpath (see
 [Compatibility and upgrading](docs/compatibility.md)).
 
+## 1.2.3 (unreleased)
+
+**Verification**
+
+- Lean 4 proofs, for every input, of what four pure parts compute: both delimiter framers (they
+  agree, and differ from their documented model only at the two known edges near the frame
+  limit), `WireFormat.encodeQueryComponent` and `WireFormat.url` (RFC 3986), the multipart
+  parameter encoding, and `JsonStreamFrames.parseFrame` - with a conformance check that runs the
+  code and each model on the same random cases. See [Verification](docs/verification.md).
+
 ## 1.2.2 (2026-11-16) - engine discovery on any thread
 
 **Fixes**

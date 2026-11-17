@@ -1,0 +1,9 @@
+name = "ws-client-proofs"
+defaultTargets = ["WsClientProofs", "conformance"]
+
+[[lean_lib]]
+name = "WsClientProofs"
+
+[[lean_exe]]
+name = "conformance"
+root = "Conformance"

@@ -51,3 +51,20 @@ jobs:
       # TLC: the designs (formal/tla) - the specs must hold, the seeded bugs must be rejected
       - name: TLA+ specs
         run: formal/tla/check.sh --fetch
+      # Lean (formal/lean): the proofs about the models of the code, then the models against
+      # the code - the toolchain is pinned in formal/lean/lean-toolchain
+      - uses: actions/cache@v6
+        with:
+          path: ~/.elan
+          key: elan-${{ hashFiles('formal/lean/lean-toolchain') }}
+      - name: Install elan
+        run: |
+          if [ ! -x "$HOME/.elan/bin/elan" ]; then
+            curl -sSfL https://raw.githubusercontent.com/leanprover/elan/v4.2.3/elan-init.sh |
+              sh -s -- -y --default-toolchain none
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Lean proofs
+        run: formal/lean/check.sh
+      - name: Lean conformance
+        run: sbt leanConformance

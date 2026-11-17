@@ -409,7 +409,7 @@ built on JDK 17 and shipped core's one Java class (`StackWalkerUtil`, Java 9+ AP
 
 ### Verification (since 1.2.0)
 
-Three layers beyond the example-based and random specs:
+Four layers beyond the example-based and random specs:
 
 - **Small-scope (bounded-exhaustive) specs** - ordinary tests, part of `sbt test`. EVERY input in
   a small scope against a list model written from the scaladoc alone:
@@ -442,31 +442,48 @@ Three layers beyond the example-based and random specs:
   `TransformPublisher`s, each label one atomic step of the implementation. A change to one of
   those classes' synchronization changes its spec first; a new invariant gets a mutant that
   violates it. See `formal/tla/README.md`.
+- **Lean proofs** (since 1.2.3) - `formal/lean` (Lean 4.24.0, no dependencies; `check.sh` builds
+  every proof and fails on `sorry` or a non-standard axiom - `Axioms.lean` lists the headline
+  theorems): line-by-line MODELS of four pure parts - both delimiter framers,
+  `WireFormat.encodeQueryComponent` / `url` (`URLEncoder` modelled from its javadoc),
+  `MultipartParams`, `JsonStreamFrames.parseFrame` up to the `Json.parse` - proved against specs
+  written from the scaladoc / RFC alone, for EVERY input. `sbt leanConformance` (a forked main
+  in ws-client-verification, NOT part of `test`; `-Dwsclient.verify.lean.cases` / `.seed` /
+  `.only` / `.exe`) ties each model to the code: 20,000 random cases per piece through both,
+  outputs identical. A change to a modelled method changes its model in the same commit (the
+  conformance check fails otherwise); `Int` arithmetic becomes natural arithmetic where it is
+  non-negative, each place where it can be negative says how it is translated; Java library
+  calls go through `Java.lean` / `JavaString.lean`. See `formal/lean/README.md`.
 
-CI runs the last two in a job of their own (`verification`; first run on GitHub 2026-11-11:
+CI runs the last three in a job of their own (`verification`; first run on GitHub 2026-11-11:
 13 minutes on the hosted runner, tools-jar download included). The `test` job takes about 20
 minutes there; tests whose run time depends on the shared `ExecutionContext.global` need
 generous timeouts (the fs2 100,000-element concat run: 1 s locally, over 15 s on the runner).
 
-#### State of the formalization (2026-11-11) - continue from here
+#### State of the formalization (2026-11-17) - continue from here
 
 Last full run (20 cores, JDK 17), everything passes: small-scope specs at the default scopes
 (framing about 130,000 cases, 5 s; operators 25,616 pipelines per backend, 20 s) and at the
 audit scopes (framing length 6: about 590,000 cases; operators depth 3: 268,976 pipelines per
 backend, 2 minutes - manual, not in CI); Lincheck 25 scenarios x 1000 interleavings, 398 s;
-TLC 8 configurations + 9 mutants, about 5 minutes (state counts in `formal/tla/README.md`).
+TLC 8 configurations + 9 mutants, about 5 minutes (state counts in `formal/tla/README.md`);
+Lean (2026-11-17): 23 headline theorems, standard axioms only, build from scratch 30 s; the
+conformance check 4 x 20,000 cases, about 45 s.
 
 Coverage per subject (`-` = nothing):
 
-| Subject | Small-scope | Lincheck (scenarios) | TLA+ |
-|---|---|---|---|
-| `ByteFraming.delimiter`, `DelimiterFramer` | `FramingSmallScopeSpec` (2 pinned edges) | - | - |
-| operators on neutral / Akka / fs2 / ZIO | `OperatorSmallScopeSpec` (16 sources, 40 operators) | - | - |
-| `TransformPublisher` (two chained) | - | 5 | `TransformChain`: 4 configs + `Legacy`, 3 mutants |
-| `CursorPublisher` | - | 4 x sync / async cursor, + 1 with `SubscriberCursor` | `CursorDrain`: 2 configs, 4 mutants |
-| `SubscriberCursor` | - | 2 x sync / async cursor, + the one above | - |
-| `AsyncBroadcastHub` | - | 5 | - |
-| `ZioCursor` | - | 2 (loop bound 100,000) | `ZioCursor`: 1 config, 2 mutants |
+| Subject | Small-scope | Lincheck (scenarios) | TLA+ | Lean (proof + conformance) |
+|---|---|---|---|---|
+| `ByteFraming.delimiter`, `DelimiterFramer` | `FramingSmallScopeSpec` (2 pinned edges) | - | - | both = `chunkSpec`; the 2 edges are the only differences from the model |
+| operators on neutral / Akka / fs2 / ZIO | `OperatorSmallScopeSpec` (16 sources, 40 operators) | - | - | - |
+| `TransformPublisher` (two chained) | - | 5 | `TransformChain`: 4 configs + `Legacy`, 3 mutants | - |
+| `CursorPublisher` | - | 4 x sync / async cursor, + 1 with `SubscriberCursor` | `CursorDrain`: 2 configs, 4 mutants | - |
+| `SubscriberCursor` | - | 2 x sync / async cursor, + the one above | - | - |
+| `AsyncBroadcastHub` | - | 5 | - | - |
+| `ZioCursor` | - | 2 (loop bound 100,000) | `ZioCursor`: 1 config, 2 mutants | - |
+| `WireFormat.encodeQueryComponent` / `url` | - | - | - | = RFC 3986 for every text; a strict reader takes back the params (base without `#`) |
+| `MultipartParams` | - | - | - | = WHATWG encoding; a value never leaves its parameter; backslash vs RFC 9110 shown |
+| `JsonStreamFrames.parseFrame` | - | - | - | = the line rules (fast path, joined-content search) for field prefixes without CR / LF / leading `:` |
 
 What a pass does NOT say (the known gaps, most valuable first):
 
@@ -482,18 +499,20 @@ What a pass does NOT say (the known gaps, most valuable first):
 3. Nothing ties a TLA+ label to the code but review, and Lincheck checks no liveness. Each
    spec'd class has model-check scenarios for the same races - keep that pairing for every new
    spec (a spec without a model check of the real class, or the reverse, is half a result).
-4. The pure wire-level functions have no model yet: `WireFormat.url` (against RFC 3986),
-   `MultipartParams` (no `"` / CR / LF survives in a header value), `JsonStreamFrames.parseFrame`
-   (against the SSE rules stated under Important Notes). All are small-scope
-   candidates of the framing spec's shape (every string over a tiny alphabet against a
-   reference written from the RFC / the note).
+4. The Lean proofs are about MODELS: what ties a model to its code is the transliteration
+   (review) and the conformance check, which samples. `JsonStreamFrames.parseFrame`'s JSON
+   parse and its error mapping are not modelled; Java strings with unpaired surrogates are
+   outside the text models. A multipart name with a backslash goes out as it is (as browsers
+   send it), which an RFC 9110 quoted-string reader takes as an escape (proved witnesses in
+   `Multipart/Proofs.lean`) - a behavior decision, left open.
 5. Not modelled or model-checked: the fs2 pull bridge (`Fs2Compiler.cursorStream`), the
    blocking cursor (reads on the pool vs cancel vs `close()` exactly once), the Akka / Pekko
    stages (`NestedStreamsLogic`, `CursorSourceStage` - actor-confined, but their async
    callbacks are not), `StreamedBody.of`, and the jdk engine's `IdleTimeoutPublisher` /
    `DeadlineBodySubscriber` / `BoundedBodyReader`.
 6. The framing spec's two pinned edges are real divergences from the scaladoc model, allowed
-   in `classify` - fixing both framers together (then dropping the allowance) is open.
+   in `classify` - and, by the Lean proof, the only ones. Fixing both framers together (then
+   dropping the allowance, and the margin hypothesis of the Lean theorems) is open.
 7. Scopes: TLC configurations are 2 - 3 elements / calls per thread (the largest, 4 million
    states, takes half the run); Lincheck's 1000 interleavings per scenario is a sample, not a
    bound (the two historical bugs - the 1.1.5 transform deadlock, the hub's shutdown race -
@@ -505,7 +524,10 @@ by a test that fails once it is fixed; a Lincheck scenario is first shown to FAI
 is for (revert the fix locally, or run it against the last release jar); a TLA+ invariant gets
 a mutant, and an invariant TLC rejects is first read as a fact about the class (see
 `CancelCompletes` in the README) before the spec is weakened; never put an exact state count
-of a counterexample run into a doc (it varies per run).
+of a counterexample run into a doc (it varies per run); a Lean spec is written from the
+scaladoc / RFC alone, a model follows its code line by line, every model gets a conformance
+target that is first shown to fail on a bug planted in the Scala code, and a divergence from
+the spec is a theorem (proved the only one, or shown by a computed witness).
 
 ## Documentation layout
 

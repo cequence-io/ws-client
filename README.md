@@ -133,7 +133,7 @@ Details for each: [Compatibility and upgrading](docs/compatibility.md). What cha
 | [Streaming](docs/streaming.md) | The stream types at a glance; `AsyncStream` semantics, operators and interop with Akka, Pekko, fs2 and ZIO; downloads; `Source`- and `Flow.Publisher`-typed streams |
 | [Architecture](docs/architecture.md) | Layers, modules and their dependencies, the trait hierarchy, design rules, service adapters |
 | [Compatibility and upgrading](docs/compatibility.md) | Akka vs Pekko, one version for all artifacts, the 1.0.0 artifact rename, logging, Scala and Java versions |
-| [Verification](docs/verification.md) | Small-scope specs, model checks and TLA+ specs of the stream layer - what they cover and what not |
+| [Verification](docs/verification.md) | Small-scope specs, model checks, TLA+ specs and Lean proofs - what they cover and what not |
 | [Changelog](CHANGELOG.md) | Release notes per version, with behavior changes and upgrade notes |
 | [json-repair](json-repair/README.md) | The JSON repair library |
 
