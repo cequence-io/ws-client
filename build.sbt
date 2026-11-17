@@ -484,6 +484,8 @@ lazy val `ws-client-zio` =
 //  - small-scope (bounded-exhaustive) differential specs: ordinary tests
 //  - Lincheck model checks of the lock-free bridges: the `modelCheck` command (a forked main,
 //    about 7 minutes - not part of `test`)
+//  - the conformance check of the Lean models (formal/lean): the `leanConformance` command (a
+//    forked main running the Lean executable - not part of `test`)
 val lincheckVersion = "3.7"
 
 lazy val `ws-client-verification` =
@@ -511,6 +513,13 @@ lazy val `ws-client-verification` =
 addCommandAlias(
   "modelCheck",
   "ws-client-verification/Test/runMain io.cequence.wsclient.verification.ModelChecks"
+)
+
+// the conformance check between the Scala code and its Lean models (formal/lean - `lake build`
+// there first): every case through both, outputs identical
+addCommandAlias(
+  "leanConformance",
+  "ws-client-verification/Test/runMain io.cequence.wsclient.verification.LeanConformance"
 )
 
 lazy val root = (project in file("."))

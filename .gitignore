@@ -2,6 +2,8 @@
 *.log
 /.idea
 target
+# Lean build output (formal/lean)
+.lake
 /*.iml
 /out
 /.idea_modules

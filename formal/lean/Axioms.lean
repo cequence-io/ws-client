@@ -1,0 +1,51 @@
+import WsClientProofs
+
+/-! The axioms every headline theorem rests on - `check.sh` fails on anything beyond Lean's
+three standard ones (`propext`, `Classical.choice`, `Quot.sound`), `sorryAx` above all. -/
+
+open WsClientProofs.Framing in
+#print axioms framers_equivalent
+open WsClientProofs.Framing in
+#print axioms byteFraming_frames_prefix
+open WsClientProofs.Framing in
+#print axioms byteFraming_tooLong_of_reference
+open WsClientProofs.Framing in
+#print axioms byteFraming_eq_reference_of_ne_tooLong
+open WsClientProofs.Framing in
+#print axioms byteFraming_eq_reference_of_margin
+open WsClientProofs.Framing in
+#print axioms byteFraming_chunking_independent
+open WsClientProofs.Framing in
+#print axioms engineFramer_frames_prefix
+open WsClientProofs.Framing in
+#print axioms engineFramer_tooLong_of_reference
+open WsClientProofs.Framing in
+#print axioms engineFramer_eq_reference_of_ne_tooLong
+open WsClientProofs.Framing in
+#print axioms engineFramer_eq_reference_of_margin
+open WsClientProofs.Framing in
+#print axioms engineFramer_chunking_independent
+open WsClientProofs.WireFormat in
+#print axioms encodeQueryComponent_eq
+open WsClientProofs.WireFormat in
+#print axioms percentDecode_rfc3986Encode
+open WsClientProofs.WireFormat in
+#print axioms readQuery_url
+open WsClientProofs.Multipart in
+#print axioms escape_eq
+open WsClientProofs.Multipart in
+#print axioms quoted_one_line
+open WsClientProofs.Multipart in
+#print axioms readValue_quoted
+open WsClientProofs.Multipart in
+#print axioms readValue_dataPartName
+open WsClientProofs.Multipart in
+#print axioms readQuotedRfc9110_of_no_backslash
+open WsClientProofs.Multipart in
+#print axioms rfc9110_backslash_dropped
+open WsClientProofs.Multipart in
+#print axioms rfc9110_trailing_backslash
+open WsClientProofs.SseFrames in
+#print axioms parseFrame_eq_reference
+open WsClientProofs.SseFrames in
+#print axioms fieldValue_joinLines
