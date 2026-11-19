@@ -2,6 +2,7 @@ package io.cequence.wsclient.service.ws
 
 import io.cequence.wsclient.domain.{
   CequenceWSException,
+  CequenceWSHttpStatusException,
   CequenceWSTimeoutException,
   CequenceWSUnknownHostException,
   SimpleRichResponse,
@@ -37,12 +38,13 @@ import io.cequence.wsclient.testkit.TestServers.{
 }
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
-import play.api.libs.json.{JsString, JsValue, Json}
+import play.api.libs.json.{JsDefined, JsString, JsValue, Json}
 
 import java.io.{File, PrintWriter}
 import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.Await
 import scala.concurrent.duration._
+import scala.util.Try
 import scala.jdk.CollectionConverters._
 
 class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
@@ -182,6 +184,27 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     "describe a refused connection and an unresolvable host" in {
       val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
       try io.cequence.wsclient.testkit.TestServers.connectionFailures(engine) shouldBe empty
+      finally engine.close()
+    }
+
+    "never put a caller-supplied line break on the wire (no header or request injection)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try io.cequence.wsclient.testkit.TestServers.lineBreakInjection(engine) shouldBe empty
+      finally engine.close()
+    }
+
+    "keep the site's credentials out of the CONNECT request to a proxy" in {
+      val head = io.cequence.wsclient.testkit.TestServers.connectRequestHead(settings =>
+        WSClientEngineRegistry(settings, Some(expectedEngineId))
+      )
+      head should startWith("CONNECT ")
+      head should not include "connect-secret-token"
+      head should not include "connect-secret-key"
+    }
+
+    "give the same responses, status handling and failures through its calls (AsyncCall)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try io.cequence.wsclient.testkit.TestServers.callTwins(engine) shouldBe empty
       finally engine.close()
     }
 
@@ -840,6 +863,310 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
             .take(2)
           runZio(stream).size shouldBe 2
           aborted.await(15, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+        } finally engine.close()
+      }
+    }
+
+    // a response whose body never ends: only the client's abort ends it. `received` gets a
+    // permit per request the server has, `aborted` one per connection the client dropped. A
+    // call interrupted BEFORE its request was written sends nothing at all (a JVM's first
+    // request can take hundreds of milliseconds), so a test interrupts only once the server
+    // has the request
+    final class EndlessBody {
+      val received = new java.util.concurrent.Semaphore(0)
+      val aborted = new java.util.concurrent.Semaphore(0)
+
+      val handler: com.sun.net.httpserver.HttpExchange => Unit = { exchange =>
+        exchange.getResponseHeaders.add("Content-Type", "application/json")
+        exchange.sendResponseHeaders(200, 0)
+        received.release()
+        val out = exchange.getResponseBody
+        try {
+          out.write("[".getBytes("UTF-8"))
+          while (true) {
+            out.write("0,".getBytes("UTF-8"))
+            out.flush()
+            Thread.sleep(20)
+          }
+        } catch {
+          case _: java.io.IOException => aborted.release()
+        }
+      }
+
+      def awaitReceived(requests: Int = 1): Boolean =
+        received.tryAcquire(requests, 30, java.util.concurrent.TimeUnit.SECONDS)
+
+      def awaitAborted(requests: Int = 1): Boolean =
+        aborted.tryAcquire(requests, 30, java.util.concurrent.TimeUnit.SECONDS)
+    }
+
+    def runTask[A](task: zio.Task[A]): A =
+      zio.Unsafe.unsafe { implicit unsafe =>
+        Await.result(zio.Runtime.default.unsafe.runToFuture(task), 60.seconds)
+      }
+
+    "abort the request when a call compiled for ZIO is interrupted" in {
+      import io.cequence.wsclient.stream.ZioInterop._
+
+      val slow = new EndlessBody
+      withServer("/slow" -> slow.handler) { port =>
+        val engine = newEngine()
+        try {
+          val task =
+            engine.execGETRichCall(SiteBinding(s"http://localhost:$port"), "slow").toZIO
+          val exit = runTask(
+            for {
+              fiber <- task.fork
+              received <- zio.ZIO.attemptBlocking(slow.awaitReceived())
+              exit <- fiber.interrupt
+            } yield (received, exit)
+          )
+          exit._1 shouldBe true
+          exit._2.isInterrupted shouldBe true
+          slow.awaitAborted() shouldBe true
+        } finally engine.close()
+      }
+    }
+
+    "abort the request of a call that lost a timeout - on ZIO and as a Future" in {
+      import io.cequence.wsclient.stream.ZioInterop._
+
+      val slow = new EndlessBody
+      withServer(
+        "/slow" -> slow.handler,
+        "/ok" -> { exchange => respond(exchange, 200, "{}") }
+      ) { port =>
+        val engine = newEngine()
+        try {
+          val site = SiteBinding(s"http://localhost:$port")
+          // a warm engine and a limit far beyond the time to write a request: both requests
+          // are with the server when their limit passes
+          Await.result(engine.execGETRich(site, "ok"), 30.seconds).status.code shouldBe 200
+          val call = engine.execGETRichCall(site, "slow").timeout(2.seconds)
+
+          runTask(call.toZIO.either).left.map(_.getClass) shouldBe
+            Left(classOf[java.util.concurrent.TimeoutException])
+          Try(Await.result(call.toFuture, 30.seconds)).failed.get shouldBe
+            a[java.util.concurrent.TimeoutException]
+          slow.awaitReceived(2) shouldBe true
+          slow.awaitAborted(2) shouldBe true
+        } finally engine.close()
+      }
+    }
+
+    "abort the request when a call's Future run is cancelled" in {
+      val slow = new EndlessBody
+      withServer("/slow" -> slow.handler) { port =>
+        val engine = newEngine()
+        try {
+          val run =
+            engine.execGETRichCall(SiteBinding(s"http://localhost:$port"), "slow").run()
+          slow.awaitReceived() shouldBe true
+          run.cancel()
+          Try(Await.result(run.result, 30.seconds)).failed.get shouldBe
+            a[java.util.concurrent.CancellationException]
+          slow.awaitAborted() shouldBe true
+        } finally engine.close()
+      }
+    }
+
+    "run its calls natively on ZIO (no bridge) and as a Future through one bridge" in {
+      import io.cequence.wsclient.stream.CallDiagnostics
+      import io.cequence.wsclient.stream.ZioInterop._
+
+      withEchoServer { port =>
+        val engine = newEngine()
+        try {
+          val site = SiteBinding(s"http://localhost:$port")
+          val call = engine.execGETRichCall(site, "echo").map(_.status.code)
+          call.describe shouldBe "native(zio) -> map"
+
+          val (task, zioBridges) = CallDiagnostics.counted(call.toZIO)
+          runTask(task) shouldBe 200
+          zioBridges.get shouldBe 0
+
+          val (future, futureBridges) = CallDiagnostics.counted(call.toFuture)
+          Await.result(future, 30.seconds) shouldBe 200
+          futureBridges.get shouldBe 1
+        } finally engine.close()
+      }
+    }
+
+    "evaluate the request context per run of a call - never while building it" in {
+      import io.cequence.wsclient.stream.ZioInterop._
+
+      val evaluations = new AtomicInteger()
+      withEchoServer { port =>
+        val engine = newEngine()
+        try {
+          val site = SiteBinding(
+            s"http://localhost:$port",
+            requestContextFun = Some { () =>
+              evaluations.incrementAndGet()
+              WsRequestContext(authHeaders =
+                Seq("Authorization" -> s"Bearer t${evaluations.get}")
+              )
+            }
+          )
+          val call = engine
+            .execGETRichCall(site, "echo")
+            .map(r => (r.response.get.json \ "auth").as[String])
+          evaluations.get shouldBe 0
+          runTask(call.toZIO) shouldBe "Bearer t1"
+          Await.result(call.toFuture, 30.seconds) shouldBe "Bearer t2"
+
+          // a throwing context function fails the call (and the Rich method's Future) - no throw
+          val throwing = site.copy(requestContextFun =
+            Some(() => throw new IllegalStateException("no token"))
+          )
+          runTask(engine.execGETRichCall(throwing, "echo").toZIO.either).left
+            .map(_.getMessage) shouldBe
+            Left("no token")
+          Try(
+            Await.result(engine.execGETRich(throwing, "echo"), 30.seconds)
+          ).failed.get.getMessage shouldBe
+            "no token"
+        } finally engine.close()
+      }
+    }
+
+    "serve a service's calls natively when it opts in (execGETCall: handleErrorCodes as a stage)" in {
+      import io.cequence.wsclient.stream.CallDiagnostics
+      import io.cequence.wsclient.stream.ZioInterop._
+
+      final class Service(
+        override protected val engine: io.cequence.wsclient.service.WSClientEngine,
+        override protected val site: SiteBinding
+      )(
+        implicit override protected val ec: scala.concurrent.ExecutionContext
+      ) extends io.cequence.wsclient.service.WSClientWithEngineBase[
+            io.cequence.wsclient.service.WSClientEngine
+          ] {
+        override protected type PEP = String
+        override protected type PT = String
+        override protected def ownsEngine: Boolean = false
+        override protected def nativeCalls: Boolean = true
+      }
+
+      withServer(
+        "/ok" -> { exchange => respond(exchange, 200, """{"a":1}""") },
+        "/limited" -> { exchange => respond(exchange, 429, """{"error":"slow down"}""") }
+      ) { port =>
+        val engine = newEngine()
+        try {
+          val service = new Service(engine, SiteBinding(s"http://localhost:$port"))
+          val (task, bridges) =
+            CallDiagnostics.counted(service.execGETCall("ok").map(_.json).toZIO)
+          runTask(task) shouldBe Json.obj("a" -> 1)
+          bridges.get shouldBe 0
+
+          val failure = runTask(service.execGETCall("limited").toZIO.either)
+          failure.left.map(_.getClass) shouldBe Left(classOf[CequenceWSHttpStatusException])
+        } finally engine.close()
+      }
+    }
+
+    "run a service's own execXRich for its calls by default (an override is never bypassed)" in {
+      import io.cequence.wsclient.stream.CallDiagnostics
+      import io.cequence.wsclient.stream.ZioInterop._
+
+      // a service that decorates every request: its calls must go through the same override
+      final class SigningService(
+        override protected val engine: io.cequence.wsclient.service.WSClientEngine,
+        override protected val site: SiteBinding
+      )(
+        implicit override protected val ec: scala.concurrent.ExecutionContext
+      ) extends io.cequence.wsclient.service.WSClientWithEngineBase[
+            io.cequence.wsclient.service.WSClientEngine
+          ] {
+        override protected type PEP = String
+        override protected type PT = String
+        override protected def ownsEngine: Boolean = false
+
+        override def execGETRich(
+          endPoint: String,
+          endPointParam: Option[String],
+          params: Seq[(String, Option[Any])],
+          extraHeaders: Seq[(String, String)],
+          acceptableStatusCodes: Seq[Int]
+        ) =
+          super.execGETRich(
+            endPoint,
+            endPointParam,
+            params,
+            extraHeaders :+ ("Authorization" -> "Signature abc"),
+            acceptableStatusCodes
+          )
+      }
+
+      withEchoServer { port =>
+        val engine = newEngine()
+        try {
+          val service = new SigningService(engine, SiteBinding(s"http://localhost:$port"))
+          def auth(response: io.cequence.wsclient.domain.Response) =
+            (response.json \ "auth").as[String]
+
+          Await.result(service.execGET("echo"), 30.seconds).json \ "auth" shouldBe
+            JsDefined(JsString("Signature abc"))
+          val (task, bridges) =
+            CallDiagnostics.counted(service.execGETCall("echo").map(auth).toZIO)
+          runTask(task) shouldBe "Signature abc"
+          // through the service's Future method: one bridge on ZIO
+          bridges.get shouldBe 1
+          Await.result(service.execGETCall("echo").map(auth).toFuture, 30.seconds) shouldBe
+            "Signature abc"
+        } finally engine.close()
+      }
+    }
+
+    "evaluate the request context on the calling thread for its Future methods" in {
+      // as on every other engine: a context function may read caller-thread state
+      val tenant = new ThreadLocal[String]
+      withEchoServer { port =>
+        val engine = newEngine()
+        try {
+          val site = SiteBinding(
+            s"http://localhost:$port",
+            requestContextFun = Some { () =>
+              WsRequestContext(authHeaders = Seq("Authorization" -> s"Bearer ${tenant.get}"))
+            }
+          )
+          tenant.set("tenant-a")
+          val response =
+            try engine.execGETRich(site, "echo")
+            finally tenant.remove()
+          (Await
+            .result(response, 30.seconds)
+            .response
+            .map(_.json \ "auth")
+            .map(_.as[String])) shouldBe
+            Some("Bearer tenant-a")
+        } finally engine.close()
+      }
+    }
+
+    "fail the Future for an empty body-parameter name, not offered to the site's recovery" in {
+      withEchoServer { port =>
+        val engine = newEngine()
+        try {
+          val recovered = new AtomicInteger()
+          val site = SiteBinding(
+            s"http://localhost:$port",
+            recoverErrors = Some { _ =>
+              { case _: Throwable =>
+                recovered.incrementAndGet()
+                SimpleRichResponse(None, StatusData(0, "recovered"), Map.empty)
+              }
+            }
+          )
+          val outcome = Try(
+            Await.result(
+              engine.execPOSTRich(site, "echo", bodyParams = Seq("" -> Some(JsString("x")))),
+              30.seconds
+            )
+          )
+          outcome.failed.toOption.map(_.getMessage) shouldBe Some("Empty param name.")
+          recovered.get shouldBe 0
         } finally engine.close()
       }
     }

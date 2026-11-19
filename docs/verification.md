@@ -12,8 +12,8 @@ SSE frame parsing.
 
 | Layer | Checks | Run | Current scope |
 |---|---|---|---|
-| Small-scope (bounded-exhaustive) specs | the code against a list model written from the scaladoc alone, on EVERY input of a small scope | part of `sbt test` | framing: every string up to 5 bytes x every chunking x 4 frame limits x 5 delimiters (about 130,000 cases); operators: every pipeline of up to 2 operators over small sources, with a failure injected at every user function (25,616 pipelines on each of 4 backends) |
-| Model checks ([Lincheck](https://github.com/JetBrains/lincheck)) | the real classes under the interleavings of a scenario's threads: deadlocks, hangs, lost signals | `sbt modelCheck` (about 7 minutes) | 25 scenarios x 1000 interleavings: `TransformPublisher`, `CursorPublisher`, `SubscriberCursor`, `AsyncBroadcastHub`, `ZioCursor` |
+| Small-scope (bounded-exhaustive) specs | the code against a list model written from the scaladoc alone, on EVERY input of a small scope | part of `sbt test` | framing: every string up to 5 bytes x every chunking x 4 frame limits x 5 delimiters (about 130,000 cases); operators: every pipeline of up to 2 operators over small sources, with a failure injected at every user function (25,616 pipelines on each of 4 backends); calls: every `AsyncCall` plan of up to 3 operators over 15 leaves (418,965 plans on each of 2 interpreters) |
+| Model checks ([Lincheck](https://github.com/JetBrains/lincheck)) | the real classes under the interleavings of a scenario's threads: deadlocks, hangs, lost signals | `sbt modelCheck` (about 7 minutes) | 29 scenarios x 1000 interleavings: `TransformPublisher`, `CursorPublisher`, `SubscriberCursor`, `AsyncBroadcastHub`, `ZioCursor`, a run of an `AsyncCall` |
 | TLA+ specs (TLC) | the synchronization *designs*, every interleaving of a model, deadlock freedom and termination included | `formal/tla/check.sh --fetch` (about 5 minutes) | 3 specs (`ZioCursor`, the `CursorPublisher` drain loop, two chained `TransformPublisher`s), 8 configurations of up to 4 million states, 9 mutants |
 | Lean proofs ([Lean 4](https://lean-lang.org)) | line-by-line models of the code against a spec written from the scaladoc / RFC, for EVERY input; a conformance check ties each model to the code | `formal/lean/check.sh` (about 30 seconds), then `sbt leanConformance` (about a minute) | 23 theorems: both framers, `WireFormat.encodeQueryComponent` / `url`, `MultipartParams`, `JsonStreamFrames.parseFrame`; 20,000 conformance cases per piece |
 
@@ -51,6 +51,11 @@ All four layers pass; the CI workflow runs them (the last three in a job of thei
   scope (also at depth 3, about 270,000 pipelines per backend -
   `-Dwsclient.verify.operators.depth=3`, 2 minutes); Akka differs only in the documented way (a
   failure overtakes elements a stage still holds).
+- *Calls (since 1.3.0):* the `Future` interpreter and the ZIO compiler of `AsyncCall` match the
+  model - a call is its outcome and what its hooks saw - on every plan of the scope
+  (`-Dwsclient.verify.calls.depth`, default 3): values, failures, throwing user functions,
+  `Future` and native ZIO leaves (a defect included), `sleep`, `traverse`, recovery, hooks,
+  with a throw injected at every kind of user function.
 - *Framing:* `ByteFraming.delimiter` and the engines' framer agree with each other on the whole
   scope and with the model except for two known edges, which the spec names and pins (it fails
   once they are fixed): a frame within `delimiter.length - 1` bytes of the limit fails when a
@@ -58,12 +63,16 @@ All four layers pass; the CI workflow runs them (the last three in a job of thei
   frame are dropped with the failure.
 - *Model checks:* the scenarios include the two races fixed on the way to 1.2.0 - a cancel
   racing the next element across two chained transforms (the released 1.1.5 deadlocks there),
-  and an upstream result racing `AsyncBroadcastHub.shutdown()`.
+  and an upstream result racing `AsyncBroadcastHub.shutdown()`. The four scenarios of a call's
+  run (since 1.3.0) race `cancel()`, a timeout's timer and a failing `traverse` element against
+  completions; the timer scenario found, before any release, a call that finished just as its
+  timeout fired and whose outcome was neither returned nor reported late - it now also checks
+  that the outcome of a request that was sent is never lost.
 - *TLA+:* every spec holds for its configurations; the 1.1.5 design of `TransformPublisher`,
   kept as a configuration, deadlocks as expected; each of the 9 mutants (one seeded bug per
   patch) is rejected. Details, invariants and state counts:
   [`formal/tla/README.md`](../formal/tla/README.md).
-- *Lean (since 1.2.3):* both framers compute the same function of the chunks, and against the
+- *Lean (since 1.3.0):* both framers compute the same function of the chunks, and against the
   scaladoc model they differ only at the two edges above - proved for every input, so those are
   the only differences there are. `WireFormat.encodeQueryComponent` is exactly RFC 3986's
   encoding of every text, and a strict reader takes back from `url` exactly the parameters, for
@@ -80,5 +89,7 @@ or three operators). The TLA+ specs model the synchronization, not the data, and
 code only by review and by the model checks of the same classes; the model checks sample
 interleavings and check no liveness. There is no design-level spec of `SubscriberCursor`,
 `AsyncBroadcastHub` or the Akka / Pekko stages, no model check of the fs2 bridge, and the
-engines' HTTP paths are covered by example-based and scenario tests only. The Lean proofs are
+engines' HTTP paths are covered by example-based and scenario tests only. A call's run has no
+design-level spec (its suspension hand-over and the timeout race are model-checked, not
+specified in TLA+), and its run loop no Lean model. The Lean proofs are
 about models of the code; the conformance check samples the link between model and code.

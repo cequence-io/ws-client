@@ -281,6 +281,18 @@ class PekkoHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       finally engine.close()
     }
 
+    "never put a caller-supplied line break on the wire (no header or request injection)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try io.cequence.wsclient.testkit.TestServers.lineBreakInjection(engine) shouldBe empty
+      finally engine.close()
+    }
+
+    "give the same responses, status handling and failures through its calls (AsyncCall)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try io.cequence.wsclient.testkit.TestServers.callTwins(engine) shouldBe empty
+      finally engine.close()
+    }
+
     "be discovered and work on a thread whose context class loader cannot see ws-client" in {
       io.cequence.wsclient.testkit.TestServers
         .foreignContextClassLoader(expectedEngineId) shouldBe empty

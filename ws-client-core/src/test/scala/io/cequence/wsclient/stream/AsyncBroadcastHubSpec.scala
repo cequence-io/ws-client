@@ -12,19 +12,6 @@ import scala.util.{Failure, Success, Try}
 
 class AsyncBroadcastHubSpec extends AnyWordSpec with Matchers with StreamTestSupport {
 
-  private def eventually(assertion: => Unit): Unit = {
-    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-    var done = false
-    while (!done) {
-      try {
-        assertion
-        done = true
-      } catch {
-        case _: Throwable if System.nanoTime() < deadline => Thread.sleep(10)
-      }
-    }
-  }
-
   // a source the test feeds element by element
   private final class Feed {
     private val promises = Vector.fill(1000)(Promise[Option[Int]]())

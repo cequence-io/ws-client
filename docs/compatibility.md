@@ -66,11 +66,12 @@ logback). Keep `play.shaded.ahc.org.asynchttpclient.netty.handler` at `INFO` or 
 | ws-client-core, ws-client-core-akka, ws-client-play-akka, ws-client-play-akka-stream, ws-client-jdk, json-repair | 2.12, 2.13, 3 |
 | ws-client-core-pekko, ws-client-play-pekko, ws-client-play-pekko-stream, ws-client-pekko-http | 2.13, 3 (3.3+) |
 | ws-client-fs2, ws-client-zio | 2.12, 2.13, 3 (3.3+) |
-| ws-client-sttp, ws-client-zio-http | 2.12, 2.13 |
+| ws-client-zio-http | 2.12, 2.13, 3 (3.3+, since 1.3.0) |
+| ws-client-sttp | 2.12, 2.13 |
 
 The Scala 3 artifacts of the core, Akka, `jdk` and `json-repair` modules are compiled with Scala
 3.2, so they serve Scala 3.2 and 3.3+ projects alike; the Pekko, `fs2` and `zio` modules - whose
-own dependencies need it - build theirs with Scala 3.3 LTS.
+own dependencies need it - build theirs with Scala 3.3 LTS, as does `zio-http` (since 1.3.0).
 
 ## Java versions
 

@@ -2,7 +2,7 @@ package io.cequence.wsclient.service
 
 import io.cequence.wsclient.domain._
 import io.cequence.wsclient.service.ws.FilePart
-import io.cequence.wsclient.stream.{AsyncStream, Bytes}
+import io.cequence.wsclient.stream.{AsyncCall, AsyncStream, Bytes}
 import play.api.libs.json._
 
 import java.io.File
@@ -286,6 +286,418 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
       extraHeaders,
       acceptableStatusCodes
     )
+
+  ///////////
+  // CALLS //
+  ///////////
+
+  /**
+   * Whether the call twins (`execXRichCall`, and `execXCall` on top of them) go to the
+   * ENGINE's own calls (since 1.3.0) - native on an effect-system engine (zio-http: no bridge,
+   * interrupting the call aborts the request) - instead of running this service's `execXRich`
+   * methods. False by default, so a service that overrides an `execXRich` (signing, extra
+   * headers, metrics) is never bypassed by its calls. Set it to true in a service that
+   * overrides none of them, or that overrides their twins as well.
+   */
+  protected def nativeCalls: Boolean = false
+
+  // with `nativeCalls`: the engine's call, with this service's site read per run; without:
+  // WSClient's default, spelled out - a `super` call from a trait needs a synthetic abstract
+  // accessor in every implementing class, which classes compiled against 1.2.x do not have
+
+  override def execGETRichCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    if (nativeCalls)
+      AsyncCall.defer(
+        engine.execGETRichCall(
+          site,
+          endPoint.toString,
+          endPointParam,
+          paramTuplesToStrings(params),
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+    else
+      AsyncCall.future(
+        execGETRich(
+          endPoint,
+          endPointParam,
+          params,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+
+  override def execPOSTRichCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    if (nativeCalls)
+      AsyncCall.defer(
+        engine.execPOSTRichCall(
+          site,
+          endPoint.toString,
+          endPointParam,
+          paramTuplesToStrings(params),
+          paramTuplesToStrings(bodyParams),
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+    else
+      AsyncCall.future(
+        execPOSTRich(
+          endPoint,
+          endPointParam,
+          params,
+          bodyParams,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+
+  override def execPOSTBodyRichCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    if (nativeCalls)
+      AsyncCall.defer(
+        engine.execPOSTBodyRichCall(
+          site,
+          endPoint.toString,
+          endPointParam,
+          paramTuplesToStrings(params),
+          body,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+    else
+      AsyncCall.future(
+        execPOSTBodyRich(
+          endPoint,
+          endPointParam,
+          params,
+          body,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+
+  override def execPOSTMultipartRichCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    fileParams: Seq[(PT, File, Option[String])] = Nil,
+    bodyParams: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes,
+    useInMemoryBody: Boolean = false
+  )(
+    implicit filePartToContent: FilePart => String = contentTypeByExtension
+  ): AsyncCall[RichResponse] =
+    if (nativeCalls)
+      AsyncCall.defer(
+        engine.execPOSTMultipartRichCall(
+          site,
+          endPoint.toString,
+          endPointParam,
+          paramTuplesToStrings(params),
+          param3TuplesToStrings(fileParams),
+          paramTuplesToStrings(bodyParams),
+          extraHeaders,
+          acceptableStatusCodes,
+          useInMemoryBody
+        )(filePartToContent)
+      )
+    else
+      AsyncCall.future(
+        execPOSTMultipartRich(
+          endPoint,
+          endPointParam,
+          params,
+          fileParams,
+          bodyParams,
+          extraHeaders,
+          acceptableStatusCodes,
+          useInMemoryBody
+        )(filePartToContent)
+      )
+
+  override def execPOSTURLEncodedRichCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    if (nativeCalls)
+      AsyncCall.defer(
+        engine.execPOSTURLEncodedRichCall(
+          site,
+          endPoint.toString,
+          endPointParam,
+          paramTuplesToStrings(params),
+          paramTuplesToStrings(bodyParams),
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+    else
+      AsyncCall.future(
+        execPOSTURLEncodedRich(
+          endPoint,
+          endPointParam,
+          params,
+          bodyParams,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+
+  override def execPOSTFileRichCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(PT, Option[Any])] = Nil,
+    file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    if (nativeCalls)
+      AsyncCall.defer(
+        engine.execPOSTFileRichCall(
+          site,
+          endPoint.toString,
+          endPointParam,
+          paramTuplesToStrings(urlParams),
+          file,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+    else
+      AsyncCall.future(
+        execPOSTFileRich(
+          endPoint,
+          endPointParam,
+          urlParams,
+          file,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+
+  override def execDELETERichCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    if (nativeCalls)
+      AsyncCall.defer(
+        engine.execDELETERichCall(
+          site,
+          endPoint.toString,
+          endPointParam,
+          paramTuplesToStrings(params),
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+    else
+      AsyncCall.future(
+        execDELETERich(
+          endPoint,
+          endPointParam,
+          params,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+
+  override def execPATCHRichCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    if (nativeCalls)
+      AsyncCall.defer(
+        engine.execPATCHRichCall(
+          site,
+          endPoint.toString,
+          endPointParam,
+          paramTuplesToStrings(params),
+          paramTuplesToStrings(bodyParams),
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+    else
+      AsyncCall.future(
+        execPATCHRich(
+          endPoint,
+          endPointParam,
+          params,
+          bodyParams,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+
+  override def execPUTRichCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    if (nativeCalls)
+      AsyncCall.defer(
+        engine.execPUTRichCall(
+          site,
+          endPoint.toString,
+          endPointParam,
+          paramTuplesToStrings(params),
+          paramTuplesToStrings(bodyParams),
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+    else
+      AsyncCall.future(
+        execPUTRich(
+          endPoint,
+          endPointParam,
+          params,
+          bodyParams,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+
+  override def execPUTBodyRichCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    if (nativeCalls)
+      AsyncCall.defer(
+        engine.execPUTBodyRichCall(
+          site,
+          endPoint.toString,
+          endPointParam,
+          paramTuplesToStrings(params),
+          body,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+    else
+      AsyncCall.future(
+        execPUTBodyRich(
+          endPoint,
+          endPointParam,
+          params,
+          body,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+
+  override def execPUTMultipartRichCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    fileParams: Seq[(PT, File, Option[String])] = Nil,
+    bodyParams: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes,
+    useInMemoryBody: Boolean = false
+  )(
+    implicit filePartToContent: FilePart => String = contentTypeByExtension
+  ): AsyncCall[RichResponse] =
+    if (nativeCalls)
+      AsyncCall.defer(
+        engine.execPUTMultipartRichCall(
+          site,
+          endPoint.toString,
+          endPointParam,
+          paramTuplesToStrings(params),
+          param3TuplesToStrings(fileParams),
+          paramTuplesToStrings(bodyParams),
+          extraHeaders,
+          acceptableStatusCodes,
+          useInMemoryBody
+        )(filePartToContent)
+      )
+    else
+      AsyncCall.future(
+        execPUTMultipartRich(
+          endPoint,
+          endPointParam,
+          params,
+          fileParams,
+          bodyParams,
+          extraHeaders,
+          acceptableStatusCodes,
+          useInMemoryBody
+        )(filePartToContent)
+      )
+
+  override def execPUTFileRichCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(PT, Option[Any])] = Nil,
+    file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    if (nativeCalls)
+      AsyncCall.defer(
+        engine.execPUTFileRichCall(
+          site,
+          endPoint.toString,
+          endPointParam,
+          paramTuplesToStrings(urlParams),
+          file,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
+    else
+      AsyncCall.future(
+        execPUTFileRich(
+          endPoint,
+          endPointParam,
+          urlParams,
+          file,
+          extraHeaders,
+          acceptableStatusCodes
+        )
+      )
 
   ///////////////
   // DOWNLOADS //

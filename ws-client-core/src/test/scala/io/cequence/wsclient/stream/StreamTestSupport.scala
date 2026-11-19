@@ -1,10 +1,13 @@
 package io.cequence.wsclient.stream
 
+import io.cequence.wsclient.concurrent.{AsyncCancellable, AsyncScheduler}
+
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
 import java.util.concurrent.{ConcurrentLinkedQueue, Executors, Flow, ThreadFactory}
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.util.Try
+import scala.util.control.NonFatal
 
 /** Shared helpers for the AsyncStream specs. */
 trait StreamTestSupport {
@@ -27,6 +30,20 @@ trait StreamTestSupport {
     )
 
   def onEcThread: Boolean = Thread.currentThread().getName.startsWith("stream-test-ec-")
+
+  /** Retries `assertion` until it holds - for at most 10 seconds, then its failure. */
+  def eventually(assertion: => Any): Unit = {
+    val deadline = System.nanoTime() + 10.seconds.toNanos
+    var done = false
+    while (!done)
+      try {
+        assertion
+        done = true
+      } catch {
+        case NonFatal(_) | _: AssertionError if System.nanoTime() < deadline =>
+          Thread.sleep(10)
+      }
+  }
 
   /**
    * A cold publisher over `items`, emitting on its own thread ("test-io-N" - like an HTTP
@@ -96,6 +113,39 @@ trait StreamTestSupport {
     private val count = new AtomicInteger()
     def apply(): Int = count.get()
     def inc(): Unit = count.incrementAndGet()
+  }
+}
+
+/**
+ * A timer the test fires itself, once the code under test is where the test wants it - no
+ * wall-clock race. A cancelled timer does not fire.
+ */
+final class ManualScheduler extends AsyncScheduler {
+  @volatile private var task: () => Unit = _
+  @volatile private var cancelledFlag = false
+
+  override def scheduleOnce(
+    delay: scala.concurrent.duration.FiniteDuration
+  )(
+    scheduled: () => Unit
+  ): AsyncCancellable = {
+    task = scheduled
+    new AsyncCancellable {
+      override def cancel(): Boolean = {
+        cancelledFlag = true
+        true
+      }
+      override def isCancelled: Boolean = cancelledFlag
+    }
+  }
+
+  /** Whether a timer was scheduled (and not fired yet). */
+  def pending: Boolean = task != null
+
+  def fire(): Unit = {
+    val scheduled = task
+    task = null
+    if (scheduled != null && !cancelledFlag) scheduled()
   }
 }
 

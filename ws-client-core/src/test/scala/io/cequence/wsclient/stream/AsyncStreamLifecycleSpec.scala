@@ -12,19 +12,6 @@ import scala.util.Try
 /** Termination hooks, concurrent tasks and blocking sources. */
 class AsyncStreamLifecycleSpec extends AnyWordSpec with Matchers with StreamTestSupport {
 
-  private def eventually(assertion: => Unit): Unit = {
-    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-    var done = false
-    while (!done) {
-      try {
-        assertion
-        done = true
-      } catch {
-        case _: Throwable if System.nanoTime() < deadline => Thread.sleep(10)
-      }
-    }
-  }
-
   "guaranteeCase" should {
 
     "report each termination cause exactly once" in {

@@ -130,6 +130,7 @@ Details for each: [Compatibility and upgrading](docs/compatibility.md). What cha
 |------|----------------|
 | [Engines](docs/engines.md) | The backends compared; self-discovery, config keys, typed streaming engines; ownership and `close()` |
 | [Sites and requests](docs/sites-and-requests.md) | One engine for many sites, copying an engine; query encoding, cookies, redirects, headers, proxies, error recovery, rich responses, request signing |
+| [Calls](docs/calls.md) | `AsyncCall` (since 1.3.0): a request as a lazy, backend-neutral value - run as a `Future` or natively as a ZIO effect (interruption aborts the request on `zio-http`); operators, timeouts, `traverse`, bridges |
 | [Streaming](docs/streaming.md) | The stream types at a glance; `AsyncStream` semantics, operators and interop with Akka, Pekko, fs2 and ZIO; downloads; `Source`- and `Flow.Publisher`-typed streams |
 | [Architecture](docs/architecture.md) | Layers, modules and their dependencies, the trait hierarchy, design rules, service adapters |
 | [Compatibility and upgrading](docs/compatibility.md) | Akka vs Pekko, one version for all artifacts, the 1.0.0 artifact rename, logging, Scala and Java versions |

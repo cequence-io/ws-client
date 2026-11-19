@@ -29,7 +29,13 @@ import scala.util.control.NonFatal
 object ModelChecks {
 
   private val suites: List[ModelCheckSuite] =
-    List(TransformPublisherModelCheck, BridgeModelCheck, HubModelCheck, ZioCursorModelCheck)
+    List(
+      TransformPublisherModelCheck,
+      BridgeModelCheck,
+      HubModelCheck,
+      ZioCursorModelCheck,
+      CallRunModelCheck
+    )
 
   private def knob(
     name: String,

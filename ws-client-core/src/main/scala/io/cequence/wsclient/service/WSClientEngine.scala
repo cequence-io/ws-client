@@ -3,6 +3,7 @@ package io.cequence.wsclient.service
 import io.cequence.wsclient.domain.{CequenceWSException, RichResponse, SiteBinding}
 import io.cequence.wsclient.service.spi.TransportSettings
 import io.cequence.wsclient.service.ws.{FilePart, WireFormat}
+import io.cequence.wsclient.stream.AsyncCall
 import play.api.libs.json.{JsObject, JsValue}
 
 import java.io.File
@@ -208,6 +209,280 @@ trait WSClientEngine extends WSClientBase {
     extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse]
+
+  ///////////
+  // CALLS //
+  ///////////
+
+  // The `...RichCall` twins (since 1.3.0): each `execXRich` as a lazy, backend-neutral
+  // AsyncCall - every RUN is a new request (a re-run is a new, possibly billed, request), and
+  // its response, status handling and failures are those of `execXRich`. The defaults run
+  // `execXRich` per run (a `Future` leaf: no bridge for a `Future` consumer, one for a ZIO
+  // one), so every engine has them; an engine on an effect system overrides them with its
+  // NATIVE effect (zio-http: interrupting the run aborts the request). An engine that
+  // overrides an `execXRich` - e.g. one that signs requests - keeps the default twin (which
+  // goes through the override) or overrides the twin too.
+
+  def execGETRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    AsyncCall.future(
+      execGETRich(site, endPoint, endPointParam, params, extraHeaders, acceptableStatusCodes)
+    )
+
+  def execPOSTRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    bodyParams: Seq[(String, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    AsyncCall.future(
+      execPOSTRich(
+        site,
+        endPoint,
+        endPointParam,
+        params,
+        bodyParams,
+        extraHeaders,
+        acceptableStatusCodes
+      )
+    )
+
+  def execPOSTBodyRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    AsyncCall.future(
+      execPOSTBodyRich(
+        site,
+        endPoint,
+        endPointParam,
+        params,
+        body,
+        extraHeaders,
+        acceptableStatusCodes
+      )
+    )
+
+  /**
+   * @param fileParams
+   *   the third param in a tuple is a display (header) file name
+   */
+  def execPOSTMultipartRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    fileParams: Seq[(String, File, Option[String])] = Nil,
+    bodyParams: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes,
+    useInMemoryBody: Boolean = false
+  )(
+    implicit filePartToContent: FilePart => String = contentTypeByExtension
+  ): AsyncCall[RichResponse] =
+    AsyncCall.future(
+      execPOSTMultipartRich(
+        site,
+        endPoint,
+        endPointParam,
+        params,
+        fileParams,
+        bodyParams,
+        extraHeaders,
+        acceptableStatusCodes,
+        useInMemoryBody
+      )(filePartToContent)
+    )
+
+  def execPOSTURLEncodedRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    bodyParams: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    AsyncCall.future(
+      execPOSTURLEncodedRich(
+        site,
+        endPoint,
+        endPointParam,
+        params,
+        bodyParams,
+        extraHeaders,
+        acceptableStatusCodes
+      )
+    )
+
+  def execPOSTFileRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(String, Option[Any])] = Nil,
+    file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    AsyncCall.future(
+      execPOSTFileRich(
+        site,
+        endPoint,
+        endPointParam,
+        urlParams,
+        file,
+        extraHeaders,
+        acceptableStatusCodes
+      )
+    )
+
+  def execDELETERichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    AsyncCall.future(
+      execDELETERich(
+        site,
+        endPoint,
+        endPointParam,
+        params,
+        extraHeaders,
+        acceptableStatusCodes
+      )
+    )
+
+  def execPATCHRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    bodyParams: Seq[(String, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    AsyncCall.future(
+      execPATCHRich(
+        site,
+        endPoint,
+        endPointParam,
+        params,
+        bodyParams,
+        extraHeaders,
+        acceptableStatusCodes
+      )
+    )
+
+  def execPUTRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    bodyParams: Seq[(String, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    AsyncCall.future(
+      execPUTRich(
+        site,
+        endPoint,
+        endPointParam,
+        params,
+        bodyParams,
+        extraHeaders,
+        acceptableStatusCodes
+      )
+    )
+
+  def execPUTBodyRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    AsyncCall.future(
+      execPUTBodyRich(
+        site,
+        endPoint,
+        endPointParam,
+        params,
+        body,
+        extraHeaders,
+        acceptableStatusCodes
+      )
+    )
+
+  /**
+   * @param fileParams
+   *   the third param in a tuple is a display (header) file name
+   */
+  def execPUTMultipartRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    fileParams: Seq[(String, File, Option[String])] = Nil,
+    bodyParams: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes,
+    useInMemoryBody: Boolean = false
+  )(
+    implicit filePartToContent: FilePart => String = contentTypeByExtension
+  ): AsyncCall[RichResponse] =
+    AsyncCall.future(
+      execPUTMultipartRich(
+        site,
+        endPoint,
+        endPointParam,
+        params,
+        fileParams,
+        bodyParams,
+        extraHeaders,
+        acceptableStatusCodes,
+        useInMemoryBody
+      )(filePartToContent)
+    )
+
+  def execPUTFileRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(String, Option[Any])] = Nil,
+    file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    AsyncCall.future(
+      execPUTFileRich(
+        site,
+        endPoint,
+        endPointParam,
+        urlParams,
+        file,
+        extraHeaders,
+        acceptableStatusCodes
+      )
+    )
 
   /////////////////
   // WIRE FORMAT //

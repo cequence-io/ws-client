@@ -9,10 +9,11 @@ import com.sun.net.httpserver.{
   HttpsParameters,
   HttpsServer
 }
-import io.cequence.wsclient.domain.{SiteBinding, WsRequestContext}
+import io.cequence.wsclient.domain.{RichResponse, SiteBinding, WsRequestContext}
 import io.cequence.wsclient.service.{WSClientEngine, WSClientOutputStreamCore}
 import io.cequence.wsclient.service.spi.{TransportSettings, WSClientEngineRegistry}
 import io.cequence.wsclient.service.ws.Timeouts
+import io.cequence.wsclient.stream.AsyncCall
 import play.api.libs.json.{JsValue, Json}
 
 import java.io.File
@@ -22,7 +23,7 @@ import java.security.KeyStore
 import java.util.concurrent.{Executors, ThreadFactory, TimeoutException}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import javax.net.ssl.{KeyManagerFactory, SSLContext}
-import scala.concurrent.{Await, ExecutionContext}
+import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
@@ -1206,6 +1207,13 @@ object TestServers {
       ((json \ "contentTypes").as[Seq[String]], (json \ "acceptEncodings").as[Seq[String]])
     }
 
+  /** A port nothing listens on (it was free a moment ago). */
+  def closedPort(): Int = {
+    val socket = new ServerSocket(0)
+    try socket.getLocalPort
+    finally socket.close()
+  }
+
   /**
    * What is wrong with the failures of a request to a port nothing listens on and of one to an
    * unresolvable host (since 1.2.1) - empty when both messages say what happened and the
@@ -1215,11 +1223,7 @@ object TestServers {
    * (a `ConnectException` or a wrapper of it), jdk and sttp with a `CequenceWSException`.
    */
   def connectionFailures(engine: WSClientEngine): Seq[String] = {
-    val closedPort = {
-      val socket = new ServerSocket(0)
-      try socket.getLocalPort
-      finally socket.close()
-    }
+    val closedPort = TestServers.closedPort()
 
     def problem(
       url: String,
@@ -1241,6 +1245,372 @@ object TestServers {
         classOf[io.cequence.wsclient.domain.CequenceWSUnknownHostException]
       )
     ).flatten
+  }
+
+  /**
+   * The head of the `CONNECT` request an engine sends to an HTTP proxy for an https site whose
+   * requests carry credentials (`Authorization: Bearer connect-secret-token`, `X-Api-Key:
+   * connect-secret-key`) - they are for the site, inside the tunnel: the proxy (and whoever
+   * reads the plaintext hop to it) must never see them. The proxy refuses the tunnel (502).
+   */
+  def connectRequestHead(newEngine: TransportSettings => WSClientEngine): String = {
+    val server = new ServerSocket(0)
+    val head = new AtomicReference[String]("")
+    val thread = new Thread(new Runnable {
+      override def run(): Unit =
+        try
+          while (true) {
+            val socket = server.accept()
+            try {
+              val in = new java.io.BufferedReader(
+                new java.io.InputStreamReader(socket.getInputStream, "ISO-8859-1")
+              )
+              val lines = Iterator
+                .continually(in.readLine())
+                .takeWhile(line => line != null && line.nonEmpty)
+                .toList
+              if (lines.headOption.exists(_.startsWith("CONNECT ")))
+                head.compareAndSet("", lines.mkString("\n"))
+              socket.getOutputStream.write(
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                  .getBytes("UTF-8")
+              )
+              socket.getOutputStream.flush()
+            } finally socket.close()
+          }
+        catch {
+          case _: java.io.IOException => // server closed by the scenario
+        }
+    })
+    thread.setDaemon(true)
+    thread.start()
+
+    val engine = newEngine(
+      TransportSettings(proxyURL = Some(s"127.0.0.1:${server.getLocalPort}"))
+    )
+    try {
+      val site = SiteBinding(
+        "https://localhost:1/v1",
+        WsRequestContext(authHeaders =
+          Seq(
+            "Authorization" -> "Bearer connect-secret-token",
+            "X-Api-Key" -> "connect-secret-key"
+          )
+        )
+      )
+      Try(Await.result(engine.execGETRich(site, "models"), 30.seconds))
+      head.get
+    } finally {
+      engine.close()
+      server.close()
+    }
+  }
+
+  /**
+   * What reaches the wire when a caller-supplied value carries a line break - an endpoint, an
+   * endpoint parameter (often an id from user input), a query parameter, a header value or a
+   * header name, each followed by `X-Injected: ...`: the problems, empty when no request put
+   * the injected text on a line of its own (a request may fail instead, or go out with the
+   * line break encoded). A line break that reached the wire raw would let a value add headers
+   * or a second request (request smuggling).
+   */
+  def lineBreakInjection(engine: WSClientEngine): Seq[String] = {
+    val server = new ServerSocket(0)
+    val received = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+    val thread = new Thread(new Runnable {
+      override def run(): Unit =
+        try
+          while (true) {
+            val socket = server.accept()
+            try {
+              // everything the client sends: the wait for its first bytes is long (a cold
+              // engine's first request), then a quiet moment ends the capture - an injected
+              // second request is caught too
+              socket.setSoTimeout(30000)
+              val in = socket.getInputStream
+              val bytes = new java.io.ByteArrayOutputStream()
+              val buffer = new Array[Byte](8192)
+              try {
+                var read = in.read(buffer)
+                while (read >= 0) {
+                  bytes.write(buffer, 0, read)
+                  socket.setSoTimeout(300)
+                  read = in.read(buffer)
+                }
+              } catch { case _: java.net.SocketTimeoutException => () }
+              received.add(new String(bytes.toByteArray, "ISO-8859-1"))
+              socket.getOutputStream.write(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                  .getBytes("UTF-8")
+              )
+              socket.getOutputStream.flush()
+            } finally socket.close()
+          }
+        catch {
+          case _: java.io.IOException => // server closed by the scenario
+        }
+    })
+    thread.setDaemon(true)
+    thread.start()
+
+    try {
+      val site = SiteBinding(s"http://localhost:${server.getLocalPort}")
+      def injected(tag: String) = s"x\r\nX-Injected: $tag\r\nX-Other: y"
+      val vectors: Seq[(String, () => Future[RichResponse])] = Seq(
+        "endpoint" -> (() => engine.execGETRich(site, injected("endpoint"))),
+        "endpoint-param" -> (() =>
+          engine.execGETRich(site, "items", endPointParam = Some(injected("endpoint-param")))
+        ),
+        "second-request" -> (() =>
+          engine.execGETRich(
+            site,
+            "items HTTP/1.1\r\nHost: h\r\n\r\nGET /smuggled HTTP/1.1\r\nX-Injected: second-request"
+          )
+        ),
+        "query-value" -> (() =>
+          engine.execGETRich(site, "items", params = Seq("q" -> Some(injected("query-value"))))
+        ),
+        "query-key" -> (() =>
+          engine.execGETRich(site, "items", params = Seq(injected("query-key") -> Some("v")))
+        ),
+        "header-value" -> (() =>
+          engine
+            .execGETRich(site, "items", extraHeaders = Seq("X-A" -> injected("header-value")))
+        ),
+        "header-name" -> (() =>
+          engine.execGETRich(
+            site,
+            "items",
+            extraHeaders = Seq("X-A: a\r\nX-Injected" -> "header-name")
+          )
+        ),
+        "body-less POST endpoint" -> (() =>
+          engine.execPOSTRich(site, injected("post-endpoint"))
+        )
+      )
+
+      // what the requests of `send` put on the wire, and whether a line starts with the
+      // injected header's name - a header of its own (or a smuggled request's)
+      def wireOf(send: () => Future[RichResponse]): (Try[RichResponse], String, Boolean) = {
+        received.clear()
+        // a throw out of the call counts as a refusal too
+        val outcome = Try(Await.result(send(), 30.seconds))
+        Thread.sleep(50)
+        val wire = received.toArray(Array.empty[String]).mkString("\n---\n")
+        (outcome, wire, "(?im)^x-injected\\s*:".r.findFirstIn(wire).isDefined)
+      }
+
+      // the control: a header sent on purpose must be detected, or the check sees nothing
+      val (_, controlWire, controlSeen) = wireOf(() =>
+        engine.execGETRich(site, "items", extraHeaders = Seq("X-Injected" -> "control"))
+      )
+      val control =
+        if (controlSeen) Nil
+        else
+          Seq(
+            s"control: a real X-Injected header was not detected in: ${controlWire.take(200)}"
+          )
+
+      control ++ vectors.flatMap { case (name, send) =>
+        val (outcome, wire, onOwnLine) = wireOf(send)
+        // a request that went through must have been seen: an empty capture proves nothing
+        val unseen = outcome.isSuccess && wire.trim.isEmpty
+        if (onOwnLine)
+          Some(
+            s"$name: the injected header reached the wire on its own line " +
+              s"(${outcome.fold(e => s"failed: ${e.getClass.getSimpleName}", r => s"HTTP ${r.status.code}")}): " +
+              wire.take(300).replace("\r", "\\r").replace("\n", "\\n")
+          )
+        else if (unseen)
+          Some(s"$name: the request succeeded, but the server captured nothing of it")
+        else None
+      }
+    } finally server.close()
+  }
+
+  /**
+   * The engine's calls (`execXRichCall`, since 1.3.0) against its Rich methods, method by
+   * method: the same request reaches the server (method, query, content type, body - multipart
+   * boundaries aside) and the same response, status handling or failure comes back. Building
+   * the calls sends nothing; each run sends one request. The differences - empty when the
+   * twins agree.
+   */
+  def callTwins(engine: WSClientEngine): Seq[String] = {
+    implicit val ec: ExecutionContext = ExecutionContext.global
+    val requests = new AtomicInteger()
+    val file = File.createTempFile("ws-client-call-", ".txt")
+    file.deleteOnExit()
+    Files.write(file.toPath, "file content".getBytes("UTF-8"))
+    // the failing requests of a twin go to two different hosts / ports: a pool (pekko-http's)
+    // backs off a host after a failed connect, which would delay the second request
+    val (closedPort1, closedPort2) = (closedPort(), closedPort())
+
+    withServer(
+      "/echo" -> { (exchange: HttpExchange) =>
+        requests.incrementAndGet()
+        echo(exchange)
+      },
+      "/missing" -> { (exchange: HttpExchange) =>
+        requests.incrementAndGet()
+        respond(exchange, 404, """{"error":"not here"}""")
+      }
+    ) { port =>
+      val site = SiteBinding(s"http://localhost:$port")
+      val params = Seq("q" -> Some("a b&c"))
+      val jsonParams = Seq("name" -> Some(Json.toJson("value")))
+      val formParams = Seq("field" -> Some("x y"))
+      val files = Seq(("file", file, Some("upload.txt")))
+      val body = Json.obj("k" -> "v")
+      val (refused1, refused2) =
+        (
+          SiteBinding(s"http://localhost:$closedPort1"),
+          SiteBinding(s"http://localhost:$closedPort2")
+        )
+      val (unknownHost1, unknownHost2) =
+        (
+          SiteBinding("http://unresolvable-1.invalid"),
+          SiteBinding("http://unresolvable-2.invalid")
+        )
+
+      type Twin = (String, () => Future[RichResponse], AsyncCall[RichResponse])
+      // the calls are built first, all of them: nothing may be sent before they run
+      val twins: Seq[Twin] = Seq(
+        (
+          "GET",
+          () => engine.execGETRich(site, "echo", params = params),
+          engine.execGETRichCall(site, "echo", params = params)
+        ),
+        (
+          "POST",
+          () => engine.execPOSTRich(site, "echo", params = params, bodyParams = jsonParams),
+          engine.execPOSTRichCall(site, "echo", params = params, bodyParams = jsonParams)
+        ),
+        (
+          "POST body",
+          () => engine.execPOSTBodyRich(site, "echo", body = body),
+          engine.execPOSTBodyRichCall(site, "echo", body = body)
+        ),
+        (
+          "POST multipart",
+          () =>
+            engine.execPOSTMultipartRich(
+              site,
+              "echo",
+              fileParams = files,
+              bodyParams = formParams
+            ),
+          engine.execPOSTMultipartRichCall(
+            site,
+            "echo",
+            fileParams = files,
+            bodyParams = formParams
+          )
+        ),
+        (
+          "POST URL-encoded",
+          () => engine.execPOSTURLEncodedRich(site, "echo", bodyParams = formParams),
+          engine.execPOSTURLEncodedRichCall(site, "echo", bodyParams = formParams)
+        ),
+        (
+          "POST file",
+          () => engine.execPOSTFileRich(site, "echo", file = file),
+          engine.execPOSTFileRichCall(site, "echo", file = file)
+        ),
+        (
+          "DELETE",
+          () => engine.execDELETERich(site, "echo", params = params),
+          engine.execDELETERichCall(site, "echo", params = params)
+        ),
+        (
+          "PATCH",
+          () => engine.execPATCHRich(site, "echo", bodyParams = jsonParams),
+          engine.execPATCHRichCall(site, "echo", bodyParams = jsonParams)
+        ),
+        (
+          "PUT",
+          () => engine.execPUTRich(site, "echo", bodyParams = jsonParams),
+          engine.execPUTRichCall(site, "echo", bodyParams = jsonParams)
+        ),
+        (
+          "PUT body",
+          () => engine.execPUTBodyRich(site, "echo", body = body),
+          engine.execPUTBodyRichCall(site, "echo", body = body)
+        ),
+        (
+          "PUT multipart",
+          () =>
+            engine
+              .execPUTMultipartRich(site, "echo", fileParams = files, bodyParams = formParams),
+          engine.execPUTMultipartRichCall(
+            site,
+            "echo",
+            fileParams = files,
+            bodyParams = formParams
+          )
+        ),
+        (
+          "PUT file",
+          () => engine.execPUTFileRich(site, "echo", file = file),
+          engine.execPUTFileRichCall(site, "echo", file = file)
+        ),
+        (
+          "GET 404",
+          () => engine.execGETRich(site, "missing"),
+          engine.execGETRichCall(site, "missing")
+        ),
+        (
+          "GET 404 acceptable",
+          () => engine.execGETRich(site, "missing", acceptableStatusCodes = Seq(404)),
+          engine.execGETRichCall(site, "missing", acceptableStatusCodes = Seq(404))
+        ),
+        (
+          "refused",
+          () => engine.execGETRich(refused1, "x"),
+          engine.execGETRichCall(refused2, "x")
+        ),
+        (
+          "unknown host",
+          () => engine.execGETRich(unknownHost1, "x"),
+          engine.execGETRichCall(unknownHost2, "x")
+        )
+      )
+      val sentWhileBuilding = requests.get()
+
+      val boundary = "boundary=([A-Za-z0-9'()+_,./:=?-]+)".r
+      def outcome(future: => Future[RichResponse]): String =
+        Try(Await.result(future, 30.seconds)) match {
+          case Success(rich) =>
+            val text =
+              s"${rich.status.code} ${rich.status.message} ${rich.response.map(_.string)}"
+            boundary.findAllMatchIn(text).map(_.group(1)).foldLeft(text)(_.replace(_, "B"))
+          case Failure(e) =>
+            s"${e.getClass.getName}: ${e.getMessage}"
+              .replace(closedPort1.toString, "<port>")
+              .replace(closedPort2.toString, "<port>")
+              .replace("unresolvable-1", "<host>")
+              .replace("unresolvable-2", "<host>")
+        }
+
+      val built =
+        if (sentWhileBuilding == 0) Nil
+        else Seq(s"building the calls sent $sentWhileBuilding requests")
+
+      built ++ twins.flatMap { case (name, rich, call) =>
+        val before = requests.get()
+        val expected = outcome(rich())
+        val afterRich = requests.get()
+        val actual = outcome(call.toFuture)
+        val sentByCall = requests.get() - afterRich
+        val sentByRich = afterRich - before
+        val response =
+          if (expected == actual) Nil
+          else Seq(s"$name: the call gave [$actual], the Rich method [$expected]")
+        val sent =
+          if (sentByCall == sentByRich) Nil
+          else Seq(s"$name: the call sent $sentByCall requests, the Rich method $sentByRich")
+        response ++ sent
+      }
+    }
   }
 
   /**

@@ -157,6 +157,27 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       finally engine.close()
     }
 
+    "never put a caller-supplied line break on the wire (no header or request injection)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try io.cequence.wsclient.testkit.TestServers.lineBreakInjection(engine) shouldBe empty
+      finally engine.close()
+    }
+
+    "keep the site's credentials out of the CONNECT request to a proxy" in {
+      val head = io.cequence.wsclient.testkit.TestServers.connectRequestHead(settings =>
+        WSClientEngineRegistry(settings, Some(expectedEngineId))
+      )
+      head should startWith("CONNECT ")
+      head should not include "connect-secret-token"
+      head should not include "connect-secret-key"
+    }
+
+    "give the same responses, status handling and failures through its calls (AsyncCall)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try io.cequence.wsclient.testkit.TestServers.callTwins(engine) shouldBe empty
+      finally engine.close()
+    }
+
     "be discovered and work on a thread whose context class loader cannot see ws-client" in {
       io.cequence.wsclient.testkit.TestServers
         .foreignContextClassLoader(expectedEngineId) shouldBe empty
@@ -409,11 +430,7 @@ class JdkWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     "fail a refused connection with a described ConnectException - a site's recoverErrors on it still applies" in {
       val engine =
         WSClientEngineRegistry.outputStreamed(TransportSettings(), Some(expectedEngineId))
-      val closedPort = {
-        val socket = new java.net.ServerSocket(0)
-        try socket.getLocalPort
-        finally socket.close()
-      }
+      val closedPort = io.cequence.wsclient.testkit.TestServers.closedPort()
       val site = SiteBinding(s"http://localhost:$closedPort")
 
       // buffered: still a ConnectException (as up to 1.2.0 and on the Play / pekko-http /

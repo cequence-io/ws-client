@@ -5,7 +5,7 @@ import io.cequence.wsclient.stream.ZioInterop._
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 import zio.stream.{ZPipeline, ZStream}
-import zio.{Runtime, Unsafe, ZIO}
+import zio.{Unsafe, ZIO}
 
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
@@ -14,30 +14,13 @@ import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 import scala.util.{Failure, Random, Success, Try}
 
-class ZioInteropSpec extends AnyWordSpec with Matchers {
+class ZioInteropSpec extends AnyWordSpec with Matchers with ZioTestSupport {
 
-  implicit private val runtime: Runtime[Any] = Runtime.default
   implicit private val ec: ExecutionContext = ExecutionContext.global
-
-  private def unsafeRun[T](effect: ZIO[Any, Throwable, T]): T =
-    Unsafe.unsafe { implicit unsafe =>
-      Await.result(runtime.unsafe.runToFuture(effect), 15.seconds)
-    }
 
   private def runZio[A](stream: ZStream[Any, Throwable, A]): Seq[A] = unsafeRun(
     stream.runCollect
   )
-
-  private def eventually(assertion: => Unit): Unit = {
-    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-    var done = false
-    while (!done) {
-      try {
-        assertion
-        done = true
-      } catch { case _: Throwable if System.nanoTime() < deadline => Thread.sleep(10) }
-    }
-  }
 
   "the ZIO interop" should {
 
