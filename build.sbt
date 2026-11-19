@@ -281,7 +281,7 @@ lazy val `json-repair` =
     name := "json-repair",
     libraryDependencies += "com.typesafe.play" %% "play-json" % playJsonVersion.value,
     libraryDependencies ++= jacksonLibs,
-    libraryDependencies += "org.scalactic" %% "scalactic" % "3.2.16",
+    libraryDependencies += "org.scalactic" %% "scalactic" % "3.2.16" % Test,
     libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
     libraryDependencies ++= loggingLibs.value,
     testLoggingSettings,

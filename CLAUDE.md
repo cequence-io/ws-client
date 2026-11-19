@@ -552,14 +552,66 @@ scaladoc / RFC alone, a model follows its code line by line, every model gets a 
 target that is first shown to fail on a bug planted in the Scala code, and a divergence from
 the spec is a theorem (proved the only one, or shown by a computed witness).
 
+## Dependencies and vulnerability scan (since 1.3.0)
+
+- `sbt +dependencyExport` (`project/DependencyReport.scala`) writes every PUBLISHED module's
+  resolved runtime dependencies per Scala binary version to `target/dependency-report/`;
+  `security/dependencies.py` (Python 3, standard library only) reads them, adds what jars
+  BUNDLE under their own name, renders the README section (between the `dependency-matrix`
+  markers: badges, summary, matrix) and `docs/dependencies.md`, and queries OSV.dev. Plain run
+  = the check; `--write` regenerates; `--offline` skips the scan; `--reports DIR --no-tables`
+  scans another tree's export (a release); `--badges DIR` writes the badge files. Exit codes:
+  1 an advisory that is not accepted, 2 the repository needs an update (tables, a stale
+  accepted entry, a bundling jar without a rule), 3 the scan could not run (OSV.dev, retried).
+- Bundled libraries: Play WS's shaded AsyncHttpClient + Netty are read from the jar
+  (`ahc-version.properties` / `io.netty.versions.properties`, the Netty artifacts from the
+  relocated packages), embedded `META-INF/maven` metadata too; everything else is a `BUNDLES`
+  rule per carrier VERSION in the script, taken from the carrier's build (Akka / Pekko
+  `protobufJavaVersion`, play-ws `oauth`, jackson-core's shaded fastdoubleparser; a vendored
+  source copy has version None - listed, unscannable). The check is FAIL-CLOSED: a jar with
+  classes under `shaded` / `shadow` / `relocated` / `repackaged` / `thirdparty` / `vendor` /
+  `protobufv3` and no rule fails it (that is how jackson-core and pekko-http-core were found)
+  - a dependency upgrade that brings a new carrier version needs its rule looked up. Never
+  guess a bundled version: Akka 2.6.20 shades protobuf-java 3.16.1, not what memory says.
+- OSV names: an advisory for a Scala library is filed per Scala suffix, not always for all
+  (akka-http-core 10.2.6: 2 under `_2.13`, 1 unsuffixed, 0 under `_3`) - the script queries
+  every variant (`query_names`) and follows `next_page_token`.
+- The `Vulnerability scan` workflow: daily (cron), and on pushes to main / pull requests that
+  touch the build, the script, the README or docs/dependencies.md. It scans main and - from
+  1.3.0 on, when a release carries the export task - the latest release tag (what users
+  install; against main's accepted list). Only exit code 1 opens or updates the issue
+  "Vulnerability scan: new advisories" (never in a pull request). On main it force-pushes the
+  badge files to the orphan branch `security-status` (the README badges are shields.io
+  endpoint badges reading them; they show "resource not found" until the first run on main).
+  Scheduled workflows pause after 60 days without repository activity.
+- A new advisory: upgrade the dependency first. Accept only when no usable fixed version
+  exists, with a `status` - `unreachable` (the vulnerable code is never used: say why, and
+  name the test that pins it where a test can - "the engine opens no WebSocket" has none),
+  `mitigated` (closed in ws-client's own code), `residual` (NOT
+  closed: what it takes, and the way out) - never accept on the advisory's title alone: read
+  it, check the code path, and where it could reach a client, test it (`TestServers`
+  `lineBreakInjection`, `connectRequestHead` came from that triage). An entry covers exactly
+  its artifact, versions and ids.
+- After ANY dependency change (a version, a new module, a Scala version): `sbt
+  +dependencyExport`, then `security/dependencies.py --write`, and commit README.md and
+  docs/dependencies.md with it - the workflow fails otherwise.
+- State 2026-11-19: 252 artifacts; 56 advisories accepted, all in libraries Play WS and Akka
+  bundle (52 unreachable - incl. 4 in Akka's shaded protobuf-java 3.16.1: no remoting -, 2
+  mitigated - the bounded inflater -, 2 residual: the Windows-local `os-release` DoS of Netty
+  4.1.45 / 4.1.60 on the Akka flavor for Scala 2.12 / 3). AsyncHttpClient 2.16.1 (Play WS 2.2.18 / 3.0.14) carries 4 advisories fixed only in the
+  3.x line Play WS cannot use - cookie store, WebSocket, `Realm` logins: all unused.
+
 ## Documentation layout
 
 - `README.md` is the landing page only: overview chart, the backends and stream-abstractions
-  tables, installation, quick start, the short "Good to know" list and the Documentation table.
+  tables, installation, quick start, the short "Good to know" list, the generated dependency
+  matrix with the vulnerability-scan badge (the user asked for it there, 2026-11-19 - never
+  edit it by hand) and the Documentation table.
   Its badge and dependency snippets stay at the RELEASED version until the next one is on Maven
   Central.
 - Topic pages live in `docs/` (`engines.md`, `sites-and-requests.md`, `streaming.md`,
-  `calls.md`, `architecture.md`, `compatibility.md`, `verification.md`): a new behavior or caveat goes to
+  `calls.md`, `architecture.md`, `compatibility.md`, `verification.md`, the generated
+  `dependencies.md`): a new behavior or caveat goes to
   its topic page, never back into the README. Every page opens with a title, the back link to
   the README and a lead paragraph.
 - Release notes go to the root `CHANGELOG.md` (newest first; behavior changes and upgrade notes

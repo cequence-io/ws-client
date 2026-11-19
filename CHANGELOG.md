@@ -31,8 +31,23 @@ Use one version for all ws-client artifacts on a classpath (see
   out of the call (it is not offered to the site's `recoverErrors`). The context is still
   evaluated on the calling thread there; a call (`execXRichCall`) evaluates it per run.
 
+- json-repair: `scalactic` (a test library) is no longer a dependency of the published
+  artifact - it was declared without the test scope. **Behavior change** only if you used
+  `org.scalactic` through json-repair without declaring it: add the dependency yourself.
+
 **Security**
 
+- A dependency matrix in the README and a daily vulnerability scan (`Vulnerability scan`
+  workflow, `security/dependencies.py`): every published module's dependencies for every Scala
+  version - transitive ones and the libraries other jars bundle under their own name (Play
+  WS's AsyncHttpClient and Netty, Akka's and Pekko's protobuf, ...) - against OSV.dev, for
+  `main` and, from this release on, for the latest release. A new advisory fails the scan and
+  opens an issue; the README badges show the last run. The 56 advisories known today (all in
+  libraries that Play WS and Akka bundle) are each listed with their status and reason: 52
+  not reachable through ws-client, 2 closed in ws-client's own code, 2 open (a local,
+  Windows-only denial of service in the Netty of Play WS for Akka on Scala 2.12 / 3 - use
+  Scala 2.13 or the Pekko flavor there). See
+  [Dependencies and vulnerabilities](docs/dependencies.md).
 - New scenarios on every engine: a line break in a caller-supplied endpoint, endpoint
   parameter, query parameter or header never reaches the wire (no header or request
   injection), and a site's credentials never go on the `CONNECT` request to a proxy. Both held
