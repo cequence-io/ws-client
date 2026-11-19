@@ -287,18 +287,17 @@ def matrix(report):
     if carriers:
         lines += [
             "",
-            "Bundled inside other jars (shaded or vendored - not visible as dependencies):",
+            "Bundled inside other jars (shaded or vendored - not visible as dependencies), with "
+            "the bundled version per Scala version:",
             "",
-            "| Jar | Its version: 2.12 | 2.13 | 3 | Bundles | 2.12 | 2.13 | 3 |",
-            "|---|---|---|---|---|---|---|---|",
+            "| Jar | Bundles | Scala 2.12 | Scala 2.13 | Scala 3 |",
+            "|---|---|---|---|---|",
         ]
         for carrier in carriers:
-            own = cells(versions_by_scala(report, carrier))
             for label, by_scala in sorted(bundle_rows(report, carrier).items()):
                 lines.append(
-                    "| `{}` | {} | {} | {} | {} | {} | {} | {} |".format(
+                    "| `{}` | {} | {} | {} | {} |".format(
                         carrier,
-                        *own,
                         label,
                         *cells({scala: sorted(found) for scala, found in by_scala.items()}),
                     )

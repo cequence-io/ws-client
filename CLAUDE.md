@@ -606,7 +606,8 @@ the spec is a theorem (proved the only one, or shown by a computed witness).
 - `README.md` is the landing page only: overview chart, the backends and stream-abstractions
   tables, installation, quick start, the short "Good to know" list, the generated dependency
   matrix with the vulnerability-scan badge (the user asked for it there, 2026-11-19 - never
-  edit it by hand) and the Documentation table.
+  edit it by hand; the scan badges in the top badge row and the "Scanned every day" line
+  below the feature list point to it) and the Documentation table.
   Its badge and dependency snippets stay at the RELEASED version until the next one is on Maven
   Central.
 - Topic pages live in `docs/` (`engines.md`, `sites-and-requests.md`, `streaming.md`,
