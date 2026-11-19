@@ -1,5 +1,5 @@
 # WS Client
-[![version](https://img.shields.io/badge/version-1.2.2-green.svg)](https://cequence.io) [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](https://opensource.org/licenses/MIT) [![Follow on X](https://img.shields.io/badge/X-%400xbnd-black?logo=x)](https://x.com/0xbnd)
+[![version](https://img.shields.io/badge/version-1.2.2-green.svg)](https://cequence.io) [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](https://opensource.org/licenses/MIT) [![Follow on X](https://img.shields.io/badge/X-%400xbnd-black?logo=x)](https://x.com/0xbnd) [![Vulnerability scan](https://github.com/cequence-io/ws-client/actions/workflows/vulnerability-scan.yml/badge.svg)](https://github.com/cequence-io/ws-client/actions/workflows/vulnerability-scan.yml) [![new advisories](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fcequence-io%2Fws-client%2Fsecurity-status%2Fnew-advisories.json)](docs/dependencies.md) [![last scan](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fcequence-io%2Fws-client%2Fsecurity-status%2Flast-scan.json)](docs/dependencies.md)
 
 A simple and efficient web-service client for Scala: one API to send requests to RESTful services, handle responses and manage errors - on the HTTP backend of your choice.
 
@@ -9,6 +9,8 @@ A simple and efficient web-service client for Scala: one API to send requests to
 - **Same behavior on every engine** - encoding, multipart, timeouts, typed failures, no redirects, no cookie jar.
 
 **🔥 New in 1.2**: `AsyncStream` - one backend-neutral stream type for every engine, with native interop for Akka, Pekko, fs2 and ZIO (an engine's own `Source` comes back as itself, no bridge), binary-safe downloads on every streaming engine, a neutral `AsyncScheduler`, and Scala 3 artifacts for the Pekko modules. See [Streaming](docs/streaming.md) and the [changelog](CHANGELOG.md).
+
+**🔐 Scanned every day**: all dependencies - including the libraries that other jars bundle under their own name, which ordinary scanners do not see - are checked daily against [OSV.dev](https://osv.dev) for known vulnerabilities, for `main` and (from 1.3.0 on) for the latest release. The result is public: see the badges above and [Security](#security-dependencies-and-vulnerability-scan-), with every accepted advisory and its reason in [Dependencies and vulnerabilities](docs/dependencies.md).
 
 As a part of this suite we also provide the [json-repair](./json-repair/README.md) library that can be used to fix common JSON syntax errors, repair malformed JSON objects and arrays.
 
@@ -172,23 +174,23 @@ Open:
 
 Bundled inside other jars (shaded or vendored - not visible as dependencies):
 
-| Jar | Its version: 2.12 | 2.13 | 3 | Bundles | 2.12 | 2.13 | 3 |
-|---|---|---|---|---|---|---|---|
-| `com.fasterxml.jackson.core:jackson-core` | 2.22.3 | 2.22.3 | 2.22.3 | `ch.randelshofer:fastdoubleparser` | 2.0.1 | 2.0.1 | 2.0.1 |
-| `com.typesafe.akka:akka-http-core` | 10.5.3 | 10.5.3 | 10.5.3 | `com.twitter:hpack` | source copy | source copy | source copy |
-| `com.typesafe.akka:akka-protobuf-v3` | 2.6.20 | 2.6.21 | 2.6.20 | `com.google.protobuf:protobuf-java` | 3.16.1 | 3.16.1 | 3.16.1 |
-| `com.typesafe.play:shaded-asynchttpclient` | 2.1.11 | 2.2.18 | 2.2.0-M2 | Netty | 4.1.45.Final | 4.1.138.Final | 4.1.60.Final |
-| `com.typesafe.play:shaded-asynchttpclient` | 2.1.11 | 2.2.18 | 2.2.0-M2 | `org.asynchttpclient:async-http-client` | 2.10.5 | 2.16.1 | 2.12.3 |
-| `com.typesafe.play:shaded-oauth` | 2.1.11 | 2.2.18 | 2.2.0-M2 | `commons-codec:commons-codec` | 1.3 | - | - |
-| `com.typesafe.play:shaded-oauth` | 2.1.11 | 2.2.18 | 2.2.0-M2 | `oauth.signpost:signpost-core` | 1.2.1.2 | 2.1.1 | 2.1.1 |
-| `dev.zio:izumi-reflect-thirdparty-boopickle-shaded` | 3.0.9 | 3.0.9 | 3.0.9 | `io.suzaku:boopickle` | source copy | source copy | source copy |
-| `io.netty:netty-common` | 4.2.18.Final | 4.2.18.Final | 4.2.18.Final | `org.jctools:jctools-core-jdk11` | 4.0.7 | 4.0.7 | 4.0.7 |
-| `io.netty:netty-common` | 4.2.18.Final | 4.2.18.Final | 4.2.18.Final | `org.jctools:jctools-core` | 4.0.7 | 4.0.7 | 4.0.7 |
-| `org.apache.pekko:pekko-http-core` | - | 1.3.0 | 1.3.0 | `com.twitter:hpack` | - | source copy | source copy |
-| `org.apache.pekko:pekko-protobuf-v3` | - | 1.6.0 | 1.6.0 | `com.google.protobuf:protobuf-java` | - | 4.33.5 | 4.33.5 |
-| `org.playframework:shaded-asynchttpclient` | - | 3.0.14 | 3.0.14 | Netty | - | 4.1.138.Final | 4.1.138.Final |
-| `org.playframework:shaded-asynchttpclient` | - | 3.0.14 | 3.0.14 | `org.asynchttpclient:async-http-client` | - | 2.16.1 | 2.16.1 |
-| `org.playframework:shaded-oauth` | - | 3.0.14 | 3.0.14 | `oauth.signpost:signpost-core` | - | 2.1.1 | 2.1.1 |
+| Jar | Bundles | Bundled version |
+|---|---|---|
+| `com.fasterxml.jackson.core:jackson-core` | `ch.randelshofer:fastdoubleparser` | 2.0.1 |
+| `com.typesafe.akka:akka-http-core` | `com.twitter:hpack` | source copy |
+| `com.typesafe.akka:akka-protobuf-v3` | `com.google.protobuf:protobuf-java` | 3.16.1 |
+| `com.typesafe.play:shaded-asynchttpclient` | Netty | 4.1.45.Final (Scala 2.12), 4.1.138.Final (Scala 2.13), 4.1.60.Final (Scala 3) |
+| `com.typesafe.play:shaded-asynchttpclient` | `org.asynchttpclient:async-http-client` | 2.10.5 (Scala 2.12), 2.16.1 (Scala 2.13), 2.12.3 (Scala 3) |
+| `com.typesafe.play:shaded-oauth` | `commons-codec:commons-codec` | 1.3 |
+| `com.typesafe.play:shaded-oauth` | `oauth.signpost:signpost-core` | 1.2.1.2 (Scala 2.12), 2.1.1 (Scala 2.13, 3) |
+| `dev.zio:izumi-reflect-thirdparty-boopickle-shaded` | `io.suzaku:boopickle` | source copy |
+| `io.netty:netty-common` | `org.jctools:jctools-core-jdk11` | 4.0.7 |
+| `io.netty:netty-common` | `org.jctools:jctools-core` | 4.0.7 |
+| `org.apache.pekko:pekko-http-core` | `com.twitter:hpack` | source copy |
+| `org.apache.pekko:pekko-protobuf-v3` | `com.google.protobuf:protobuf-java` | 4.33.5 |
+| `org.playframework:shaded-asynchttpclient` | Netty | 4.1.138.Final |
+| `org.playframework:shaded-asynchttpclient` | `org.asynchttpclient:async-http-client` | 2.16.1 |
+| `org.playframework:shaded-oauth` | `oauth.signpost:signpost-core` | 2.1.1 |
 <!-- dependency-matrix:end -->
 
 ## Documentation 📚

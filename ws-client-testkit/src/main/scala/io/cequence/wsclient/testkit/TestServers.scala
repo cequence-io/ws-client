@@ -1431,9 +1431,9 @@ object TestServers {
   /**
    * The engine's calls (`execXRichCall`, since 1.3.0) against its Rich methods, method by
    * method: the same request reaches the server (method, query, content type, body - multipart
-   * boundaries aside) and the same response, status handling or failure comes back. Building
-   * the calls sends nothing; each run sends one request. The differences - empty when the
-   * twins agree.
+   * boundaries aside) and the same response, status handling or kind of failure comes back.
+   * Building the calls sends nothing; each run sends one request. The differences - empty when
+   * the twins agree.
    */
   def callTwins(engine: WSClientEngine): Seq[String] = {
     implicit val ec: ExecutionContext = ExecutionContext.global
@@ -1583,12 +1583,10 @@ object TestServers {
             val text =
               s"${rich.status.code} ${rich.status.message} ${rich.response.map(_.string)}"
             boundary.findAllMatchIn(text).map(_.group(1)).foldLeft(text)(_.replace(_, "B"))
-          case Failure(e) =>
-            s"${e.getClass.getName}: ${e.getMessage}"
-              .replace(closedPort1.toString, "<port>")
-              .replace(closedPort2.toString, "<port>")
-              .replace("unresolvable-1", "<host>")
-              .replace("unresolvable-2", "<host>")
+          // a failure's class only: its message quotes the resolver's / the OS's own words,
+          // which differ from one lookup to the next ("<host>: Name or service not known" /
+          // "<host>")
+          case Failure(e) => e.getClass.getName
         }
 
       val built =

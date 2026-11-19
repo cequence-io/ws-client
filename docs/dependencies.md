@@ -83,23 +83,23 @@ Advisories that match a dependency's version and are accepted (`security/accepte
 
 Bundled inside other jars (shaded or vendored - not visible as dependencies):
 
-| Jar | Its version: 2.12 | 2.13 | 3 | Bundles | 2.12 | 2.13 | 3 |
-|---|---|---|---|---|---|---|---|
-| `com.fasterxml.jackson.core:jackson-core` | 2.22.3 | 2.22.3 | 2.22.3 | `ch.randelshofer:fastdoubleparser` | 2.0.1 | 2.0.1 | 2.0.1 |
-| `com.typesafe.akka:akka-http-core` | 10.5.3 | 10.5.3 | 10.5.3 | `com.twitter:hpack` | source copy | source copy | source copy |
-| `com.typesafe.akka:akka-protobuf-v3` | 2.6.20 | 2.6.21 | 2.6.20 | `com.google.protobuf:protobuf-java` | 3.16.1 | 3.16.1 | 3.16.1 |
-| `com.typesafe.play:shaded-asynchttpclient` | 2.1.11 | 2.2.18 | 2.2.0-M2 | Netty | 4.1.45.Final | 4.1.138.Final | 4.1.60.Final |
-| `com.typesafe.play:shaded-asynchttpclient` | 2.1.11 | 2.2.18 | 2.2.0-M2 | `org.asynchttpclient:async-http-client` | 2.10.5 | 2.16.1 | 2.12.3 |
-| `com.typesafe.play:shaded-oauth` | 2.1.11 | 2.2.18 | 2.2.0-M2 | `commons-codec:commons-codec` | 1.3 | - | - |
-| `com.typesafe.play:shaded-oauth` | 2.1.11 | 2.2.18 | 2.2.0-M2 | `oauth.signpost:signpost-core` | 1.2.1.2 | 2.1.1 | 2.1.1 |
-| `dev.zio:izumi-reflect-thirdparty-boopickle-shaded` | 3.0.9 | 3.0.9 | 3.0.9 | `io.suzaku:boopickle` | source copy | source copy | source copy |
-| `io.netty:netty-common` | 4.2.18.Final | 4.2.18.Final | 4.2.18.Final | `org.jctools:jctools-core-jdk11` | 4.0.7 | 4.0.7 | 4.0.7 |
-| `io.netty:netty-common` | 4.2.18.Final | 4.2.18.Final | 4.2.18.Final | `org.jctools:jctools-core` | 4.0.7 | 4.0.7 | 4.0.7 |
-| `org.apache.pekko:pekko-http-core` | - | 1.3.0 | 1.3.0 | `com.twitter:hpack` | - | source copy | source copy |
-| `org.apache.pekko:pekko-protobuf-v3` | - | 1.6.0 | 1.6.0 | `com.google.protobuf:protobuf-java` | - | 4.33.5 | 4.33.5 |
-| `org.playframework:shaded-asynchttpclient` | - | 3.0.14 | 3.0.14 | Netty | - | 4.1.138.Final | 4.1.138.Final |
-| `org.playframework:shaded-asynchttpclient` | - | 3.0.14 | 3.0.14 | `org.asynchttpclient:async-http-client` | - | 2.16.1 | 2.16.1 |
-| `org.playframework:shaded-oauth` | - | 3.0.14 | 3.0.14 | `oauth.signpost:signpost-core` | - | 2.1.1 | 2.1.1 |
+| Jar | Bundles | Bundled version |
+|---|---|---|
+| `com.fasterxml.jackson.core:jackson-core` | `ch.randelshofer:fastdoubleparser` | 2.0.1 |
+| `com.typesafe.akka:akka-http-core` | `com.twitter:hpack` | source copy |
+| `com.typesafe.akka:akka-protobuf-v3` | `com.google.protobuf:protobuf-java` | 3.16.1 |
+| `com.typesafe.play:shaded-asynchttpclient` | Netty | 4.1.45.Final (Scala 2.12), 4.1.138.Final (Scala 2.13), 4.1.60.Final (Scala 3) |
+| `com.typesafe.play:shaded-asynchttpclient` | `org.asynchttpclient:async-http-client` | 2.10.5 (Scala 2.12), 2.16.1 (Scala 2.13), 2.12.3 (Scala 3) |
+| `com.typesafe.play:shaded-oauth` | `commons-codec:commons-codec` | 1.3 |
+| `com.typesafe.play:shaded-oauth` | `oauth.signpost:signpost-core` | 1.2.1.2 (Scala 2.12), 2.1.1 (Scala 2.13, 3) |
+| `dev.zio:izumi-reflect-thirdparty-boopickle-shaded` | `io.suzaku:boopickle` | source copy |
+| `io.netty:netty-common` | `org.jctools:jctools-core-jdk11` | 4.0.7 |
+| `io.netty:netty-common` | `org.jctools:jctools-core` | 4.0.7 |
+| `org.apache.pekko:pekko-http-core` | `com.twitter:hpack` | source copy |
+| `org.apache.pekko:pekko-protobuf-v3` | `com.google.protobuf:protobuf-java` | 4.33.5 |
+| `org.playframework:shaded-asynchttpclient` | Netty | 4.1.138.Final |
+| `org.playframework:shaded-asynchttpclient` | `org.asynchttpclient:async-http-client` | 2.16.1 |
+| `org.playframework:shaded-oauth` | `oauth.signpost:signpost-core` | 2.1.1 |
 
 ## Per module
 
