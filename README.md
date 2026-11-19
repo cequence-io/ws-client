@@ -172,25 +172,25 @@ Open:
 | `org.scala-lang:scala-library` | 2.12.18 | 2.13.18 | 2.13.10 / 2.13.18 | every module |
 | `org.scala-lang:scala3-library` | - | - | 3.2.2 / 3.3.8 | every module |
 
-Bundled inside other jars (shaded or vendored - not visible as dependencies), with the bundled version per Scala version:
+Bundled inside other jars (shaded or vendored - not visible as dependencies):
 
-| Jar | Bundles | Scala 2.12 | Scala 2.13 | Scala 3 |
-|---|---|---|---|---|
-| `com.fasterxml.jackson.core:jackson-core` | `ch.randelshofer:fastdoubleparser` | 2.0.1 | 2.0.1 | 2.0.1 |
-| `com.typesafe.akka:akka-http-core` | `com.twitter:hpack` | source copy | source copy | source copy |
-| `com.typesafe.akka:akka-protobuf-v3` | `com.google.protobuf:protobuf-java` | 3.16.1 | 3.16.1 | 3.16.1 |
-| `com.typesafe.play:shaded-asynchttpclient` | Netty | 4.1.45.Final | 4.1.138.Final | 4.1.60.Final |
-| `com.typesafe.play:shaded-asynchttpclient` | `org.asynchttpclient:async-http-client` | 2.10.5 | 2.16.1 | 2.12.3 |
-| `com.typesafe.play:shaded-oauth` | `commons-codec:commons-codec` | 1.3 | - | - |
-| `com.typesafe.play:shaded-oauth` | `oauth.signpost:signpost-core` | 1.2.1.2 | 2.1.1 | 2.1.1 |
-| `dev.zio:izumi-reflect-thirdparty-boopickle-shaded` | `io.suzaku:boopickle` | source copy | source copy | source copy |
-| `io.netty:netty-common` | `org.jctools:jctools-core-jdk11` | 4.0.7 | 4.0.7 | 4.0.7 |
-| `io.netty:netty-common` | `org.jctools:jctools-core` | 4.0.7 | 4.0.7 | 4.0.7 |
-| `org.apache.pekko:pekko-http-core` | `com.twitter:hpack` | - | source copy | source copy |
-| `org.apache.pekko:pekko-protobuf-v3` | `com.google.protobuf:protobuf-java` | - | 4.33.5 | 4.33.5 |
-| `org.playframework:shaded-asynchttpclient` | Netty | - | 4.1.138.Final | 4.1.138.Final |
-| `org.playframework:shaded-asynchttpclient` | `org.asynchttpclient:async-http-client` | - | 2.16.1 | 2.16.1 |
-| `org.playframework:shaded-oauth` | `oauth.signpost:signpost-core` | - | 2.1.1 | 2.1.1 |
+| Jar | Bundles | Bundled version |
+|---|---|---|
+| `com.fasterxml.jackson.core:jackson-core` | `ch.randelshofer:fastdoubleparser` | 2.0.1 |
+| `com.typesafe.akka:akka-http-core` | `com.twitter:hpack` | source copy |
+| `com.typesafe.akka:akka-protobuf-v3` | `com.google.protobuf:protobuf-java` | 3.16.1 |
+| `com.typesafe.play:shaded-asynchttpclient` | Netty | 4.1.45.Final (Scala 2.12), 4.1.138.Final (Scala 2.13), 4.1.60.Final (Scala 3) |
+| `com.typesafe.play:shaded-asynchttpclient` | `org.asynchttpclient:async-http-client` | 2.10.5 (Scala 2.12), 2.16.1 (Scala 2.13), 2.12.3 (Scala 3) |
+| `com.typesafe.play:shaded-oauth` | `commons-codec:commons-codec` | 1.3 |
+| `com.typesafe.play:shaded-oauth` | `oauth.signpost:signpost-core` | 1.2.1.2 (Scala 2.12), 2.1.1 (Scala 2.13, 3) |
+| `dev.zio:izumi-reflect-thirdparty-boopickle-shaded` | `io.suzaku:boopickle` | source copy |
+| `io.netty:netty-common` | `org.jctools:jctools-core-jdk11` | 4.0.7 |
+| `io.netty:netty-common` | `org.jctools:jctools-core` | 4.0.7 |
+| `org.apache.pekko:pekko-http-core` | `com.twitter:hpack` | source copy |
+| `org.apache.pekko:pekko-protobuf-v3` | `com.google.protobuf:protobuf-java` | 4.33.5 |
+| `org.playframework:shaded-asynchttpclient` | Netty | 4.1.138.Final |
+| `org.playframework:shaded-asynchttpclient` | `org.asynchttpclient:async-http-client` | 2.16.1 |
+| `org.playframework:shaded-oauth` | `oauth.signpost:signpost-core` | 2.1.1 |
 <!-- dependency-matrix:end -->
 
 ## Documentation 📚

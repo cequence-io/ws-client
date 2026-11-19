@@ -247,6 +247,18 @@ def short(module):
     return module[len("ws-client-"):] if module.startswith("ws-client-") else module
 
 
+def per_scala(by_scala):
+    """One cell for a version per Scala version: the version alone where they all agree."""
+    versions = {scala: " / ".join(sorted(found)) for scala, found in by_scala.items()}
+    if len(set(versions.values())) == 1:
+        return next(iter(versions.values()))
+    grouped = {}
+    for scala in SCALA_VERSIONS:
+        if scala in versions:
+            grouped.setdefault(versions[scala], []).append(scala)
+    return ", ".join(f"{version} (Scala {', '.join(scalas)})" for version, scalas in grouped.items())
+
+
 def bundle_rows(report, carrier):
     """label -> {scala: versions} of what `carrier` bundles; Netty's artifacts share one row."""
     rows = {}
@@ -287,21 +299,14 @@ def matrix(report):
     if carriers:
         lines += [
             "",
-            "Bundled inside other jars (shaded or vendored - not visible as dependencies), with "
-            "the bundled version per Scala version:",
+            "Bundled inside other jars (shaded or vendored - not visible as dependencies):",
             "",
-            "| Jar | Bundles | Scala 2.12 | Scala 2.13 | Scala 3 |",
-            "|---|---|---|---|---|",
+            "| Jar | Bundles | Bundled version |",
+            "|---|---|---|",
         ]
         for carrier in carriers:
             for label, by_scala in sorted(bundle_rows(report, carrier).items()):
-                lines.append(
-                    "| `{}` | {} | {} | {} | {} |".format(
-                        carrier,
-                        label,
-                        *cells({scala: sorted(found) for scala, found in by_scala.items()}),
-                    )
-                )
+                lines.append(f"| `{carrier}` | {label} | {per_scala(by_scala)} |")
     return lines
 
 
