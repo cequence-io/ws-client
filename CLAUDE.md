@@ -63,7 +63,9 @@ testkit and verification modules):
    - Provides service adapters (logging, retries, round-robin)
    - The backend-neutral stream layer (since 1.2.0, package `io.cequence.wsclient.stream`):
      `AsyncStream`, `AsyncPipe`, `Bytes`, `AsyncBroadcastHub`, `ByteFraming`, `JsonStreamPipes`,
-     `StreamDiagnostics`; internals in `stream/impl` (the AST `Nodes`, the `StreamCompiler`
+     `StreamDiagnostics`; the single-value call type `AsyncCall` (since 1.3.0: `NativeCall`,
+     `CallRun`, `CallDiagnostics`; AST + visitor in `stream/impl/CallNodes`, the `Future`
+     interpreter `CallRunner`); internals in `stream/impl` (the AST `Nodes`, the `StreamCompiler`
      visitor, the neutral pull interpreter `NeutralCompiler` / `NeutralRunner`, the RS bridges
      `CursorPublisher` / `SubscriberCursor`); timers in `io.cequence.wsclient.concurrent`
      (`AsyncScheduler` - default in implicit scope - and `Futures`). The service base
@@ -170,8 +172,11 @@ testkit and verification modules):
      Scala 2.13 / 3.3). Supports input streaming (`execPOSTSource`) and native output (SSE) streaming.
      No Play WS / shaded AHC.
    - `ws-client-zio-http`: engine on the zio-http (Netty) client + ZIO runtime (depends on
-     ws-client-core and, since 1.2.0, ws-client-zio; Scala 2.12/2.13 - zio-http's Scala 3
-     artifacts need 3.3+). Output (SSE) streaming via `WSClientOutputStreamCore` (publisher path:
+     ws-client-core and, since 1.2.0, ws-client-zio; Scala 2.12/2.13 and, since 1.3.0, 3.3 -
+     zio-http's Scala 3 artifacts need 3.3+). Its calls (`execXRichCall`, since 1.3.0) are
+     native ZIO leaves (`ZioInterop.engineCall`) over ONE request effect (`request`) that its
+     `Future` methods run too - everything per run (request context, body), the request timeout
+     and the site's `recoverErrors` inside the effect. Output (SSE) streaming via `WSClientOutputStreamCore` (publisher path:
      ZStream bridged with zio-interop-reactivestreams + `FlowAdapters`, then the jdk engine's
      framing pipeline; `execJsonAsyncStream` / `execRawAsyncStream` are native ZIO leaves over the
      same body stream - `bodyChunks`); the stream status is checked before
@@ -217,7 +222,8 @@ testkit and verification modules):
 8. **ws-client-testkit** - test-only fixtures (never published): embedded echo / SSE / proxy-stub
    / protocol-restricted TLS servers and a tunnelling CONNECT proxy (`TestServers`), the shared
    engine scenarios (`cookieIsolation`, `multipartInjection`, `queryEncoding`,
-   `proxyConnectReply`, `connectTunnel`, `stalledBody`, `asyncStreamContract`), and a generic
+   `proxyConnectReply`, `connectTunnel`, `connectRequestHead`, `lineBreakInjection`,
+   `stalledBody`, `asyncStreamContract`, `callTwins`), and a generic
    `LatchedSubscriber` for `Flow` publishers; engine modules depend on it `% Test`. Core's test
    classpath is NOT shared via `test->test` - its dummy engine providers would leak into every
    engine's discovery tests.
@@ -226,11 +232,13 @@ testkit and verification modules):
    3.3): `Fs2Compiler` / `Fs2Interop` / `Fs2Conversions` (fs2 3.12, cats-effect 3.6; `Fs2Runner`
    for the fallback) and `ZioCompiler` / `ZioInterop` / `ZioConversions` (zio-streams 2.1.26 -
    the zio-http engine's ZIO; hand-written pull bridges over the neutral cursors, no
-   zio-interop-reactivestreams)
+   zio-interop-reactivestreams). ws-client-zio also compiles `AsyncCall` (since 1.3.0):
+   `ZioCallCompiler` (`call.toZIO`), the native leaf `ZioCall` (`task.toAsyncCall`)
 
 10. **ws-client-verification** - verification of the stream layer beyond the per-module specs
     (never published; Scala 2.13 only - the one version on which the neutral interpreter and the
-    Akka, fs2 and ZIO compilers meet). See "Verification" under Testing.
+    Akka, fs2 and ZIO compilers meet; the jdk and zio-http engines are test dependencies, for
+    `CallBridgesSpec`). See "Verification" under Testing.
 
 ### Key Architectural Patterns
 
@@ -368,14 +376,15 @@ Scala 3 requires manual cross-version suffix handling (e.g., `akka-stream_2.13` 
 
 Cross-building is per-project: the Pekko modules (and `ws-client-pekko-http`) declare
 `crossScalaVersions := pekkoScalaVersions` (2.13 and 3.3), fs2 / zio 2.12 / 2.13 / 3.3,
-`ws-client-sttp` and `ws-client-zio-http` 2.12 / 2.13; the rest build for 2.12 / 2.13 / 3.2.
+`ws-client-zio-http` 2.12 / 2.13 / 3.3 (since 1.3.0), `ws-client-sttp` 2.12 / 2.13; the rest
+build for 2.12 / 2.13 / 3.2.
 Version-dependent dependency settings must be `Def.setting`s reading the project-level
 `scalaVersion` (NOT `inThisBuild` settingKeys) - with heterogeneous crossScalaVersions, `+` switches
 Scala per project and an `inThisBuild` lookup sees the stale default version.
 
 Two Scala 3 lines (since 1.2.0): the `_3` artifacts of core, core-akka, json-repair, jdk and
 play-akka(-stream) are compiled with 3.2.2 (TASTy 28.2 - they serve 3.2 and 3.3+ users); the
-Pekko modules, fs2 and zio with 3.3.8 (`scala33`). An sbt project dependency needs one Scala line
+Pekko modules, fs2, zio and (since 1.3.0) zio-http with 3.3.8 (`scala33`). An sbt project dependency needs one Scala line
 on both sides, so core and the testkit ALSO build with 3.3.8 - in-build only
 (`publishedExceptOnScala33`: never published, or `ws-client-core_3` would be published twice).
 A plain `+publishSigned` does the right thing. Guards (`project/ReleaseChecks.scala`):
@@ -400,7 +409,8 @@ built on JDK 17 and shipped core's one Java class (`StackWalkerUtil`, Java 9+ AP
 - Note: `sbt ws-client-play-akka/test` also runs core and json-repair tests (aggregation)
 - Test logging: logback is a `% Test` dependency of every module with tests (`testLoggingSettings`
   in build.sbt), configured by the shared `test-resources/logback-test.xml`
-- CI: `.github/workflows/ci.yml` runs `sbt scalafmtCheckAll scalafmtSbtCheck`, `sbt +test`,
+- CI: `.github/workflows/ci.yml` runs `sbt +scalafmtCheckAll scalafmtSbtCheck` (with `+` since
+  1.3.0: a `scala-3` source directory is checked only under Scala 3), `sbt +test`,
   `sbt +mimaReportBinaryIssues` (against 1.2.2, see `project/ReleaseChecks.scala`) and
   `sbt +tastyCheck +classVersionCheck`. CI runs on Java 17 only: nothing but
   `classVersionCheck` catches a class Java 11 cannot load
@@ -419,13 +429,18 @@ Four layers beyond the example-based and random specs:
   `OperatorSmallScopeSpec` (ws-client-verification: every operator pipeline up to a depth, with
   failures injected at every user function, on the neutral interpreter and the Akka, fs2 and ZIO
   compilers; neutral / fs2 / ZIO must match the model exactly, Akka may only differ by
-  `FailedFast`). Scopes: `-Dwsclient.verify.framing.maxLength` (default 5; audited at 6) and
+  `FailedFast`) and `CallSmallScopeSpec` (ws-client-verification, since 1.3.0: every
+  `AsyncCall` plan up to a depth over 15 leaves and 30 operators - a throw injected at every
+  kind of user function - on the `Future` interpreter and the ZIO compiler; the model is the
+  outcome plus what the hooks saw, no sanctioned difference; `-Dwsclient.verify.calls.depth`,
+  default 3 - 418,965 plans per interpreter, 20 s). Scopes: `-Dwsclient.verify.framing.maxLength` (default 5; audited at 6) and
   `-Dwsclient.verify.operators.depth` (default 2; audited at 3, about 2 minutes). build.sbt's
   `verifyKnobs` forwards every `-Dwsclient.verify.*` into the forked JVMs.
 - **Lincheck model checks** - `sbt modelCheck` (a forked main in ws-client-verification, NOT part
   of `test`; about 7 minutes at the default 1000 interleavings per scenario,
   `-Dwsclient.verify.modelcheck.invocations` / `.only` / `.traceLines`): the real classes -
-  `TransformPublisher`, `CursorPublisher`, `SubscriberCursor`, `AsyncBroadcastHub`, `ZioCursor` -
+  `TransformPublisher`, `CursorPublisher`, `SubscriberCursor`, `AsyncBroadcastHub`, `ZioCursor`,
+  `CallFiber` (a run of an `AsyncCall`, since 1.3.0) -
   under the interleavings of each scenario's threads. A scenario builds everything inside its
   body (`ThreadPerTask` as the ec, so tasks are interleaved too) and checks with `ensure`; a
   failure prints the interleaving and writes it whole to
@@ -442,7 +457,7 @@ Four layers beyond the example-based and random specs:
   `TransformPublisher`s, each label one atomic step of the implementation. A change to one of
   those classes' synchronization changes its spec first; a new invariant gets a mutant that
   violates it. See `formal/tla/README.md`.
-- **Lean proofs** (since 1.2.3) - `formal/lean` (Lean 4.24.0, no dependencies; `check.sh` builds
+- **Lean proofs** (since 1.3.0) - `formal/lean` (Lean 4.24.0, no dependencies; `check.sh` builds
   every proof and fails on `sorry` or a non-standard axiom - `Axioms.lean` lists the headline
   theorems): line-by-line MODELS of four pure parts - both delimiter framers,
   `WireFormat.encodeQueryComponent` / `url` (`URLEncoder` modelled from its javadoc),
@@ -465,7 +480,9 @@ generous timeouts (the fs2 100,000-element concat run: 1 s locally, over 15 s on
 Last full run (20 cores, JDK 17), everything passes: small-scope specs at the default scopes
 (framing about 130,000 cases, 5 s; operators 25,616 pipelines per backend, 20 s) and at the
 audit scopes (framing length 6: about 590,000 cases; operators depth 3: 268,976 pipelines per
-backend, 2 minutes - manual, not in CI); Lincheck 25 scenarios x 1000 interleavings, 398 s;
+backend, 2 minutes - manual, not in CI); calls 418,965 plans per interpreter (20 s);
+Lincheck 29 scenarios x 1000 interleavings (the 25 of 1.2.x: 398 s; the 4 of a call's run: 35
+s);
 TLC 8 configurations + 9 mutants, about 5 minutes (state counts in `formal/tla/README.md`);
 Lean (2026-11-17): 23 headline theorems, standard axioms only, build from scratch 30 s; the
 conformance check 4 x 20,000 cases, about 45 s.
@@ -481,6 +498,7 @@ Coverage per subject (`-` = nothing):
 | `SubscriberCursor` | - | 2 x sync / async cursor, + the one above | - | - |
 | `AsyncBroadcastHub` | - | 5 | - | - |
 | `ZioCursor` | - | 2 (loop bound 100,000) | `ZioCursor`: 1 config, 2 mutants | - |
+| `AsyncCall` (`CallFiber`, `ZioCallCompiler`) | `CallSmallScopeSpec` (15 leaves, 30 operators, 2 interpreters) | 4 (cancel / timer / traverse failure vs completion) | - | - |
 | `WireFormat.encodeQueryComponent` / `url` | - | - | - | = RFC 3986 for every text; a strict reader takes back the params (base without `#`) |
 | `MultipartParams` | - | - | - | = WHATWG encoding; a value never leaves its parameter; backslash vs RFC 9110 shown |
 | `JsonStreamFrames.parseFrame` | - | - | - | = the line rules (fast path, joined-content search) for field prefixes without CR / LF / leading `:` |
@@ -505,15 +523,20 @@ What a pass does NOT say (the known gaps, most valuable first):
    outside the text models. A multipart name with a backslash goes out as it is (as browsers
    send it), which an RFC 9110 quoted-string reader takes as an escape (proved witnesses in
    `Multipart/Proofs.lean`) - a behavior decision, left open.
-5. Not modelled or model-checked: the fs2 pull bridge (`Fs2Compiler.cursorStream`), the
+5. `AsyncCall`: the small-scope spec observes outcome + hook calls only - no cancellation
+   from outside, no timing; its model-check scenarios are 4 races of one run (the timer one
+   found the lost late outcome before release). No TLA+ spec of the suspension hand-over /
+   timeout race (`Racing` / `ChildEnded` / `TimedOut` / `Detached`), no Lean model of the run
+   loop (a frame-stack machine against the denotation - a candidate).
+6. Not modelled or model-checked: the fs2 pull bridge (`Fs2Compiler.cursorStream`), the
    blocking cursor (reads on the pool vs cancel vs `close()` exactly once), the Akka / Pekko
    stages (`NestedStreamsLogic`, `CursorSourceStage` - actor-confined, but their async
    callbacks are not), `StreamedBody.of`, and the jdk engine's `IdleTimeoutPublisher` /
    `DeadlineBodySubscriber` / `BoundedBodyReader`.
-6. The framing spec's two pinned edges are real divergences from the scaladoc model, allowed
+7. The framing spec's two pinned edges are real divergences from the scaladoc model, allowed
    in `classify` - and, by the Lean proof, the only ones. Fixing both framers together (then
    dropping the allowance, and the margin hypothesis of the Lean theorems) is open.
-7. Scopes: TLC configurations are 2 - 3 elements / calls per thread (the largest, 4 million
+8. Scopes: TLC configurations are 2 - 3 elements / calls per thread (the largest, 4 million
    states, takes half the run); Lincheck's 1000 interleavings per scenario is a sample, not a
    bound (the two historical bugs - the 1.1.5 transform deadlock, the hub's shutdown race -
    showed within 10 s).
@@ -529,14 +552,66 @@ scaladoc / RFC alone, a model follows its code line by line, every model gets a 
 target that is first shown to fail on a bug planted in the Scala code, and a divergence from
 the spec is a theorem (proved the only one, or shown by a computed witness).
 
+## Dependencies and vulnerability scan (since 1.3.0)
+
+- `sbt +dependencyExport` (`project/DependencyReport.scala`) writes every PUBLISHED module's
+  resolved runtime dependencies per Scala binary version to `target/dependency-report/`;
+  `security/dependencies.py` (Python 3, standard library only) reads them, adds what jars
+  BUNDLE under their own name, renders the README section (between the `dependency-matrix`
+  markers: badges, summary, matrix) and `docs/dependencies.md`, and queries OSV.dev. Plain run
+  = the check; `--write` regenerates; `--offline` skips the scan; `--reports DIR --no-tables`
+  scans another tree's export (a release); `--badges DIR` writes the badge files. Exit codes:
+  1 an advisory that is not accepted, 2 the repository needs an update (tables, a stale
+  accepted entry, a bundling jar without a rule), 3 the scan could not run (OSV.dev, retried).
+- Bundled libraries: Play WS's shaded AsyncHttpClient + Netty are read from the jar
+  (`ahc-version.properties` / `io.netty.versions.properties`, the Netty artifacts from the
+  relocated packages), embedded `META-INF/maven` metadata too; everything else is a `BUNDLES`
+  rule per carrier VERSION in the script, taken from the carrier's build (Akka / Pekko
+  `protobufJavaVersion`, play-ws `oauth`, jackson-core's shaded fastdoubleparser; a vendored
+  source copy has version None - listed, unscannable). The check is FAIL-CLOSED: a jar with
+  classes under `shaded` / `shadow` / `relocated` / `repackaged` / `thirdparty` / `vendor` /
+  `protobufv3` and no rule fails it (that is how jackson-core and pekko-http-core were found)
+  - a dependency upgrade that brings a new carrier version needs its rule looked up. Never
+  guess a bundled version: Akka 2.6.20 shades protobuf-java 3.16.1, not what memory says.
+- OSV names: an advisory for a Scala library is filed per Scala suffix, not always for all
+  (akka-http-core 10.2.6: 2 under `_2.13`, 1 unsuffixed, 0 under `_3`) - the script queries
+  every variant (`query_names`) and follows `next_page_token`.
+- The `Vulnerability scan` workflow: daily (cron), and on pushes to main / pull requests that
+  touch the build, the script, the README or docs/dependencies.md. It scans main and - from
+  1.3.0 on, when a release carries the export task - the latest release tag (what users
+  install; against main's accepted list). Only exit code 1 opens or updates the issue
+  "Vulnerability scan: new advisories" (never in a pull request). On main it force-pushes the
+  badge files to the orphan branch `security-status` (the README badges are shields.io
+  endpoint badges reading them; they show "resource not found" until the first run on main).
+  Scheduled workflows pause after 60 days without repository activity.
+- A new advisory: upgrade the dependency first. Accept only when no usable fixed version
+  exists, with a `status` - `unreachable` (the vulnerable code is never used: say why, and
+  name the test that pins it where a test can - "the engine opens no WebSocket" has none),
+  `mitigated` (closed in ws-client's own code), `residual` (NOT
+  closed: what it takes, and the way out) - never accept on the advisory's title alone: read
+  it, check the code path, and where it could reach a client, test it (`TestServers`
+  `lineBreakInjection`, `connectRequestHead` came from that triage). An entry covers exactly
+  its artifact, versions and ids.
+- After ANY dependency change (a version, a new module, a Scala version): `sbt
+  +dependencyExport`, then `security/dependencies.py --write`, and commit README.md and
+  docs/dependencies.md with it - the workflow fails otherwise.
+- State 2026-11-19: 252 artifacts; 56 advisories accepted, all in libraries Play WS and Akka
+  bundle (52 unreachable - incl. 4 in Akka's shaded protobuf-java 3.16.1: no remoting -, 2
+  mitigated - the bounded inflater -, 2 residual: the Windows-local `os-release` DoS of Netty
+  4.1.45 / 4.1.60 on the Akka flavor for Scala 2.12 / 3). AsyncHttpClient 2.16.1 (Play WS 2.2.18 / 3.0.14) carries 4 advisories fixed only in the
+  3.x line Play WS cannot use - cookie store, WebSocket, `Realm` logins: all unused.
+
 ## Documentation layout
 
 - `README.md` is the landing page only: overview chart, the backends and stream-abstractions
-  tables, installation, quick start, the short "Good to know" list and the Documentation table.
+  tables, installation, quick start, the short "Good to know" list, the generated dependency
+  matrix with the vulnerability-scan badge (the user asked for it there, 2026-11-19 - never
+  edit it by hand) and the Documentation table.
   Its badge and dependency snippets stay at the RELEASED version until the next one is on Maven
   Central.
 - Topic pages live in `docs/` (`engines.md`, `sites-and-requests.md`, `streaming.md`,
-  `architecture.md`, `compatibility.md`, `verification.md`): a new behavior or caveat goes to
+  `calls.md`, `architecture.md`, `compatibility.md`, `verification.md`, the generated
+  `dependencies.md`): a new behavior or caveat goes to
   its topic page, never back into the README. Every page opens with a title, the back link to
   the README and a lead paragraph.
 - Release notes go to the root `CHANGELOG.md` (newest first; behavior changes and upgrade notes
@@ -655,7 +730,10 @@ win where they are more specific.
 - Smallest surface: helpers `private` / `private[wsclient]`; explicit result types on public /
   protected members and implicits; public parameter names are API.
 - Never change a published signature in place: add an overload / forwarder (TransportSettings
-  shows the shim for a case-class field); MiMa against the previous release decides.
+  shows the shim for a case-class field); MiMa against the previous release decides. A method
+  added to a published TRAIT must not call `super.method(...)`: the compiler puts a synthetic
+  abstract super accessor on the trait, which classes compiled against the previous release
+  do not implement (MiMa: `ReversedMissingMethodProblem`) - spell the default out instead.
 - Scaladoc opens with a one-sentence summary; extension points state implementer obligations
   (thread safety, ownership / `close()`, call-once). Comments say why, not what.
 
@@ -1039,6 +1117,54 @@ Style" and Odersky's "Lean Scala".
   (rule 1.3: a request from inside it only registers). A cursor that hands a promise to `ec`
   (`SubscriberCursor`, the hub consumer) keeps it reachable for `cancel()` (`delivering`), so
   a cancel in that window still completes the outstanding `next()` with `None`
+- `AsyncCall` (since 1.3.0) is the single-value twin of `AsyncStream`: an initial encoding (7
+  leaves, 6 operators unary on their upstream - `stream/impl/CallNodes.scala`; the calls user
+  functions return are lazy children compiled per run), a `CallCompiler` visitor for backends
+  (`ZioCallCompiler`), and the `Future` interpreter `CallRunner` - a run loop with an explicit
+  continuation stack: stack-safe at any depth (100k flatMaps, 200k-deep `flatMap` recursion are
+  pinned). A run suspends at an asynchronous step and is resumed exactly once - by the step's
+  completion or by `cancel()` (a `Suspension`'s CAS) - always through `ec.execute`, so user
+  functions never run on an IO thread and the frame stack needs no lock (a timer's task only
+  claims its race and hands over to `ec`; a timeout's `error` thunk is evaluated in the loop).
+  The loop matches the two SEALED node sets (`stepLeaf` / `stepOp`), so a new node does not
+  compile until handled. Cancel semantics on the `Future` interpreter: stop at the next step;
+  a native leaf in flight is cancelled (a ZIO leaf interrupted - the zio-http request aborted;
+  NOT waited for: a third-party `cancel()` may be a no-op), a `Future` in flight is abandoned
+  (runs on); child RUNS are waited for - a cancel across a `timeout` / `traverse`, and a
+  failed `traverse`, go on only once the cancelled children ended, hooks included; a
+  termination hook runs as an uncancellable child run, outside the late scopes (and only once
+  the run reached its node - a cancel before that runs no hook, as on ZIO). `timeout` races a
+  child run against a timer. Without `onLate` the loser is cancelled. With `onLate` the
+  decision is `LateScope`'s (shared by both interpreters): every `Future` leaf below ENTERS
+  the scope before it creates its `Future` (and is refused once the scope is locked), and the
+  timer LOCKS only an idle scope - so a loser with a `Future` in flight anywhere inside it is
+  left to finish (remaining steps included) and reported, any other is stopped and can start
+  no request any more; a loser that still ended with an outcome of its own (not the
+  interpreter's `RunCancelled`) is reported too. The same on ZIO (`ZioCallCompiler.timeout`:
+  the upstream on a daemon fiber, the scopes in a `FiberRef`) - interrupting a fiber would only
+  abandon a `ZIO.fromFuture`. A downstream retry engine's failover listener depends on the
+  late outcome; the model check found two ways to lose it. A timer the scheduler refuses leaves
+  the call unlimited (`onUnscheduled`, else a warning). `traverse` fails fast and cancels the
+  running children. On ZIO: time is ZIO's `Clock` (the implicit `AsyncScheduler` is
+  neutral-only), user functions under `ZIO.attempt`, a native leaf's defect is a failure for
+  recover / transform / hooks (`ZioCompiler.failureOf`), an interruption never reaches
+  recover / transform / attempt. A zio-http call interrupted BEFORE its request was written
+  sends nothing (no abort for a server to see): a test of "interruption aborts the request"
+  waits until the server has the request (the zio-http spec's `EndlessBody`), never a fixed
+  sleep. Bridges (`CallDiagnostics.counted`, the same counter as
+  streams): a `Future` leaf on ZIO = 1, a foreign native leaf = 1, own leaves 0 - pinned per
+  engine kind by `CallBridgesSpec` (verification: zio-http, and jdk for the `Future`-based
+  ones) and the zio-http spec. The engine twins
+  `execXRichCall` default to `AsyncCall.future(execXRich(...))`, so an engine (or a downstream
+  wrapper) that overrides `execXRich` stays correct; a service on `WSClientWithEngineBase`
+  likewise runs its own `execXRich` for its calls unless it sets `nativeCalls = true` (then
+  `AsyncCall.defer(engine.execXRichCall(site, ...))` - never make native delegation the
+  default again: it silently bypassed a service's `execXRich` override). zio-http: both paths
+  run `send`; the Future methods evaluate the request context and body parameters at the call
+  on the CALLING thread (as every other engine - a context function may read a ThreadLocal),
+  the calls per run; a failure there is not offered to `recoverErrors`; every engine runs the testkit scenario
+  `TestServers.callTwins` (same request, response, status handling, failures as the Rich
+  method; nothing sent while building)
 - Never call an upstream `Flow.Subscription` while holding a lock the upstream's thread may
   need: `TransformPublisher` (jdk / zio-http streams) delivers downstream signals under its
   monitor, so its upstream `request` / `cancel` calls are only recorded and issued by one

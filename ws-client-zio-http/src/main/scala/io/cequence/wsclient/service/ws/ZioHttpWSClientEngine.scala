@@ -8,6 +8,7 @@ import io.cequence.wsclient.service.{
   WSClientOutputStreamCore
 }
 import io.cequence.wsclient.stream.{
+  AsyncCall,
   AsyncStream,
   Bytes,
   DeferredPublisher,
@@ -15,6 +16,7 @@ import io.cequence.wsclient.stream.{
   JsonStreamPipes,
   StreamTransformers,
   TransformPublisher,
+  ZioCompiler,
   ZioInterop
 }
 import org.reactivestreams.FlowAdapters
@@ -57,7 +59,7 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{Flow, TimeoutException}
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.Try
+import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 /**
@@ -66,6 +68,10 @@ import scala.util.control.NonFatal
  * base URL, auth context, error recovery and logging label; the `Future`-based engine contract
  * is served by running each ZIO effect to a `Future`.
  *
+ *   - NATIVE CALLS (since 1.3.0): the `execXRichCall` twins return the request's ZIO effect as
+ *     an [[io.cequence.wsclient.stream.AsyncCall]] leaf - compiled for ZIO (`toZIO`) it runs
+ *     in the calling fiber, and interrupting the fiber aborts the request; the `Future`
+ *     methods run the same effect
  *   - OUTPUT streaming via the backend-agnostic
  *     [[io.cequence.wsclient.service.WSClientOutputStreamCore]] (`java.util.concurrent.Flow`)
  *     contract, with the same framing / `[DONE]` pipeline as the jdk engine. The HTTP status
@@ -177,14 +183,15 @@ final class ZioHttpWSClientEngine private[ws] (
     extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
-    execPOSTBodyRich(
+    execRequest(
       site,
+      Method.POST,
       endPoint,
       endPointParam,
       params,
-      toJsBodyObject(bodyParams),
       extraHeaders,
-      acceptableStatusCodes
+      acceptableStatusCodes,
+      jsonBody(toJsBodyObject(bodyParams))
     )
 
   override def execPOSTBodyRich(
@@ -331,14 +338,15 @@ final class ZioHttpWSClientEngine private[ws] (
     extraHeaders: Seq[(String, String)] = Nil,
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
-    execPUTBodyRich(
+    execRequest(
       site,
+      Method.PUT,
       endPoint,
       endPointParam,
       params,
-      toJsBodyObject(bodyParams),
       extraHeaders,
-      acceptableStatusCodes
+      acceptableStatusCodes,
+      jsonBody(toJsBodyObject(bodyParams))
     )
 
   override def execPUTBodyRich(
@@ -395,6 +403,262 @@ final class ZioHttpWSClientEngine private[ws] (
     acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
   ): Future[RichResponse] =
     execRequest(
+      site,
+      Method.PUT,
+      endPoint,
+      endPointParam,
+      urlParams,
+      extraHeaders,
+      acceptableStatusCodes,
+      fileBody(file)
+    )
+
+  ////////////////////////////////
+  // Calls (native, since 1.3.0) //
+  ////////////////////////////////
+
+  // the calls are this engine's own ZIO effects (`ZioInterop.engineCall`): compiled for ZIO
+  // (`toZIO`) they run in the calling fiber - no bridge, and interrupting the fiber aborts the
+  // request; `toFuture` runs them on this engine's runtime (one bridge). The Rich methods above
+  // run the SAME effect (`send`); they differ only in when and where the request context is
+  // evaluated: at the call on the calling thread there, per run here
+
+  override def execGETRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    requestCall(
+      site,
+      Method.GET,
+      endPoint,
+      endPointParam,
+      params,
+      extraHeaders,
+      acceptableStatusCodes,
+      noBody
+    )
+
+  override def execPOSTRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    bodyParams: Seq[(String, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    requestCall(
+      site,
+      Method.POST,
+      endPoint,
+      endPointParam,
+      params,
+      extraHeaders,
+      acceptableStatusCodes,
+      jsonBody(toJsBodyObject(bodyParams))
+    )
+
+  override def execPOSTBodyRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    requestCall(
+      site,
+      Method.POST,
+      endPoint,
+      endPointParam,
+      params,
+      extraHeaders,
+      acceptableStatusCodes,
+      jsonBody(body)
+    )
+
+  override def execPOSTMultipartRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    fileParams: Seq[(String, File, Option[String])] = Nil,
+    bodyParams: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes,
+    useInMemoryBody: Boolean = false
+  )(
+    implicit filePartToContent: FilePart => String = contentTypeByExtension
+  ): AsyncCall[RichResponse] =
+    requestCall(
+      site,
+      Method.POST,
+      endPoint,
+      endPointParam,
+      params,
+      extraHeaders,
+      acceptableStatusCodes,
+      multipartBody(fileParams, bodyParams, useInMemoryBody)
+    )
+
+  override def execPOSTURLEncodedRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    bodyParams: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    requestCall(
+      site,
+      Method.POST,
+      endPoint,
+      endPointParam,
+      params,
+      extraHeaders,
+      acceptableStatusCodes,
+      urlEncodedBody(bodyParams)
+    )
+
+  override def execPOSTFileRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(String, Option[Any])] = Nil,
+    file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    requestCall(
+      site,
+      Method.POST,
+      endPoint,
+      endPointParam,
+      urlParams,
+      extraHeaders,
+      acceptableStatusCodes,
+      fileBody(file)
+    )
+
+  override def execDELETERichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    requestCall(
+      site,
+      Method.DELETE,
+      endPoint,
+      endPointParam,
+      params,
+      extraHeaders,
+      acceptableStatusCodes,
+      noBody
+    )
+
+  override def execPATCHRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    bodyParams: Seq[(String, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    requestCall(
+      site,
+      Method.PATCH,
+      endPoint,
+      endPointParam,
+      params,
+      extraHeaders,
+      acceptableStatusCodes,
+      jsonBody(toJsBodyObject(bodyParams))
+    )
+
+  override def execPUTRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    bodyParams: Seq[(String, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    requestCall(
+      site,
+      Method.PUT,
+      endPoint,
+      endPointParam,
+      params,
+      extraHeaders,
+      acceptableStatusCodes,
+      jsonBody(toJsBodyObject(bodyParams))
+    )
+
+  override def execPUTBodyRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    body: JsValue,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    requestCall(
+      site,
+      Method.PUT,
+      endPoint,
+      endPointParam,
+      params,
+      extraHeaders,
+      acceptableStatusCodes,
+      jsonBody(body)
+    )
+
+  override def execPUTMultipartRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(String, Option[Any])] = Nil,
+    fileParams: Seq[(String, File, Option[String])] = Nil,
+    bodyParams: Seq[(String, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes,
+    useInMemoryBody: Boolean = false
+  )(
+    implicit filePartToContent: FilePart => String = contentTypeByExtension
+  ): AsyncCall[RichResponse] =
+    requestCall(
+      site,
+      Method.PUT,
+      endPoint,
+      endPointParam,
+      params,
+      extraHeaders,
+      acceptableStatusCodes,
+      multipartBody(fileParams, bodyParams, useInMemoryBody)
+    )
+
+  override def execPUTFileRichCall(
+    site: SiteBinding,
+    endPoint: String,
+    endPointParam: Option[String] = None,
+    urlParams: Seq[(String, Option[Any])] = Nil,
+    file: java.io.File,
+    extraHeaders: Seq[(String, String)] = Nil,
+    acceptableStatusCodes: Seq[Int] = defaultAcceptableStatusCodes
+  ): AsyncCall[RichResponse] =
+    requestCall(
       site,
       Method.PUT,
       endPoint,
@@ -522,8 +786,9 @@ final class ZioHttpWSClientEngine private[ws] (
           // the Cequence taxonomy, as on the publisher path (a defect too; an interruption
           // stays one)
           .mapErrorCause(cause =>
-            if (cause.isInterruptedOnly) cause
-            else Cause.fail(mapStreamError(site, endPoint)(cause.squash))
+            ZioCompiler
+              .failureOf(cause)
+              .fold(cause)(error => Cause.fail(mapStreamError(site, endPoint)(error)))
           )
       ),
       runtime
@@ -610,6 +875,10 @@ final class ZioHttpWSClientEngine private[ws] (
   // Aux //
   /////////
 
+  // the Future methods: the request context and the body parameters are evaluated NOW, on the
+  // calling thread (as on every other engine - a context function may read caller-thread
+  // state), outside the request timeout and the site's error recovery; a throw there fails
+  // the returned Future (a Future-returning method never throws)
   private def execRequest(
     site: SiteBinding,
     method: Method,
@@ -618,28 +887,73 @@ final class ZioHttpWSClientEngine private[ws] (
     params: Seq[(String, Option[Any])],
     extraHeaders: Seq[(String, String)],
     acceptableStatusCodes: Seq[Int],
-    body: BodyFactory
-  ): Future[RichResponse] = {
+    body: => BodyFactory
+  ): Future[RichResponse] =
+    Try(
+      buildRequest(site, method, endPoint, endPointParam, params, extraHeaders, body)
+    ) match {
+      case Success(request) => run(send(site, endPoint, acceptableStatusCodes, request))
+      case Failure(e)       => Future.failed(e)
+    }
+
+  // the calls: the same, per RUN - on the fiber when compiled for ZIO
+  private def requestCall(
+    site: SiteBinding,
+    method: Method,
+    endPoint: String,
+    endPointParam: Option[String],
+    params: Seq[(String, Option[Any])],
+    extraHeaders: Seq[(String, String)],
+    acceptableStatusCodes: Seq[Int],
+    body: => BodyFactory
+  ): AsyncCall[RichResponse] =
+    ZioInterop.engineCall(
+      ZIO
+        .attempt(
+          buildRequest(site, method, endPoint, endPointParam, params, extraHeaders, body)
+        )
+        .flatMap(request => send(site, endPoint, acceptableStatusCodes, request)),
+      runtime
+    )
+
+  // one request as a ZIO effect: what both paths run. Bounded by the request timeout (which
+  // interrupts - aborts - the request), then the site's error recovery (a defect counts as a
+  // failure there, as it did when the recovery ran on the Future; an interruption is not
+  // offered to it). Interrupting the effect aborts the request
+  private def send(
+    site: SiteBinding,
+    endPoint: String,
+    acceptableStatusCodes: Seq[Int],
+    request: ZIO[Any, Throwable, Request]
+  ): ZIO[Any, Throwable, RichResponse] = {
     val label = serviceAndEndpoint(site, Some(endPoint))
 
     val effect = for {
-      request <- buildRequest(
-        site,
-        method,
-        endPoint,
-        endPointParam,
-        params,
-        extraHeaders,
-        body
-      )
-      response <- ZClient.batched(request).provideEnvironment(ZEnvironment[Client](client))
+      built <- request
+      response <- ZClient.batched(built).provideEnvironment(ZEnvironment[Client](client))
       // a batched response's body is in memory: read once - the text UTF-8, as zio-http's
       // `asString` decodes it, the raw bytes kept where they differ (binary-safe `bytes`)
       bytes <- response.body.asArray
-    } yield toRichResponse(site, endPoint, response, bytes, acceptableStatusCodes)
+      richResponse <- ZIO.attempt(
+        toRichResponse(site, endPoint, response, bytes, acceptableStatusCodes)
+      )
+    } yield richResponse
 
-    run(effect.timeoutFail(timeoutException(label))(requestTimeout))
-      .recover(recoverErrors(site)(label))
+    effect.timeoutFail(timeoutException(label))(requestTimeout).catchAllCause { cause =>
+      ZioCompiler.failureOf(cause) match {
+        case None        => ZIO.refailCause(cause)
+        case Some(error) =>
+          // one evaluation of the recovery's guards; a throw in it is the failure
+          ZIO
+            .attempt(
+              recoverErrors(site)(label).applyOrElse[Throwable, Any](error, NotRecovered)
+            )
+            .flatMap { recovered =>
+              if (recovered.asInstanceOf[AnyRef] eq NotRecoveredMarker) ZIO.refailCause(cause)
+              else ZIO.succeed(recovered.asInstanceOf[RichResponse])
+            }
+      }
+    }
   }
 
   private def buildRequest(
@@ -1131,6 +1445,10 @@ object ZioHttpWSClientEngine {
   private def isUnknownHost(e: Throwable): Boolean =
     ThrowableUtil.hasCause(e, classOf[UnknownHostException]) ||
       ThrowableUtil.hasCause(e, classOf[UnresolvedAddressException])
+
+  // what `applyOrElse` gives when the site's recovery is not defined for a failure
+  private object NotRecoveredMarker
+  private val NotRecovered: Throwable => Any = _ => NotRecoveredMarker
 
   private[ws] def defaultRecoverErrors: String => PartialFunction[Throwable, RichResponse] = {
     (serviceEndPointName: String) =>

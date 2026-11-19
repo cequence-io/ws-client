@@ -20,8 +20,10 @@ jobs:
           java-version: 17
           cache: sbt
       - uses: sbt/setup-sbt@v1
+      # for every Scala version: the scala-2 / scala-3 source directories are checked only
+      # under their own
       - name: Check formatting
-        run: sbt scalafmtCheckAll scalafmtSbtCheck
+        run: sbt +scalafmtCheckAll scalafmtSbtCheck
       # cross-builds every module for each of its Scala versions (2.12 / 2.13 / 3.2 / 3.3)
       - name: Test
         run: sbt +test

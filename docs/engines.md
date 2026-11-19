@@ -15,7 +15,7 @@ lists the backends, how one is selected, and who owns what.
 | `pekko-http` | ws-client-pekko-http | pekko-http | 2.13, 3.3 | 15 | input + output streaming, multipart | native Pekko `Source` |
 | `play-akka-stream` | ws-client-play-akka-stream | Play WS 2.x (shaded AsyncHttpClient / Netty) on Akka | 2.12, 2.13, 3 | 11 | input + output streaming, multipart | native Akka `Source` |
 | `play-akka` | ws-client-play-akka | Play WS 2.x on Akka | 2.12, 2.13, 3 | 10 | input streaming, multipart | - |
-| `zio-http` | ws-client-zio-http | zio-http (Netty) + the ZIO runtime | 2.12, 2.13 | 7 | output streaming (`Flow.Publisher`), multipart | native ZIO `ZStream` |
+| `zio-http` | ws-client-zio-http | zio-http (Netty) + the ZIO runtime | 2.12, 2.13, 3.3 (since 1.3.0) | 7 | output streaming (`Flow.Publisher`), multipart | native ZIO `ZStream` |
 | `sttp` | ws-client-sttp | sttp client4 (by default on `java.net.http`) | 2.12, 2.13 | 5 | multipart | - |
 | `jdk` | ws-client-jdk | `java.net.http.HttpClient` (JDK 11+) | 2.12, 2.13, 3 | 0 | output streaming (`Flow.Publisher`), multipart (in-memory) | via `Flow.Publisher` |
 
@@ -59,11 +59,13 @@ Which one?
   (with a warning).
 - **ws-client-zio-http** - the [zio-http](https://zio.dev/zio-http) (Netty) client and the ZIO
   runtime; output (SSE) streaming via `Flow.Publisher`; since 1.2.0 its `AsyncStream`s are
-  native ZIO streams (it depends on ws-client-zio). Server certificates are verified against
-  the JVM's default trust store (`ClientSSLConfig.FromSystemTrustStore`). A ZIO application can
-  run it on its own `Client` via `ZioHttpWSClientEngine.layer()` - then configure that client's
-  `.ssl(...)` yourself, as zio-http's default trusts any certificate. With a proxy, target host
-  names are still resolved through local DNS.
+  native ZIO streams (it depends on ws-client-zio), and since 1.3.0 its calls
+  (`execXRichCall`, an `AsyncCall`) are native ZIO effects - interrupting one aborts its
+  request (see [Calls](calls.md)); Scala 3 (3.3+) since 1.3.0. Server certificates are
+  verified against the JVM's default trust store (`ClientSSLConfig.FromSystemTrustStore`). A
+  ZIO application can run it on its own `Client` via `ZioHttpWSClientEngine.layer()` - then
+  configure that client's `.ssl(...)` yourself, as zio-http's default trusts any certificate.
+  With a proxy, target host names are still resolved through local DNS.
 
 ## Self-discovery 🔎
 

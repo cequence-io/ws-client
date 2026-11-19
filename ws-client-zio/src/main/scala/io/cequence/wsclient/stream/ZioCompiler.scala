@@ -20,7 +20,7 @@ private[wsclient] object ZioCompiler {
   // cursor bridge. An interruption stays an interruption on ZIO (the hook sees Cancelled); a
   // ZIO leaf ending with an interruption it raised itself (e.g. joining an interrupted fiber)
   // reaches the other backends as a failure instead - a sanctioned difference
-  private[stream] def failureOf(cause: Cause[Throwable]): Option[Throwable] =
+  private[wsclient] def failureOf(cause: Cause[Throwable]): Option[Throwable] =
     if (cause.isInterruptedOnly) None else Some(cause.squash)
 
   def toZStream[A](stream: AsyncStream[A]): ZStream[Any, Throwable, A] =

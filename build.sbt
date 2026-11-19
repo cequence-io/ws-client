@@ -16,7 +16,7 @@ ThisBuild / description := "Generic WebServices client library for Scala with pl
 
 ThisBuild / organization := "io.cequence"
 ThisBuild / scalaVersion := scala213
-ThisBuild / version := "1.2.3-SNAPSHOT"
+ThisBuild / version := "1.3.0-SNAPSHOT"
 ThisBuild / isSnapshot := version.value.endsWith("-SNAPSHOT")
 ThisBuild / crossScalaVersions := List(scala212, scala213, scala32)
 
@@ -281,7 +281,7 @@ lazy val `json-repair` =
     name := "json-repair",
     libraryDependencies += "com.typesafe.play" %% "play-json" % playJsonVersion.value,
     libraryDependencies ++= jacksonLibs,
-    libraryDependencies += "org.scalactic" %% "scalactic" % "3.2.16",
+    libraryDependencies += "org.scalactic" %% "scalactic" % "3.2.16" % Test,
     libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
     libraryDependencies ++= loggingLibs.value,
     testLoggingSettings,
@@ -420,7 +420,8 @@ lazy val `ws-client-zio-http` =
   (project in file("ws-client-zio-http"))
     .settings(
       name := "ws-client-zio-http",
-      crossScalaVersions := List(scala212, scala213), // zio-http's Scala 3 artifacts need 3.3+
+      // Scala 3 with 3.3 (since 1.3.0): zio-http's Scala 3 artifacts need 3.3+
+      crossScalaVersions := List(scala212, scala213, scala33),
       libraryDependencies += "dev.zio" %% "zio-http" % zioHttpVersion,
       // ZStream -> org.reactivestreams Publisher (then FlowAdapters -> java.util.concurrent.Flow)
       libraryDependencies += "dev.zio" %% "zio-interop-reactivestreams" % "2.0.2",
@@ -508,7 +509,15 @@ lazy val `ws-client-verification` =
       Test / run / outputStrategy := Some(StdoutOutput),
       publish / skip := true
     )
-    .dependsOn(`ws-client-core-akka`, `ws-client-fs2`, `ws-client-zio`)
+    .dependsOn(
+      `ws-client-core-akka`,
+      `ws-client-fs2`,
+      `ws-client-zio`,
+      // the call bridge counts across a Future-based and an effect-system engine
+      `ws-client-jdk` % Test,
+      `ws-client-zio-http` % Test,
+      `ws-client-testkit` % Test
+    )
 
 addCommandAlias(
   "modelCheck",

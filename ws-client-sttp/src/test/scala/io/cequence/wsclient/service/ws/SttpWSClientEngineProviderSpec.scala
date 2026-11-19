@@ -33,7 +33,7 @@ import sttp.client4.{basicRequest, SttpClientException}
 import sttp.model.Uri
 
 import java.io.{File, PrintWriter, StringWriter}
-import java.net.{InetSocketAddress, ServerSocket}
+import java.net.InetSocketAddress
 import scala.concurrent.Await
 import scala.concurrent.duration._
 import scala.util.Try
@@ -158,6 +158,27 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
     "describe a refused connection and an unresolvable host" in {
       val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
       try io.cequence.wsclient.testkit.TestServers.connectionFailures(engine) shouldBe empty
+      finally engine.close()
+    }
+
+    "never put a caller-supplied line break on the wire (no header or request injection)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try io.cequence.wsclient.testkit.TestServers.lineBreakInjection(engine) shouldBe empty
+      finally engine.close()
+    }
+
+    "keep the site's credentials out of the CONNECT request to a proxy" in {
+      val head = io.cequence.wsclient.testkit.TestServers.connectRequestHead(settings =>
+        WSClientEngineRegistry(settings, Some(expectedEngineId))
+      )
+      head should startWith("CONNECT ")
+      head should not include "connect-secret-token"
+      head should not include "connect-secret-key"
+    }
+
+    "give the same responses, status handling and failures through its calls (AsyncCall)" in {
+      val engine = WSClientEngineRegistry(TransportSettings(), Some(expectedEngineId))
+      try io.cequence.wsclient.testkit.TestServers.callTwins(engine) shouldBe empty
       finally engine.close()
     }
 
@@ -388,11 +409,7 @@ class SttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       timeout shouldBe a[CequenceWSTimeoutException]
       assertRedacted(timeout)
 
-      val closedPort = {
-        val socket = new ServerSocket(0)
-        try socket.getLocalPort
-        finally socket.close()
-      }
+      val closedPort = io.cequence.wsclient.testkit.TestServers.closedPort()
       val refused = failureOf(s"http://localhost:$closedPort")
       // the sttp wrapper used to surface raw - now a CequenceWSException with the cause below it
       refused.getClass shouldBe classOf[CequenceWSException]

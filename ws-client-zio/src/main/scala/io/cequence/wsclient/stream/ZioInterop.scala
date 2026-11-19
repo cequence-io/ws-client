@@ -78,8 +78,33 @@ private[wsclient] final class ZioPipe[A, B] private[wsclient] (
  *     comes back as its own chunks
  *   - `pipe.toZStreamFunction` / `ZioInterop.fromZPipeline(pipeline)` likewise for
  *     transformations
+ *   - `call.toZIO` compiles an [[AsyncCall]] natively for ZIO (since 1.3.0): ZIO leaves (the
+ *     zio-http engine's calls) stay themselves and run in the calling fiber - interrupting it
+ *     aborts the request - every operator is a ZIO operator, and time is ZIO's `Clock`; a
+ *     `Future` leaf (a `Future`-based engine's call) is one bridge (`ZIO.fromFuture`)
+ *   - `task.toAsyncCall` keeps the effect native; the implicit `Runtime` is used only when the
+ *     call is run outside ZIO (`toFuture` - cancelling that run interrupts the effect)
  */
 object ZioInterop {
+
+  implicit final class AsyncCallToZio[A](private val call: AsyncCall[A]) extends AnyVal {
+    def toZIO: Task[A] = ZioCallCompiler.toZIO(call)
+  }
+
+  implicit final class ZioToAsyncCall[A](private val effect: ZIO[Any, Throwable, A])
+      extends AnyVal {
+    def toAsyncCall(
+      implicit runtime: Runtime[Any]
+    ): AsyncCall[A] =
+      AsyncCall.fromNative(new ZioCall(effect, runtime))
+  }
+
+  /** An engine's native call (its fallback runs on the engine's own runtime). */
+  private[wsclient] def engineCall[A](
+    effect: Task[A],
+    runtime: Runtime[Any]
+  ): AsyncCall[A] =
+    AsyncCall.fromNative(new ZioCall(effect, runtime))
 
   implicit final class AsyncStreamToZio[A](private val stream: AsyncStream[A]) extends AnyVal {
     def toZStream: ZStream[Any, Throwable, A] = ZioCompiler.toZStream(stream)

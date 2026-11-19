@@ -464,17 +464,4 @@ class AsyncStreamOperatorsSpec extends AnyWordSpec with Matchers with StreamTest
     }
   }
 
-  private def eventually(assertion: => Unit): Unit = {
-    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-    var done = false
-    while (!done) {
-      try {
-        assertion
-        done = true
-      } catch {
-        case _: Throwable if System.nanoTime() < deadline =>
-          Thread.sleep(10)
-      }
-    }
-  }
 }

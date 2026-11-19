@@ -4,10 +4,60 @@ Release notes of ws-client, newest first. **Behavior change** marks what existin
 Use one version for all ws-client artifacts on a classpath (see
 [Compatibility and upgrading](docs/compatibility.md)).
 
-## 1.2.3 (unreleased)
+## 1.3.0 (unreleased) - native calls
+
+**New**
+
+- **`AsyncCall[A]`** (`io.cequence.wsclient.stream`): a lazy, backend-neutral call - the
+  single-value counterpart of `AsyncStream`. Every engine method `execXRich` has a twin
+  `execXRichCall` returning one, and services on `WSClientWithEngineBase` get `execXCall` /
+  `execXRichCall` (running the service's own `execXRich` by default; the engine's native calls
+  with `nativeCalls = true`); the `Future` methods are unchanged. Run a call with `toFuture` / `run()`
+  (cancellable), or natively on ZIO with `toZIO` (ws-client-zio). Operators: `map`, `flatMap`,
+  `zip`, `mapError`, `recover(With)`, `transform(With)`, `attempt`, `sleep` / `delay`,
+  `timeout` (optionally keeping a late outcome), `traverse(items, parallelism)`,
+  `onTerminate` / `guaranteeCase`. See [Calls](docs/calls.md).
+- **zio-http: native calls.** The engine's calls are its own ZIO effects: compiled with `toZIO`
+  they run in the calling fiber - FiberRefs and log annotations reach the request, no bridge -
+  and interrupting the fiber (a timeout, a lost race, a client gone away) aborts the request.
+  Its `Future` methods run the same effect.
+- **zio-http for Scala 3** (3.3 LTS - zio-http's own Scala 3 artifacts need 3.3+).
+- `CallDiagnostics.counted` counts a call's bridges (hops between an effect and a `Future`).
+
+**Fixes**
+
+- zio-http: **behavior change** - a throwing request-context function, or an empty JSON
+  body-parameter name, now fails the `Future` an `execXRich` method returns instead of throwing
+  out of the call (it is not offered to the site's `recoverErrors`). The context is still
+  evaluated on the calling thread there; a call (`execXRichCall`) evaluates it per run.
+
+- json-repair: `scalactic` (a test library) is no longer a dependency of the published
+  artifact - it was declared without the test scope. **Behavior change** only if you used
+  `org.scalactic` through json-repair without declaring it: add the dependency yourself.
+
+**Security**
+
+- A dependency matrix in the README and a daily vulnerability scan (`Vulnerability scan`
+  workflow, `security/dependencies.py`): every published module's dependencies for every Scala
+  version - transitive ones and the libraries other jars bundle under their own name (Play
+  WS's AsyncHttpClient and Netty, Akka's and Pekko's protobuf, ...) - against OSV.dev, for
+  `main` and, from this release on, for the latest release. A new advisory fails the scan and
+  opens an issue; the README badges show the last run. The 56 advisories known today (all in
+  libraries that Play WS and Akka bundle) are each listed with their status and reason: 52
+  not reachable through ws-client, 2 closed in ws-client's own code, 2 open (a local,
+  Windows-only denial of service in the Netty of Play WS for Akka on Scala 2.12 / 3 - use
+  Scala 2.13 or the Pekko flavor there). See
+  [Dependencies and vulnerabilities](docs/dependencies.md).
+- New scenarios on every engine: a line break in a caller-supplied endpoint, endpoint
+  parameter, query parameter or header never reaches the wire (no header or request
+  injection), and a site's credentials never go on the `CONNECT` request to a proxy. Both held
+  already - they are pinned now.
 
 **Verification**
 
+- `AsyncCall`: a small-scope spec (every plan of up to 3 operators - 418,965 of them - on both
+  interpreters, against a model written from the scaladoc) and four model-check scenarios of a
+  run (`cancel()`, a timeout's timer and a failing `traverse` element racing completions).
 - Lean 4 proofs, for every input, of what four pure parts compute: both delimiter framers (they
   agree, and differ from their documented model only at the two known edges near the frame
   limit), `WireFormat.encodeQueryComponent` and `WireFormat.url` (RFC 3986), the multipart
