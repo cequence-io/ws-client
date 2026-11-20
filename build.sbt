@@ -188,21 +188,36 @@ def typesafePlayWS(
   "com.typesafe.play" %% "play-ws-standalone-json" % version
 ).map(_.excludeAll(ExclusionRule("com.typesafe.play", s"play-json_$scalaBinary")))
 
+// Play WS ships AsyncHttpClient and Netty SHADED, in a plain Java jar of its own
+// (`shaded-asynchttpclient`). The last Play WS for Scala 2.12 (2.1.11) and the last one for
+// Scala 3.2 (2.2.0-M2) bring old ones - AHC 2.10.5 / Netty 4.1.45 and AHC 2.12.3 / Netty 4.1.60,
+// with dozens of advisories - so there the jar of Play WS 2.2.18 (AHC 2.16.1 / Netty 4.1.138)
+// REPLACES theirs: Play WS's own is excluded and the newer one declared directly, so a
+// consumer gets exactly one, whatever its build tool's conflict resolution. Its class files
+// need Java 11. Scala 2.13 gets it through Play WS 2.2.18 itself. (After changing this, clean
+// the Play modules: sbt's cached resolution of a dependent module kept the old jar next to
+// the new one.)
+val shadedAsyncHttpClientVersion = "2.2.18"
+
 lazy val playWsDependencies = Def.setting {
   val scalaBinary = scalaBinaryVersion.value
 
+  def withNewerShadedClient(playWs: Seq[ModuleID]) =
+    playWs.map(_.exclude("com.typesafe.play", "shaded-asynchttpclient")) :+
+      ("com.typesafe.play" % "shaded-asynchttpclient" % shadedAsyncHttpClientVersion)
+
   CrossVersion.partialVersion(scalaVersion.value) match {
     case Some((2, 12)) =>
-      // the last Play WS 2.x for Scala 2.12 (shaded AHC 2.10.5 / Netty 4.1.45)
-      typesafePlayWS("2.1.11", scalaBinary)
+      // the last Play WS 2.x for Scala 2.12
+      withNewerShadedClient(typesafePlayWS("2.1.11", scalaBinary))
 
     case Some((2, 13)) =>
       // shaded AHC 2.16.1 / Netty 4.1.138, Akka 2.6.21; class files need Java 11
-      typesafePlayWS("2.2.18", scalaBinary)
+      typesafePlayWS(shadedAsyncHttpClientVersion, scalaBinary)
 
     case Some((3, 2)) =>
       // 2.2.0-M3 and later need Scala 3.3 (M3 was built with 3.3.0-RC3)
-      typesafePlayWS("2.2.0-M2", scalaBinary)
+      withNewerShadedClient(typesafePlayWS("2.2.0-M2", scalaBinary))
 
     case _ =>
       throw new Exception("Unsupported scala version")

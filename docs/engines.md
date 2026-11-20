@@ -40,8 +40,10 @@ Which one?
   `ws-client-play-stream` before 1.0.0 (see
   [Compatibility and upgrading](compatibility.md#artifacts-renamed-in-100)). The `-stream`
   module adds SSE / JSON response streaming. Play WS per Scala version: 2.2.18 on Scala 2.13
-  (since 1.2.0; it needs Java 11+), 2.1.11 on Scala 2.12 and 2.2.0-M2 on Scala 3 (the last
-  releases for those Scala versions).
+  (since 1.2.0), 2.1.11 on Scala 2.12 and 2.2.0-M2 on Scala 3 (the last releases for those
+  Scala versions). Since 1.3.0 all three run on the AsyncHttpClient / Netty that Play WS
+  2.2.18 bundles (2.16.1 / 4.1.138), so both modules need Java 11+ on every Scala version -
+  see [Compatibility and upgrading](compatibility.md).
 - **ws-client-play-pekko / ws-client-play-pekko-stream** - Play WS 3.x (`org.playframework`);
   the sources are generated from the Akka modules at build time, so both flavors behave alike.
 - **ws-client-jdk** - no Akka / Pekko / Play WS: it needs only `ws-client-core` (play-json,

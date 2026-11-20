@@ -77,9 +77,11 @@ own dependencies need it - build theirs with Scala 3.3 LTS, as does `zio-http` (
 
 - `ws-client-jdk` - and `ws-client-sttp` on its default backend - run on `java.net.http`, which
   needs JDK 11+.
-- `ws-client-play-akka` / `ws-client-play-akka-stream` on Scala 2.13 need Java 11+ since
-  1.2.0 (Play WS 2.2.18). Their Scala 2.12 and Scala 3 artifacts still run on Java 8.
-- On the Play engines, TLS 1.3 needs JDK 11+ (on Java 8 the Akka flavor negotiates TLS 1.2).
+- `ws-client-play-akka` / `ws-client-play-akka-stream` need Java 11+: on Scala 2.13 since
+  1.2.0 (Play WS 2.2.18), on Scala 2.12 and Scala 3 since 1.3.0 - they now use Play WS
+  2.2.18's bundled AsyncHttpClient and Netty (whose class files need Java 11) in place of the
+  old ones their own Play WS versions ship.
+- On the Play engines, TLS 1.3 needs JDK 11+.
 - The `log` service adapter (`LogServiceAdapter`) needs Java 11+. 1.2.0 needed Java 17 for it
   by mistake (`UnsupportedClassVersionError` on Java 11) - use 1.2.1.
 

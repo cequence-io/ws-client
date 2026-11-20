@@ -106,14 +106,14 @@ testkit and verification modules):
      in `play/shaded/ahc/org/asynchttpclient/config/ahc.properties` (the shaded AHC does NOT read
      a classpath-root `ahc.properties`). The JDK list comes from a throwaway `SSLContext`, never
      `SSLContext.getDefault` (that would initialize and freeze the JVM-wide default context);
-     if the JDK yields none, AHC's own list stays. Java 8: the Scala 2.12/2.13 Akka jars (shaded
-     Netty 4.1.45) have no TLS 1.3 cipher suites there, so they negotiate TLS 1.2 - TLS 1.3
-     needs JDK 11+. Covered end-to-end by the Play provider specs (`TestServers.withTlsServer`,
+     if the JDK yields none, AHC's own list stays. TLS 1.3 needs JDK 11+ (which the Play
+     modules need anyway, see the shaded jar below). Covered end-to-end by the Play provider specs (`TestServers.withTlsServer`,
      `withTrustingEngine`); `ws-client-play-akka` / `-pekko` / `-zio-http` fork their tests
      because those point the JVM-global default trust store at a test cert
    - Redirects are off explicitly (`.setFollowRedirect(false)`): the AHC builder's default comes
      from the JVM-wide property `play.shaded.ahc.org.asynchttpclient.followRedirect`. Response
-     decompression: AHC < 2.16.1 (play-ws 2.1.11 / 2.2.0-M2 - the Akka flavor on Scala 2.12 / 3)
+     decompression: AHC < 2.16.1 (what play-ws 2.1.11 / 2.2.0-M2 ship - up to 1.2.2 the Akka
+     flavor on Scala 2.12 / 3; since 1.3.0 only a consumer who pins the old shaded jar)
      inflates gzip /
      deflate bodies without any limit (CVE-2026-85721), so `PlayWSClientEngine.boundedInflater`
      replaces AHC's `inflater` handler with AHC 2.16.1's own design (`maxDecompressedResponseSize`
@@ -123,13 +123,20 @@ testkit and verification modules):
      `getMaxDecompressedResponseSize` on `AsyncHttpClientConfig`), so the Pekko flavor - and,
      since 1.2.0, the Akka flavor on Scala 2.13 (play-ws 2.2.18) - keeps AHC's own. The provider specs cover both (redirect with the property set; a gzip bomb under
      a lowered limit, and with 0 / -1)
-   - Known CVEs (reachability checked 2026-10-24): the Akka flavor's shaded Netty 4.1.45 / 4.1.60
-     and AHC 2.10.5 / 2.12.3 (Scala 2.12 / 3) carry dozens; reachable were only the cookie store (now off),
-     redirects (only with the property) and decompression - all three now closed in code.
-     The rest (HTTP/2, SPDY, SNI, CORS, server decoders, Realm / NTLM, WebSocket) is unused by
-     the engine. Scala 2.13 is on play-ws 2.2.18 since 1.2.0 (Akka 2.6.21; AHC 2.16.1, Netty
-     4.1.138; class files need Java 11); 2.12 has no upgrade path (2.1.11 is the last), Scala 3
-     needs 3.3+
+   - The shaded jar (since 1.3.0): Play WS ships AsyncHttpClient + Netty relocated in a plain
+     Java jar of its own, `com.typesafe.play:shaded-asynchttpclient`. The last Play WS for
+     Scala 2.12 (2.1.11) and for Scala 3.2 (2.2.0-M2) bring AHC 2.10.5 / Netty 4.1.45 and AHC
+     2.12.3 / Netty 4.1.60 (about 50 advisories; 2.12 has no newer Play WS, Scala 3 needs 3.3+
+     for one). So on those two Scala versions `playWsDependencies` EXCLUDES Play WS's own
+     shaded jar and declares the one of Play WS 2.2.18 (AHC 2.16.1 / Netty 4.1.138) directly -
+     in the POM too, so a consumer gets exactly one. play-ahc-ws-standalone 2.1.11 / 2.2.0-M2
+     run on it unchanged: the whole Play provider suites pass on 2.12 / 2.13 / 3 (that is the
+     compatibility evidence - re-run them, from a CLEAN build, on any change here: sbt's cached
+     resolution of the dependent stream module kept the old jar next to the new one). Its
+     class files need Java 11, so both Akka Play modules need Java 11+ on every Scala version.
+     Netty 4.1.138 parses responses more strictly than 4.1.45 / 4.1.60 did (bare-LF lines,
+     CL + TE, control characters in headers are rejected). The legacy code paths (bounded
+     inflater) stay for a consumer who pins the old jar
    - play-json comes from core only: `typesafePlayWS` excludes Play WS's own play-json by its
      suffixed artifact name (`play-json_2.13` - a bare `play-json` matches nothing, as up to
      1.1.5), so play-ws 2.2.18 links against core's play-json 2.8.2. Do not bump play-json to
@@ -365,8 +372,8 @@ The build manages different dependency versions for Scala 2.12, 2.13, and 3.2:
 - Play JSON: 2.8.2 (Scala 2.12/2.13), 2.10.0-RC6 (Scala 3.2)
 - Akka Stream: 2.6.20, on Scala 2.13 2.6.21 (what play-ws 2.2.18 brings; not 2.6.1 on Scala 2.12: its akka-protobuf-v3 POM pulls protobuf-java
   3.10.0); Akka HTTP 10.5.3 (ws-client-play-akka-stream only; BUSL-1.1 licensed)
-- Play WS (Akka): 2.1.11 (Scala 2.12), 2.2.18 (Scala 2.13, since 1.2.0 - Java 11+),
-  2.2.0-M2 (Scala 3.2)
+- Play WS (Akka): 2.1.11 (Scala 2.12), 2.2.18 (Scala 2.13, since 1.2.0), 2.2.0-M2 (Scala
+  3.2) - all three on the shaded AsyncHttpClient / Netty jar of 2.2.18 since 1.3.0 (Java 11+)
 - Scala 2.13.18 (play-ws 2.2.18 depends on that scala-library; SIP-51). `semanticdbVersion` is
   pinned in build.sbt: semanticdb-scalac is published per Scala patch version, so a Scala bump
   needs a semanticdb version that has it (for 2.12 AND 2.13)
@@ -595,11 +602,13 @@ the spec is a theorem (proved the only one, or shown by a computed witness).
 - After ANY dependency change (a version, a new module, a Scala version): `sbt
   +dependencyExport`, then `security/dependencies.py --write`, and commit README.md and
   docs/dependencies.md with it - the workflow fails otherwise.
-- State 2026-11-19: 252 artifacts; 56 advisories accepted, all in libraries Play WS and Akka
-  bundle (52 unreachable - incl. 4 in Akka's shaded protobuf-java 3.16.1: no remoting -, 2
-  mitigated - the bounded inflater -, 2 residual: the Windows-local `os-release` DoS of Netty
-  4.1.45 / 4.1.60 on the Akka flavor for Scala 2.12 / 3). AsyncHttpClient 2.16.1 (Play WS 2.2.18 / 3.0.14) carries 4 advisories fixed only in the
-  3.x line Play WS cannot use - cookie store, WebSocket, `Realm` logins: all unused.
+- State 2026-11-20: 230 artifacts; 8 advisories accepted, all unreachable: 4 in AsyncHttpClient
+  2.16.1 (the newest 2.x, shaded by Play WS 2.2.18 / 3.0.14; fixed only in the 3.x line Play WS
+  cannot use - cookie store, WebSocket, `Realm` logins: all unused) and 4 in Akka's shaded
+  protobuf-java 3.16.1 (no remoting). Up to 2026-11-19 there were 56: the Akka flavor on Scala
+  2.12 / 3 ran on Play WS's old shaded AHC / Netty - replaced by the 2.2.18 jar (the maintainer's
+  decision: upgrade the bundled jar, do not work around an advisory in code - a start-up
+  guard for the one residual advisory was rejected in favor of it).
 
 ## Documentation layout
 
