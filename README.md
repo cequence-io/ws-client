@@ -133,12 +133,9 @@ Details for each: [Compatibility and upgrading](docs/compatibility.md). What cha
 
 [![Vulnerability scan](https://github.com/cequence-io/ws-client/actions/workflows/vulnerability-scan.yml/badge.svg)](https://github.com/cequence-io/ws-client/actions/workflows/vulnerability-scan.yml) [![last scan](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fcequence-io%2Fws-client%2Fsecurity-status%2Flast-scan.json)](https://github.com/cequence-io/ws-client/actions/workflows/vulnerability-scan.yml) [![new advisories](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fcequence-io%2Fws-client%2Fsecurity-status%2Fnew-advisories.json)](https://github.com/cequence-io/ws-client/actions/workflows/vulnerability-scan.yml) [![artifacts scanned](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fcequence-io%2Fws-client%2Fsecurity-status%2Fartifacts.json)](https://github.com/cequence-io/ws-client/actions/workflows/vulnerability-scan.yml) [![accepted advisories](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fcequence-io%2Fws-client%2Fsecurity-status%2Faccepted.json)](https://github.com/cequence-io/ws-client/actions/workflows/vulnerability-scan.yml) [![latest release](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fcequence-io%2Fws-client%2Fsecurity-status%2Frelease.json)](https://github.com/cequence-io/ws-client/actions/workflows/vulnerability-scan.yml) [![advisories: OSV.dev](https://img.shields.io/badge/advisories-OSV.dev-blue)](https://osv.dev)
 
-**The scan.** Every day (and on every dependency change) all 252 artifacts the published modules bring - transitive ones and the libraries other jars bundle under their own name (Play WS's AsyncHttpClient and Netty, Akka's and Pekko's protobuf, ...) - are checked against [OSV.dev](https://osv.dev) (GitHub advisories, CVEs), for `main` and for the latest release. The badges above show the last run. A new advisory fails the scan and opens an issue: the dependency is upgraded, or - where no fixed version can be used - the advisory is accepted with its reason.
+**The scan.** Every day (and on every dependency change) all 230 artifacts the published modules bring - transitive ones and the libraries other jars bundle under their own name (Play WS's AsyncHttpClient and Netty, Akka's and Pekko's protobuf, ...) - are checked against [OSV.dev](https://osv.dev) (GitHub advisories, CVEs), for `main` and for the latest release. The badges above show the last run. A new advisory fails the scan and opens an issue: the dependency is upgraded, or - where no fixed version can be used - the advisory is accepted with its reason.
 
-**Accepted today:** 56 advisories, all in libraries that Play WS and Akka bundle - 52 not reachable through ws-client, 2 closed in ws-client's own code, 2 open.
-
-Open:
-- `netty-common` 4.1.45.Final, 4.1.60.Final (CVE-2024-47535, CVE-2025-25193): Windows only, local attacker: at start-up Netty reads `C:\etc\os-release`, which a local user may create - a huge one exhausts the JVM's memory. It matters on a Windows host shared with untrusted local users. No Play WS release for Akka on Scala 2.12 or Scala 3 carries a fixed Netty: there, use Scala 2.13 (Play WS 2.2.18) or the Pekko flavor.
+**Accepted today:** 8 advisories, all in libraries that Play WS and Akka bundle - 8 not reachable through ws-client, 0 closed in ws-client's own code, 0 open.
 
 **The dependencies** the modules declare on `main` (the next release), with the versions each Scala version resolves. A module brings the libraries of its own rows and of the modules it builds on; where a cell lists several versions, a module further up resolves a newer one. Per module, the full lists and every accepted advisory: [Dependencies and vulnerabilities](docs/dependencies.md).
 
@@ -155,6 +152,7 @@ Open:
 | `com.typesafe.play:play-ahc-ws-standalone` | 2.1.11 | 2.2.18 | 2.2.0-M2 | play-akka |
 | `com.typesafe.play:play-json` | 2.8.2 | 2.8.2 | 2.10.0-RC6 | json-repair, core |
 | `com.typesafe.play:play-ws-standalone-json` | 2.1.11 | 2.2.18 | 2.2.0-M2 | play-akka |
+| `com.typesafe.play:shaded-asynchttpclient` | 2.2.18 | 2.2.18 | 2.2.18 | play-akka |
 | `com.typesafe.scala-logging:scala-logging` | 3.9.5 | 3.9.5 | 3.9.5 | json-repair, core |
 | `com.typesafe:config` | 1.4.3 | 1.4.3 / 1.4.6 | 1.4.3 / 1.4.6 | core |
 | `com.typesafe:ssl-config-core` | 0.4.3 | 0.4.3 / 0.6.1 / 0.7.1 | 0.6.1 / 0.7.1 | core-akka |
@@ -179,9 +177,9 @@ Bundled inside other jars (shaded or vendored - not visible as dependencies):
 | `com.fasterxml.jackson.core:jackson-core` | `ch.randelshofer:fastdoubleparser` | 2.0.1 |
 | `com.typesafe.akka:akka-http-core` | `com.twitter:hpack` | source copy |
 | `com.typesafe.akka:akka-protobuf-v3` | `com.google.protobuf:protobuf-java` | 3.16.1 |
-| `com.typesafe.play:shaded-asynchttpclient` | Netty | 4.1.45.Final (Scala 2.12), 4.1.138.Final (Scala 2.13), 4.1.60.Final (Scala 3) |
-| `com.typesafe.play:shaded-asynchttpclient` | `org.asynchttpclient:async-http-client` | 2.10.5 (Scala 2.12), 2.16.1 (Scala 2.13), 2.12.3 (Scala 3) |
-| `com.typesafe.play:shaded-oauth` | `commons-codec:commons-codec` | 1.3 |
+| `com.typesafe.play:shaded-asynchttpclient` | Netty | 4.1.138.Final |
+| `com.typesafe.play:shaded-asynchttpclient` | `org.asynchttpclient:async-http-client` | 2.16.1 |
+| `com.typesafe.play:shaded-oauth` | `commons-codec:commons-codec` | 1.3 (Scala 2.12) |
 | `com.typesafe.play:shaded-oauth` | `oauth.signpost:signpost-core` | 1.2.1.2 (Scala 2.12), 2.1.1 (Scala 2.13, 3) |
 | `dev.zio:izumi-reflect-thirdparty-boopickle-shaded` | `io.suzaku:boopickle` | source copy |
 | `io.netty:netty-common` | `org.jctools:jctools-core-jdk11` | 4.0.7 |

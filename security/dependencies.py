@@ -247,10 +247,11 @@ def short(module):
     return module[len("ws-client-"):] if module.startswith("ws-client-") else module
 
 
-def per_scala(by_scala):
-    """One cell for a version per Scala version: the version alone where they all agree."""
+def per_scala(by_scala, scalas):
+    """One cell for a version per Scala version: the version alone where it is the same for
+    every one of `scalas` (the Scala versions the bundling jar is resolved for)."""
     versions = {scala: " / ".join(sorted(found)) for scala, found in by_scala.items()}
-    if len(set(versions.values())) == 1:
+    if len(set(versions.values())) == 1 and set(versions) == set(scalas):
         return next(iter(versions.values()))
     grouped = {}
     for scala in SCALA_VERSIONS:
@@ -305,8 +306,9 @@ def matrix(report):
             "|---|---|---|",
         ]
         for carrier in carriers:
+            scalas = versions_by_scala(report, carrier).keys()
             for label, by_scala in sorted(bundle_rows(report, carrier).items()):
-                lines.append(f"| `{carrier}` | {label} | {per_scala(by_scala)} |")
+                lines.append(f"| `{carrier}` | {label} | {per_scala(by_scala, scalas)} |")
     return lines
 
 
@@ -497,8 +499,7 @@ def page(report):
         "in ws-client - the engine's own code prevents it; or open - not closed, with what it "
         "takes and the way out. An entry covers exactly its artifact, versions and advisories: a "
         "new advisory for the same artifact fails the scan. All of them are in libraries that "
-        "Play WS and Akka bundle (shaded) - the Akka flavor's old Play WS lines for Scala 2.12 "
-        "and Scala 3 have no release with newer ones.",
+        "Play WS and Akka bundle (shaded), in their newest releases.",
         "",
     ]
     lines += accepted_table()

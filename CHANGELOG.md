@@ -37,16 +37,22 @@ Use one version for all ws-client artifacts on a classpath (see
 
 **Security**
 
+- **Play (Akka) engines on Scala 2.12 and Scala 3: AsyncHttpClient 2.16.1 and Netty 4.1.138**
+  in place of AsyncHttpClient 2.10.5 / Netty 4.1.45 (Scala 2.12) and 2.12.3 / 4.1.60 (Scala
+  3). The last Play WS for those Scala versions bundles the old ones, with dozens of
+  advisories and no newer release; the bundled jar is now the one of Play WS 2.2.18
+  (`shaded-asynchttpclient`, declared directly, Play WS's own excluded), as Scala 2.13 has
+  had since 1.2.0. **Behavior change:** these artifacts need Java 11+ now, and the newer
+  Netty parses responses more strictly (bare-LF lines, `Content-Length` with
+  `Transfer-Encoding`, control characters in headers are rejected).
 - A dependency matrix in the README and a daily vulnerability scan (`Vulnerability scan`
   workflow, `security/dependencies.py`): every published module's dependencies for every Scala
   version - transitive ones and the libraries other jars bundle under their own name (Play
   WS's AsyncHttpClient and Netty, Akka's and Pekko's protobuf, ...) - against OSV.dev, for
   `main` and, from this release on, for the latest release. A new advisory fails the scan and
-  opens an issue; the README badges show the last run. The 56 advisories known today (all in
-  libraries that Play WS and Akka bundle) are each listed with their status and reason: 52
-  not reachable through ws-client, 2 closed in ws-client's own code, 2 open (a local,
-  Windows-only denial of service in the Netty of Play WS for Akka on Scala 2.12 / 3 - use
-  Scala 2.13 or the Pekko flavor there). See
+  opens an issue; the README badges show the last run. The 8 advisories that remain (in the
+  AsyncHttpClient that Play WS bundles and the protobuf that Akka bundles) are each listed
+  with their reason - none is reachable through ws-client. See
   [Dependencies and vulnerabilities](docs/dependencies.md).
 - New scenarios on every engine: a line break in a caller-supplied endpoint, endpoint
   parameter, query parameter or header never reaches the wire (no header or request
