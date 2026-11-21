@@ -1,0 +1,10 @@
+{
+  "scanned": "main",
+  "date": "2026-11-21",
+  "artifacts": 230,
+  "newAdvisories": 0,
+  "accepted": 8,
+  "byStatus": {
+    "unreachable": 8
+  }
+}
