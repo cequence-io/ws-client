@@ -2,7 +2,8 @@ package io.cequence.wsclient.stream.impl
 
 import io.cequence.wsclient.stream.{AsyncStream, StreamRun}
 
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CancellationException
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.control.NonFatal
 import scala.util.{Failure, Success, Try}
@@ -25,6 +26,29 @@ private[wsclient] object NeutralRunner {
     new FoldLoop[A, S](stream, zero, f, promise, StreamRuntime.context(ec), headOnly = false)
       .start()
     promise.future
+  }
+
+  /** A fold run that can be cancelled (a cancelled run completes with what it has folded). */
+  def startFold[A, S](
+    stream: AsyncStream[A],
+    zero: S
+  )(
+    f: (S, A) => S
+  )(
+    ctx: RunContext
+  ): FoldRun[S] = {
+    val promise = Promise[S]()
+    val loop = new FoldLoop[A, S](stream, zero, f, promise, ctx, headOnly = false)
+    loop.start()
+    new FoldRun[S] {
+      override val result: Future[S] = promise.future
+      override def cancel(): Unit = loop.cancel()
+    }
+  }
+
+  private[wsclient] trait FoldRun[S] {
+    def result: Future[S]
+    def cancel(): Unit
   }
 
   def runHeadOption[A](
@@ -77,20 +101,70 @@ private[wsclient] object NeutralRunner {
     stream: AsyncStream[A]
   )(
     implicit ec: ExecutionContext
-  ): Future[AsyncStream[A]] = {
-    val promise = Promise[AsyncStream[A]]()
-    val ctx = StreamRuntime.context(ec)
+  ): Future[AsyncStream[A]] =
+    startPreflight(stream, StreamRuntime.context(ec)).result
 
-    execute(ec, promise) {
-      val cursor = Cursors.open(stream, ctx)
-      Cursors
-        .pull(cursor)
-        .onComplete {
-          case Success(first) => promise.success(singleShot(first, cursor))
-          case Failure(e)     => promise.failure(e)
-        }(Trampoline)
+  /**
+   * A preflight that can be cancelled: cancelling it before it completed cancels the run
+   * (which aborts the request), and a stream that arrives after the cancel is cancelled on
+   * arrival - nothing is held. After it completed, the stream is the caller's.
+   */
+  def startPreflight[A](
+    stream: AsyncStream[A],
+    ctx: RunContext
+  ): PreflightRun[A] = {
+    val promise = Promise[AsyncStream[A]]()
+    val cancelled = new AtomicBoolean(false)
+    val opened = new AtomicReference[Cursor[A]]()
+
+    // the cursor is cancelled once, by whoever sees both the cancel and the cursor
+    def cancelOpened(): Unit = {
+      val cursor = opened.getAndSet(null)
+      if (cursor != null) cursor.cancel()
     }
-    promise.future
+
+    // a cancel that came while this was queued sends no request at all
+    execute(ctx.ec, promise) {
+      if (!cancelled.get()) {
+        val cursor = Cursors.open(stream, ctx)
+        opened.set(cursor)
+        if (cancelled.get()) cancelOpened() // the cancel came while the stream opened
+        else
+          Cursors
+            .pull(cursor)
+            .onComplete {
+              case Success(first) =>
+                if (cancelled.get()) {
+                  cancelOpened()
+                  promise.tryFailure(new CancellationException("preflight cancelled"))
+                } else {
+                  opened.set(null) // handed over
+                  // a cancel between the check and here failed the promise first: the stream
+                  // nobody got is cancelled (`Cursor.cancel` is idempotent)
+                  if (!promise.trySuccess(singleShot(first, cursor))) cursor.cancel()
+                }
+                ()
+              case Failure(e) =>
+                promise.tryFailure(e)
+                ()
+            }(Trampoline)
+      }
+    }
+
+    new PreflightRun[A] {
+      override val result: Future[AsyncStream[A]] = promise.future
+      override def cancel(): Unit = {
+        cancelled.set(true)
+        cancelOpened()
+        promise.tryFailure(new CancellationException("preflight cancelled"))
+        ()
+      }
+    }
+  }
+
+  private[wsclient] trait PreflightRun[A] {
+    def result: Future[AsyncStream[A]]
+    def cancel(): Unit
   }
 
   // the rest of a preflighted run: replays its first result, then continues the same cursor

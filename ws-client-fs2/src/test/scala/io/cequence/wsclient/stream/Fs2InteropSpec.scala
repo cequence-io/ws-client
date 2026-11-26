@@ -74,6 +74,17 @@ class Fs2InteropSpec extends AnyWordSpec with Matchers {
       bridges.get shouldBe 0
     }
 
+    "run fromCall / unwrapCall / evalMapCall on the Future interpreter - no bridge" in {
+      val (compiled, bridges) = StreamDiagnostics.counted(
+        AsyncStream
+          .unwrapCall(AsyncCall.successful(AsyncStream(1, 2)))
+          .evalMapCall(n => AsyncCall.successful(n * 10))
+          .toFs2[IO]
+      )
+      runFs2(compiled) shouldBe Seq(10, 20)
+      bridges.get shouldBe 0
+    }
+
     "bridge a foreign leaf once, and a native fs2 leaf consumed neutrally once" in {
       val (compiled, bridges) =
         StreamDiagnostics.counted(

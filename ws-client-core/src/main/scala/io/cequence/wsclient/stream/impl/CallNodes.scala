@@ -1,7 +1,7 @@
 package io.cequence.wsclient.stream.impl
 
 import io.cequence.wsclient.concurrent.AsyncScheduler
-import io.cequence.wsclient.stream.{AsyncCall, NativeCall, Termination}
+import io.cequence.wsclient.stream.{AsyncCall, AsyncStream, NativeCall, Termination}
 
 import java.util.concurrent.TimeoutException
 import scala.collection.immutable
@@ -64,6 +64,30 @@ private[wsclient] final case class FromFutureCall[+A](f: ExecutionContext => Fut
 private[wsclient] final case class NativeCallLeaf[+A](leaf: NativeCall[A])
     extends CallLeaf[A] {
   def compileLeaf(c: CallCompiler): c.R[A] = c.native(leaf)
+}
+
+/**
+ * A run of `stream`, folding its elements (`AsyncStream.runFoldCall`): `zero` is evaluated
+ * once per run, a throw in `zero` or `f` fails the call. A backend runs the stream with its
+ * own compiler (ZIO: the ZIO stream itself); the neutral interpreter runs it on its own
+ * interpreter, and cancelling the run cancels the stream.
+ */
+private[wsclient] final case class RunStream[A, S](
+  stream: AsyncStream[A],
+  zero: () => S,
+  f: (S, A) => S
+) extends CallLeaf[S] {
+  def compileLeaf(c: CallCompiler): c.R[S] = c.runStream(stream, zero, f)
+}
+
+/**
+ * `stream.preflightCall` of a stream that is not a native preflight: the neutral interpreter's
+ * preflight, cancelled with the run (which aborts the request).
+ */
+private[wsclient] final case class RunPreflight[A](
+  stream: AsyncStream[A]
+) extends CallLeaf[AsyncStream[A]] {
+  def compileLeaf(c: CallCompiler): c.R[AsyncStream[A]] = c.runPreflight(stream)
 }
 
 /** `scheduler` is the neutral interpreter's timer; a native backend uses its own clock. */
@@ -166,8 +190,10 @@ private[wsclient] final case class GuaranteeCall[A](
  * The neutral interpreter (`CallFiber`) does not go through this visitor: it matches the two
  * sealed node sets directly, exhaustively - a new node does not compile there either.
  *
- * Version skew: a visitor method added after 1.3.0 gets a default implementation (e.g. over
- * `fromFuture` - one bridge), so an interop module built against an older core keeps working.
+ * Version skew: a visitor method added after the 1.3.0 release gets a default implementation
+ * (e.g. over `fromFuture` - one bridge), so an interop module built against an older core
+ * keeps working. Every method of this version is abstract: `runStream` and `runPreflight` are
+ * the nodes that run a stream, and a backend decides how (ZIO: natively, with its own fiber).
  */
 private[wsclient] trait CallCompiler {
 
@@ -186,6 +212,18 @@ private[wsclient] trait CallCompiler {
   def native[A](leaf: NativeCall[A]): R[A]
 
   def sleep(duration: FiniteDuration): R[Unit]
+
+  /**
+   * The fold of `stream` (`zero` per run): a backend's own run, or the neutral interpreter's.
+   */
+  def runStream[A, S](
+    stream: AsyncStream[A],
+    zero: () => S,
+    f: (S, A) => S
+  ): R[S]
+
+  /** The preflight of a stream that is not natively preflighted (`RunPreflight`). */
+  def runPreflight[A](stream: AsyncStream[A]): R[AsyncStream[A]]
 
   def traverse[A, B](
     items: immutable.Iterable[A],
@@ -286,6 +324,8 @@ private[wsclient] object CallCompiler {
     case _: DeferCall[_]                 => "defer"
     case _: FromFutureCall[_]            => "future"
     case NativeCallLeaf(native)          => s"native(${native.backend})"
+    case _: RunStream[_, _]              => "runStream"
+    case _: RunPreflight[_]              => "runPreflight"
     case SleepCall(duration, _)          => s"sleep($duration)"
     case TraverseCall(_, parallelism, _) => s"traverse(parallelism = $parallelism)"
   }

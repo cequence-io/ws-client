@@ -1,6 +1,12 @@
 package io.cequence.wsclient.stream.impl
 
-import io.cequence.wsclient.stream.{AsyncStream, NativePipe, NativeStream, Termination}
+import io.cequence.wsclient.stream.{
+  AsyncCall,
+  AsyncStream,
+  NativePipe,
+  NativeStream,
+  Termination
+}
 
 import java.util.concurrent.Flow
 import java.util.concurrent.atomic.AtomicLong
@@ -44,6 +50,10 @@ private[wsclient] trait StreamCompiler {
   ): R[A]
 
   def fromBlocking[A](open: () => BlockingCursor[A]): R[A]
+
+  /** Default: a run of the neutral interpreter through `fromCursor` (one bridge). */
+  def fromCall[A](call: AsyncCall[A]): R[A] =
+    fromCursor(ctx => new CallCursor[A](call, ctx), "fromCall")
 
   def native[A](leaf: NativeStream[A]): R[A]
 
@@ -169,6 +179,7 @@ private[wsclient] object StreamCompiler {
     case _: FutureStream[_]  => "futureStream"
     case _: FromPublisher[_] => "fromPublisher"
     case _: FromBlocking[_]  => "fromBlocking"
+    case _: FromCall[_]      => "fromCall"
     case Native(native)      => s"native(${native.backend})"
     case FromCursor(_, name) => name
   }

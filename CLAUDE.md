@@ -437,10 +437,10 @@ Four layers beyond the example-based and random specs:
   failures injected at every user function, on the neutral interpreter and the Akka, fs2 and ZIO
   compilers; neutral / fs2 / ZIO must match the model exactly, Akka may only differ by
   `FailedFast`) and `CallSmallScopeSpec` (ws-client-verification, since 1.3.0: every
-  `AsyncCall` plan up to a depth over 15 leaves and 30 operators - a throw injected at every
+  `AsyncCall` plan up to a depth over 25 leaves and 30 operators - a throw injected at every
   kind of user function - on the `Future` interpreter and the ZIO compiler; the model is the
   outcome plus what the hooks saw, no sanctioned difference; `-Dwsclient.verify.calls.depth`,
-  default 3 - 418,965 plans per interpreter, 20 s). Scopes: `-Dwsclient.verify.framing.maxLength` (default 5; audited at 6) and
+  default 3 - 698,275 plans per interpreter, 30 s). Scopes: `-Dwsclient.verify.framing.maxLength` (default 5; audited at 6) and
   `-Dwsclient.verify.operators.depth` (default 2; audited at 3, about 2 minutes). build.sbt's
   `verifyKnobs` forwards every `-Dwsclient.verify.*` into the forked JVMs.
 - **Lincheck model checks** - `sbt modelCheck` (a forked main in ws-client-verification, NOT part
@@ -460,10 +460,29 @@ Four layers beyond the example-based and random specs:
   prints are noise.
 - **TLA+ specs** - `formal/tla` (PlusCal; `check.sh` runs TLC over every spec, config and
   mutant and compares each outcome with the expected one; the tools jar is fetched, not
-  committed): the designs of `ZioCursor`, the `CursorPublisher` drain loop and two chained
-  `TransformPublisher`s, each label one atomic step of the implementation. A change to one of
+  committed): the designs of `ZioCursor`, the `CursorPublisher` drain loop, two chained
+  `TransformPublisher`s and the preflight's hand-over (`PreflightHandover`: its config
+  `PreflightHandoverWindow` EXPECTS a violation - the documented window of a stream handed
+  over as its caller cancelled), each label one atomic step of the implementation. A change to one of
   those classes' synchronization changes its spec first; a new invariant gets a mutant that
   violates it. See `formal/tla/README.md`.
+- **Extracted Lean model of the call run loop** (since 1.3.0) - `CallModel.scala`
+  (ws-client-verification, a small Scala subset: plans as first-order data, `denote`, the
+  frame-stack machine `step`) is used twice: `CallTreeSpec` (plan TREES - an operator's function
+  returns plans of its own - and a cancellation at the first `Gate`, on the `Future` interpreter
+  and the ZIO compiler, against `denote` and the machine; exhaustive to depth 2 by default,
+  `-Dwsclient.verify.calltrees.depth=3` = 895,400 plans, `.random` / `.seed` for the deep
+  sample - 200,000 on the audit run) and `sbt leanExtract` (scalameta parses the file and
+  translates it construct by construct into `formal/lean/WsClientProofs/Calls/Model.lean`;
+  nothing outside the subset is accepted). `Calls/Proofs.lean`: `machine_correct`, for EVERY
+  plan; `Calls/StackProofs.lean`: `stack_bounded` - at most `depth p` frames (the operators
+  nested on the way to the leaf; continuations add nothing, so `flatMap` / `recoverWith` loops
+  run on one frame: `chainRight_constant_stack`, `retryChain_constant_stack`). Guards: `sbt "leanExtract --check"` (the generated file is current) and `sbt
+  "leanExtract --cases 3000"` (translation validation: the generated Lean evaluated against
+  the Scala model). A change to `CallModel.scala` = `sbt leanExtract` + `lake build` in the
+  same commit; the spec `hooksOk` precondition (no Gate in a hook) is for the tests only, the
+  theorem needs none. Both guards were first shown to fail on a planted bug. The plan trees
+  found the ZIO `timeout` ordering defect (see the AsyncCall bullet below)
 - **Lean proofs** (since 1.3.0) - `formal/lean` (Lean 4.24.0, no dependencies; `check.sh` builds
   every proof and fails on `sorry` or a non-standard axiom - `Axioms.lean` lists the headline
   theorems): line-by-line MODELS of four pure parts - both delimiter framers,
@@ -485,27 +504,29 @@ generous timeouts (the fs2 100,000-element concat run: 1 s locally, over 15 s on
 #### State of the formalization (2026-11-17) - continue from here
 
 Last full run (20 cores, JDK 17), everything passes: small-scope specs at the default scopes
-(framing about 130,000 cases, 5 s; operators 25,616 pipelines per backend, 20 s) and at the
-audit scopes (framing length 6: about 590,000 cases; operators depth 3: 268,976 pipelines per
-backend, 2 minutes - manual, not in CI); calls 418,965 plans per interpreter (20 s);
-Lincheck 29 scenarios x 1000 interleavings (the 25 of 1.2.x: 398 s; the 4 of a call's run: 35
-s);
-TLC 8 configurations + 9 mutants, about 5 minutes (state counts in `formal/tla/README.md`);
-Lean (2026-11-17): 23 headline theorems, standard axioms only, build from scratch 30 s; the
-conformance check 4 x 20,000 cases, about 45 s.
+(framing about 130,000 cases, 5 s; operators 38,740 pipelines per backend, 20 s) and at the
+audit scopes (framing length 6: about 590,000 cases; operators depth 3: 364,164 pipelines per
+backend, 2 minutes - manual, not in CI); calls 698,275 plans per interpreter (30 s);
+Lincheck 35 scenarios x 1000 interleavings (the 25 of 1.2.x: 398 s; the 8 of a call's run: 70
+s; the 2 of the neutral preflight: 7 s);
+TLC 10 configurations + 11 mutants, about 5 minutes (state counts in `formal/tla/README.md`);
+Lean (2026-11-26): 34 headline theorems, standard axioms only, build from scratch 30 s; the
+conformance check 4 x 20,000 cases, about 45 s; the call plan trees: 895,400 plans of depth 3 +
+200,000 random deep ones per interpreter and for the machine, 76 s.
 
 Coverage per subject (`-` = nothing):
 
 | Subject | Small-scope | Lincheck (scenarios) | TLA+ | Lean (proof + conformance) |
 |---|---|---|---|---|
 | `ByteFraming.delimiter`, `DelimiterFramer` | `FramingSmallScopeSpec` (2 pinned edges) | - | - | both = `chunkSpec`; the 2 edges are the only differences from the model |
-| operators on neutral / Akka / fs2 / ZIO | `OperatorSmallScopeSpec` (16 sources, 40 operators) | - | - | - |
+| operators on neutral / Akka / fs2 / ZIO | `OperatorSmallScopeSpec` (20 sources, 44 operators) | - | - | - |
 | `TransformPublisher` (two chained) | - | 5 | `TransformChain`: 4 configs + `Legacy`, 3 mutants | - |
 | `CursorPublisher` | - | 4 x sync / async cursor, + 1 with `SubscriberCursor` | `CursorDrain`: 2 configs, 4 mutants | - |
 | `SubscriberCursor` | - | 2 x sync / async cursor, + the one above | - | - |
 | `AsyncBroadcastHub` | - | 5 | - | - |
 | `ZioCursor` | - | 2 (loop bound 100,000) | `ZioCursor`: 1 config, 2 mutants | - |
-| `AsyncCall` (`CallFiber`, `ZioCallCompiler`) | `CallSmallScopeSpec` (15 leaves, 30 operators, 2 interpreters) | 4 (cancel / timer / traverse failure vs completion) | - | - |
+| `AsyncCall` (`CallFiber`, `ZioCallCompiler`) | `CallSmallScopeSpec` (25 leaves, 30 operators, 2 interpreters); `CallTreeSpec` (plan trees + a cancel at the first gate, 2 interpreters + the machine) | 8 (cancel / timer / traverse failure vs completion; a race; a stream fold; `fromCall`'s cursor) | - | `machine_correct`: the run loop's frame-stack machine ends with `denote`, for every plan, and `stack_bounded`: never more frames than the plan's nesting depth - the model EXTRACTED from the Scala the tests run |
+| the neutral preflight (`NeutralRunner.startPreflight`) | - | 2 (a cancel racing the first element / the start: nothing held) | `PreflightHandover`: 2 configs (1 expected violation: the documented window), 2 mutants | - |
 | `WireFormat.encodeQueryComponent` / `url` | - | - | - | = RFC 3986 for every text; a strict reader takes back the params (base without `#`) |
 | `MultipartParams` | - | - | - | = WHATWG encoding; a value never leaves its parameter; backslash vs RFC 9110 shown |
 | `JsonStreamFrames.parseFrame` | - | - | - | = the line rules (fast path, joined-content search) for field prefixes without CR / LF / leading `:` |
@@ -520,7 +541,7 @@ What a pass does NOT say (the known gaps, most valuable first):
 2. No design-level spec of `SubscriberCursor` (the lock-free work-in-progress loop + the
    `delivering` window) and of `AsyncBroadcastHub` (first terminal event wins; registration vs
    shutdown): Lincheck samples their interleavings, nothing checks liveness. Next: `Hub.tla`,
-   `SubscriberCursor.tla` with mutants, same conventions as the three specs.
+   `SubscriberCursor.tla` with mutants, same conventions as the four specs.
 3. Nothing ties a TLA+ label to the code but review, and Lincheck checks no liveness. Each
    spec'd class has model-check scenarios for the same races - keep that pairing for every new
    spec (a spec without a model check of the real class, or the reverse, is half a result).
@@ -530,11 +551,14 @@ What a pass does NOT say (the known gaps, most valuable first):
    outside the text models. A multipart name with a backslash goes out as it is (as browsers
    send it), which an RFC 9110 quoted-string reader takes as an escape (proved witnesses in
    `Multipart/Proofs.lean`) - a behavior decision, left open.
-5. `AsyncCall`: the small-scope spec observes outcome + hook calls only - no cancellation
-   from outside, no timing; its model-check scenarios are 4 races of one run (the timer one
-   found the lost late outcome before release). No TLA+ spec of the suspension hand-over /
-   timeout race (`Racing` / `ChildEnded` / `TimedOut` / `Detached`), no Lean model of the run
-   loop (a frame-stack machine against the denotation - a candidate).
+5. `AsyncCall`: the linear small-scope spec observes outcome + hook calls only; `CallTreeSpec`
+   adds trees and ONE cancellation (the run parked at its first gate) - no cancel racing a
+   step, no timing, no `traverse` / race / stream in the trees. Its model-check scenarios are 8
+   races of one run and its streams (the timer one found the lost late outcome before
+   release). No TLA+ spec of the suspension hand-over / timeout race (`Racing` / `ChildEnded` /
+   `TimedOut` / `Detached`), and no Lean model of the concurrent parts (the sequential fragment
+   and one cancel are proved). A preflight's stream that completes in the instant its call is
+   cancelled is dropped unrun (documented; no spec of that window yet).
 6. Not modelled or model-checked: the fs2 pull bridge (`Fs2Compiler.cursorStream`), the
    blocking cursor (reads on the pool vs cancel vs `close()` exactly once), the Akka / Pekko
    stages (`NestedStreamsLogic`, `CursorSourceStage` - actor-confined, but their async
@@ -1033,8 +1057,8 @@ Style" and Odersky's "Lean Scala".
   oracle - valid nested number-heavy JSON (signed / unsigned exponents, values beyond a double
   or a Long, long decimals) repairs exactly like Jackson / play-json parses it - must stay at
   100% (it was 27%)
-- `AsyncStream` (since 1.2.0) is an initial encoding: an immutable AST of 19 private nodes
-  (`stream/impl/Nodes.scala` - 8 leaves, 11 operators unary on their upstream; second branches
+- `AsyncStream` (since 1.2.0) is an initial encoding: an immutable AST of 20 private nodes
+  (`stream/impl/Nodes.scala` - 9 leaves, 11 operators unary on their upstream; second branches
   are lazy children compiled at run time) dispatched through the `StreamCompiler` visitor, so a
   compiler that misses a node does not compile. Rules for every compiler (neutral, Akka/Pekko,
   fs2, ZIO): compiling is pure - no user thunk runs at compile time, only per run; the spine is
@@ -1127,7 +1151,7 @@ Style" and Odersky's "Lean Scala".
   (rule 1.3: a request from inside it only registers). A cursor that hands a promise to `ec`
   (`SubscriberCursor`, the hub consumer) keeps it reachable for `cancel()` (`delivering`), so
   a cancel in that window still completes the outstanding `next()` with `None`
-- `AsyncCall` (since 1.3.0) is the single-value twin of `AsyncStream`: an initial encoding (7
+- `AsyncCall` (since 1.3.0) is the single-value twin of `AsyncStream`: an initial encoding (9
   leaves, 6 operators unary on their upstream - `stream/impl/CallNodes.scala`; the calls user
   functions return are lazy children compiled per run), a `CallCompiler` visitor for backends
   (`ZioCallCompiler`), and the `Future` interpreter `CallRunner` - a run loop with an explicit
@@ -1152,7 +1176,10 @@ Style" and Odersky's "Lean Scala".
   no request any more; a loser that still ended with an outcome of its own (not the
   interpreter's `RunCancelled`) is reported too. The same on ZIO (`ZioCallCompiler.timeout`:
   the upstream on a daemon fiber, the scopes in a `FiberRef`) - interrupting a fiber would only
-  abandon a `ZIO.fromFuture`. A downstream retry engine's failover listener depends on the
+  abandon a `ZIO.fromFuture`. Without `onLate` too the upstream has a fiber of its own, which an
+  interrupt and a passing limit WAIT for: ZIO's own `timeout` interrupts its loser in the
+  background, so the hooks below an interrupted timeout ran AFTER the outer ones (the plan trees
+  of `CallTreeSpec` found it). A downstream retry engine's failover listener depends on the
   late outcome; the model check found two ways to lose it. A timer the scheduler refuses leaves
   the call unlimited (`onUnscheduled`, else a warning). `traverse` fails fast and cancels the
   running children. On ZIO: time is ZIO's `Clock` (the implicit `AsyncScheduler` is
@@ -1162,7 +1189,7 @@ Style" and Odersky's "Lean Scala".
   sends nothing (no abort for a server to see): a test of "interruption aborts the request"
   waits until the server has the request (the zio-http spec's `EndlessBody`), never a fixed
   sleep. Bridges (`CallDiagnostics.counted`, the same counter as
-  streams): a `Future` leaf on ZIO = 1, a foreign native leaf = 1, own leaves 0 - pinned per
+  streams): a `Future` leaf on ZIO = 1, a foreign native leaf = 1 (a `FutureBackedCall` - Akka's preflight - 0 on the `Future` interpreter), own leaves 0 - pinned per
   engine kind by `CallBridgesSpec` (verification: zio-http, and jdk for the `Future`-based
   ones) and the zio-http spec. The engine twins
   `execXRichCall` default to `AsyncCall.future(execXRich(...))`, so an engine (or a downstream
@@ -1175,6 +1202,40 @@ Style" and Odersky's "Lean Scala".
   the calls per run; a failure there is not offered to `recoverErrors`; every engine runs the testkit scenario
   `TestServers.callTwins` (same request, response, status handling, failures as the Rich
   method; nothing sent while building)
+- Calls and streams together (since 1.3.0; the user asked for every plain call to stay native
+  on ZIO): `AsyncCall.firstCompletedOf` has NO node of its own - it is a `traverse` (parallelism =
+  the number of calls) whose every element "fails" with its own outcome (a private stack-less
+  `FirstOutcome`), so the first outcome decides and the traversal cancels the rest on both
+  interpreters; a Future-leaf loser runs on. `AsyncStream.fromCall` is a leaf (`FromCall`,
+  visitor `fromCall` with a default over `fromCursor` - `CallCursor`, the neutral run; ZIO
+  overrides it with `ZStream.fromZIO`); `unwrapCall` and `evalMapCall` are `flatMapConcat` over
+  it, not nodes of their own (no default is possible for an operator without an `ec`).
+  `CallCursor.cancel()` ends the outstanding `next()` BEFORE it cancels the call - the run's
+  own cancellation must not reach `next()` as a failure (a model check found it). A stream's
+  fold as a call is the call leaf `RunStream` (visitor `runStream`, default a `Future` run of
+  the neutral interpreter; `CallRunner` runs it as a cancellable suspension over
+  `NeutralRunner.startFold`; ZIO runs the compiled ZIO stream with `runFoldZIO`). `zero` is
+  by-name: per run. `preflightCall` has three implementations, each cancellable before it
+  completed (the request is aborted): a native leaf's `NativePreflight.preflightCall` - ZIO's is
+  a `ZioCall` over `ZioBridges.preflightTask` (the same `preflightFiber` as the Future version
+  on a daemon fiber, awaited by the calling fiber; an interrupt interrupts that fiber - the
+  scope closes - and a run delivered in the same instant is released,
+  `PreflightedRun.abandon`; a fiber that ended without delivering fails the call), Akka /
+  Pekko's a `FutureBackedCall` (a `KillSwitches.single` before `prefixAndTail(1)`, a `decided`
+  CAS between result and cancel; 0 bridges on the `Future` interpreter) - and, for any other
+  stream, the call leaf `RunPreflight` (`NeutralRunner.startPreflight`: a cancel before its
+  queued body ran sends no request; a cancel racing the first element cancels the cursor).
+  Once a preflight completed the stream is its consumer's: a call cancelled at that very
+  instant (a `firstCompletedOf` loser, a `timeout`) drops the value and the held request stays
+  open - nothing cancels a value nobody received (documented; a fix needs releasable results at
+  every discard site of both interpreters). `fromCall` starts with the first demand on Akka /
+  Pekko, fs2 and ZIO, and as the neutral run opens, just before its first pull.
+  The fiber's pulls use `ZIO.interruptible`, not `restore`: a fiber forked inside an
+  uninterruptible region INHERITS it (the first version hung on `fiber.interrupt`). The
+  service download twins (`execBytesDownloadCall`, `execStreamDownloadCall`) go straight to
+  the engine like the Future ones. `ServiceWrapper.wrapCall` (default: a Future leaf over
+  `wrap`) is applied per run by every adapter; `LogServiceAdapter` reads the function name
+  where `wrapCall` is invoked and drops a trailing `Call`
 - Never call an upstream `Flow.Subscription` while holding a lock the upstream's thread may
   need: `TransformPublisher` (jdk / zio-http streams) delivers downstream signals under its
   monitor, so its upstream `request` / `cancel` calls are only recorded and issued by one

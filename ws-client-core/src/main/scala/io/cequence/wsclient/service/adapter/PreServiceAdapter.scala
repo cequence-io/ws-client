@@ -1,6 +1,7 @@
 package io.cequence.wsclient.service.adapter
 
 import io.cequence.wsclient.service.CloseableService
+import io.cequence.wsclient.stream.AsyncCall
 
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -17,6 +18,12 @@ private final class PreServiceAdapter[+S <: CloseableService](
     fun: S => Future[T]
   ): Future[T] =
     action().flatMap(_ => fun(underlying))
+
+  // `action` runs per run (a throw in it fails the call), then the call
+  override protected[adapter] def wrapCall[T](
+    fun: S => AsyncCall[T]
+  ): AsyncCall[T] =
+    AsyncCall.future(action()).flatMap(_ => fun(underlying))
 
   override def close(): Unit =
     underlying.close()

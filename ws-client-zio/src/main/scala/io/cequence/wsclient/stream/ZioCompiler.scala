@@ -125,8 +125,11 @@ private[wsclient] final class ZioCompiler(bridges: BridgeCounter) extends Stream
     compile(thunk())
   )
 
+  // the Future is foreign to ZIO: one bridge (as a `Future` leaf of a call)
   def futureStream[A](thunk: () => Future[AsyncStream[A]]): ZStream[Any, Throwable, A] =
-    ZStream.fromZIO(fromFuture(thunk())).flatMap(stream => safely(compile(stream)))
+    ZStream
+      .fromZIO(ZIO.suspendSucceed { bridges.add(1); fromFuture(thunk()) })
+      .flatMap(stream => safely(compile(stream)))
 
   // a publisher is foreign to ZIO: one bridge
   def fromPublisher[A](
@@ -154,6 +157,10 @@ private[wsclient] final class ZioCompiler(bridges: BridgeCounter) extends Stream
           bridges
         )
     }
+
+  // the call natively: ZIO leaves in it stay themselves, interrupting the stream interrupts it
+  override def fromCall[A](call: AsyncCall[A]): ZStream[Any, Throwable, A] =
+    ZStream.fromZIO(new ZioCallCompiler(bridges).compile(call))
 
   // a run of the neutral interpreter (hub sources, preflight): one bridge
   def fromCursor[A](

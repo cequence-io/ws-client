@@ -280,6 +280,41 @@ object AsyncCall {
     SleepCall(duration, scheduler)
 
   /**
+   * The outcome - a value or a failure - of whichever of `calls` ends first (since 1.3.0): a
+   * race. Every call is started (per run) as long as none has ended yet, and once one ended
+   * the others are CANCELLED: on ZIO interrupted (a zio-http request is aborted), on the
+   * `Future` interpreter stopped at their next step - a `Future` in flight cannot be stopped
+   * and runs on (see the class comment). That differs from `Future.firstCompletedOf`, whose
+   * losers always run on. Without calls: a failure with a `NoSuchElementException`. The result
+   * ends only once the cancelled calls ended (their hooks included).
+   *
+   * A loser that had completed in the same instant the winner did is discarded with its value:
+   * that is of no consequence for a plain value, but a call that yields a resource - a
+   * preflighted stream (`AsyncStream.preflightCall`, the download twins) - leaves it held, as
+   * nothing cancels a value nobody received. Race the requests that deliver heads, not the
+   * calls that yield streams.
+   */
+  def firstCompletedOf[A](calls: Seq[AsyncCall[A]]): AsyncCall[A] = {
+    val racers = calls.toVector
+    if (racers.isEmpty)
+      FailedCall(new NoSuchElementException("firstCompletedOf without calls"))
+    else
+      // a traversal fails fast and cancels the children still running: every racer "fails"
+      // with its own outcome, and the first of them decides
+      traverse(racers, racers.size)(racer =>
+        racer.transformWith(outcome => FailedCall(new FirstOutcome(outcome)))
+      ).transformWith {
+        case Failure(first: FirstOutcome) => fromTry(first.outcome.asInstanceOf[Try[A]])
+        case Failure(other)               => FailedCall(other)
+        case Success(_) => FailedCall(new IllegalStateException("A race without an outcome"))
+      }
+  }
+
+  // the outcome of the call that won a race, as a failure of its traversal - never escapes
+  private final class FirstOutcome(val outcome: Try[Any])
+      extends RuntimeException(null, null, false, false)
+
+  /**
    * `f` for every item (`items` read once per run), at most `parallelism` at once - the next
    * starting as soon as one finished - with the results in the order of `items`. The first
    * failure fails the whole: no further item starts, and the ones still running are cancelled

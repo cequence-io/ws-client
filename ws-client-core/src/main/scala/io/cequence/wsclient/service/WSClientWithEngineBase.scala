@@ -844,6 +844,154 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
         }
     }
 
+  /**
+   * [[execBytesDownload]] as a call (since 1.3.0): per run, the request is sent and the body
+   * read. On an engine with native calls (zio-http) it is a native effect: interrupting the
+   * call aborts the request, and the body is read by the engine's own stream.
+   */
+  protected def execBytesDownloadCall(
+    endPoint: PEP,
+    method: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    maxBytes: Long = Bytes.DefaultMaxBytes
+  ): AsyncCall[Bytes] =
+    if (maxBytes < 0)
+      AsyncCall.failed(
+        new IllegalArgumentException(s"maxBytes must not be negative: $maxBytes")
+      )
+    else
+      downloadMethod(method) match {
+        case Left(unsupported) => AsyncCall.failed(unsupported)
+        case Right(m) =>
+          bytesDownloadCall(
+            endPoint,
+            m,
+            endPointParam,
+            params,
+            bodyParams,
+            extraHeaders,
+            maxBytes
+          )
+      }
+
+  private def bytesDownloadCall(
+    endPoint: PEP,
+    method: String,
+    endPointParam: Option[String],
+    params: Seq[(PT, Option[Any])],
+    bodyParams: Seq[(PT, Option[JsValue])],
+    extraHeaders: Seq[(String, String)],
+    maxBytes: Long
+  ): AsyncCall[Bytes] =
+    engine match {
+      case streaming: WSClientOutputStreamCore =>
+        // the stream is built per run: nothing is sent while the call is built
+        AsyncCall.defer(
+          streaming
+            .execRawAsyncStream(
+              site,
+              endPoint.toString,
+              method,
+              endPointParam,
+              paramTuplesToStrings(params),
+              paramTuplesToStrings(downloadBody(method, bodyParams)),
+              extraHeaders
+            )
+            .mapError(mapHttpStatusErrors)
+            .runToBytesCall(maxBytes)
+        )
+      case _ =>
+        bufferedDownloadCall(
+          endPoint,
+          method,
+          endPointParam,
+          params,
+          bodyParams,
+          extraHeaders
+        ).map { response =>
+          val bytes = getResponseOrError(response).bytes
+          if (bytes.length > maxBytes)
+            throw new CequenceWSException(
+              s"The response body exceeds the limit of $maxBytes bytes"
+            )
+          else
+            bytes
+        }
+    }
+
+  /**
+   * [[execStreamDownload]] as a call (since 1.3.0): per run, the request is sent, and the call
+   * completes once the body started - `None` for a 404, a failure through `handleErrorCodes`
+   * for any other non-2xx status, else a SINGLE-RUN stream of the body (run or cancel it - an
+   * abandoned one holds its connection). On an engine with native calls (zio-http) the status
+   * is checked inside the effect and the body is the engine's own stream: interrupting the
+   * call before the body started aborts the request.
+   */
+  protected def execStreamDownloadCall(
+    endPoint: PEP,
+    method: String,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil
+  ): AsyncCall[Option[AsyncStream[Bytes]]] =
+    downloadMethod(method) match {
+      case Left(unsupported) => AsyncCall.failed(unsupported)
+      case Right(m) =>
+        streamDownloadCall(endPoint, m, endPointParam, params, bodyParams, extraHeaders)
+    }
+
+  private def streamDownloadCall(
+    endPoint: PEP,
+    method: String,
+    endPointParam: Option[String],
+    params: Seq[(PT, Option[Any])],
+    bodyParams: Seq[(PT, Option[JsValue])],
+    extraHeaders: Seq[(String, String)]
+  ): AsyncCall[Option[AsyncStream[Bytes]]] =
+    engine match {
+      case streaming: WSClientOutputStreamCore =>
+        AsyncCall
+          .defer(
+            streaming
+              .execRawAsyncStream(
+                site,
+                endPoint.toString,
+                method,
+                endPointParam,
+                paramTuplesToStrings(params),
+                paramTuplesToStrings(downloadBody(method, bodyParams)),
+                extraHeaders
+              )
+              .preflightCall
+          )
+          .transform[Option[AsyncStream[Bytes]]] {
+            case Success(stream) =>
+              Success(Some(stream.mapError(mapHttpStatusErrors)))
+            case Failure(e: CequenceWSHttpStatusException) if e.statusCode == 404 =>
+              Success(None)
+            case Failure(e) =>
+              Failure(mapHttpStatusErrors.applyOrElse(e, identity[Throwable]))
+          }
+      case _ =>
+        bufferedDownloadCall(
+          endPoint,
+          method,
+          endPointParam,
+          params,
+          bodyParams,
+          extraHeaders
+        ).map { response =>
+          if (response.response.isEmpty && response.status.code == 404)
+            None
+          else
+            Some(AsyncStream.single(getResponseOrError(response).bytes))
+        }
+    }
+
   // the download methods, normalized once (the wire method is the same on every engine)
   private def downloadMethod(method: String): Either[CequenceWSException, String] =
     method.toUpperCase(java.util.Locale.ROOT) match {
@@ -897,6 +1045,59 @@ trait WSClientWithEngineBase[T <: WSClientEngine] extends WSClient with HasWSCli
         engine.execDELETERich(site, ep, endPointParam, urlParams, extraHeaders, anySuccess)
       case other =>
         Future.failed(new CequenceWSException(s"Unsupported download method: $other"))
+    }
+  }
+
+  // as `bufferedDownload`, with the engine's call twins
+  private def bufferedDownloadCall(
+    endPoint: PEP,
+    method: String,
+    endPointParam: Option[String],
+    params: Seq[(PT, Option[Any])],
+    bodyParams: Seq[(PT, Option[JsValue])],
+    extraHeaders: Seq[(String, String)]
+  ): AsyncCall[RichResponse] = {
+    val anySuccess = 200 to 299
+    val ep = endPoint.toString
+    val urlParams = paramTuplesToStrings(params)
+    val body = paramTuplesToStrings(bodyParams)
+    method match {
+      case "GET" =>
+        engine.execGETRichCall(site, ep, endPointParam, urlParams, extraHeaders, anySuccess)
+      case "POST" =>
+        engine.execPOSTRichCall(
+          site,
+          ep,
+          endPointParam,
+          urlParams,
+          body,
+          extraHeaders,
+          anySuccess
+        )
+      case "PUT" =>
+        engine.execPUTRichCall(
+          site,
+          ep,
+          endPointParam,
+          urlParams,
+          body,
+          extraHeaders,
+          anySuccess
+        )
+      case "PATCH" =>
+        engine.execPATCHRichCall(
+          site,
+          ep,
+          endPointParam,
+          urlParams,
+          body,
+          extraHeaders,
+          anySuccess
+        )
+      case "DELETE" =>
+        engine.execDELETERichCall(site, ep, endPointParam, urlParams, extraHeaders, anySuccess)
+      case other =>
+        AsyncCall.failed(new CequenceWSException(s"Unsupported download method: $other"))
     }
   }
 

@@ -1066,6 +1066,173 @@ class ZioHttpWSClientEngineProviderSpec extends AnyWordSpec with Matchers {
       }
     }
 
+    // a service that only exposes the download call twins
+    final class DownloadService(
+      override protected val engine: io.cequence.wsclient.service.WSClientEngine,
+      override protected val site: SiteBinding
+    )(
+      implicit override protected val ec: scala.concurrent.ExecutionContext
+    ) extends io.cequence.wsclient.service.WSClientWithEngineBase[
+          io.cequence.wsclient.service.WSClientEngine
+        ] {
+      override protected type PEP = String
+      override protected type PT = String
+      override protected def ownsEngine: Boolean = false
+
+      def bytesCall(
+        endPoint: String,
+        maxBytes: Long = io.cequence.wsclient.stream.Bytes.DefaultMaxBytes
+      ) = execBytesDownloadCall(endPoint, "GET", maxBytes = maxBytes)
+
+      def streamCall(endPoint: String) = execStreamDownloadCall(endPoint, "GET")
+    }
+
+    // a server that answers with a status line and headers - a chunked body - and then sends
+    // nothing: the body never starts. `headersSent` gets a permit when the head is out, `aborted`
+    // one when the client dropped the connection (end of stream or a reset on the socket)
+    final class StalledBody {
+      val headersSent = new java.util.concurrent.Semaphore(0)
+      val aborted = new java.util.concurrent.Semaphore(0)
+
+      def serve[A](body: Int => A): A = {
+        val server = new java.net.ServerSocket(0)
+        val thread = new Thread(() => {
+          try {
+            val socket = server.accept()
+            try {
+              val in = socket.getInputStream
+              // the request head ends at the blank line
+              var tail = 0
+              while (tail != 0x0d0a0d0a) tail = (tail << 8) | in.read()
+              socket.getOutputStream.write(
+                ("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" +
+                  "Transfer-Encoding: chunked\r\n\r\n").getBytes("UTF-8")
+              )
+              socket.getOutputStream.flush()
+              headersSent.release()
+              while (in.read() != -1) {}
+              aborted.release()
+            } catch { case _: java.io.IOException => aborted.release() }
+            finally socket.close()
+          } catch { case _: java.io.IOException => () }
+        })
+        thread.setDaemon(true)
+        thread.start()
+        try body(server.getLocalPort)
+        finally server.close()
+      }
+
+      def awaitHeadersSent(): Boolean =
+        headersSent.tryAcquire(30, java.util.concurrent.TimeUnit.SECONDS)
+
+      def awaitAborted(): Boolean =
+        aborted.tryAcquire(30, java.util.concurrent.TimeUnit.SECONDS)
+    }
+
+    "run the download call twins natively on ZIO - bytes, stream, 404 as None, a classified failure" in {
+      import io.cequence.wsclient.stream.{CallDiagnostics, StreamDiagnostics}
+      import io.cequence.wsclient.stream.ZioInterop._
+
+      withServer(
+        "/ok" -> { exchange => respond(exchange, 200, "hello") },
+        "/missing" -> { exchange => respond(exchange, 404, "gone") },
+        "/limited" -> { exchange => respond(exchange, 429, "slow down") }
+      ) { port =>
+        val engine = newEngine()
+        try {
+          val service = new DownloadService(engine, SiteBinding(s"http://localhost:$port"))
+
+          val (bytesTask, bytesBridges) =
+            CallDiagnostics.counted(service.bytesCall("ok").toZIO)
+          new String(runTask(bytesTask).toArray, "UTF-8") shouldBe "hello"
+          bytesBridges.get shouldBe 0
+
+          val (streamTask, streamBridges) =
+            CallDiagnostics.counted(service.streamCall("ok").toZIO)
+          val body = runTask(streamTask).get
+          streamBridges.get shouldBe 0
+          val (bodyStream, bodyBridges) = StreamDiagnostics.counted(body.toZStream)
+          val bodyBytes = runTask(
+            bodyStream.runCollect.map(_.flatMap(chunk => zio.Chunk.fromArray(chunk.toArray)))
+          )
+          new String(bodyBytes.toArray, "UTF-8") shouldBe "hello"
+          bodyBridges.get shouldBe 0
+
+          runTask(service.streamCall("missing").toZIO) shouldBe None
+          runTask(service.streamCall("limited").toZIO.either).left.map(_.getClass) shouldBe
+            Left(classOf[CequenceWSHttpStatusException])
+          runTask(service.bytesCall("limited").toZIO.either).left.map(_.getClass) shouldBe
+            Left(classOf[CequenceWSHttpStatusException])
+
+          // as a Future: one bridge, same result
+          val (future, futureBridges) =
+            CallDiagnostics.counted(service.bytesCall("ok").toFuture)
+          new String(Await.result(future, 30.seconds).toArray, "UTF-8") shouldBe "hello"
+          futureBridges.get shouldBe 1
+        } finally engine.close()
+      }
+    }
+
+    "abort the request when a stream download call is interrupted before its body started" in {
+      import io.cequence.wsclient.stream.ZioInterop._
+
+      val stalled = new StalledBody
+      stalled.serve { port =>
+        val engine = newEngine()
+        try {
+          val service = new DownloadService(engine, SiteBinding(s"http://localhost:$port"))
+          val (sent, exit) = runTask(
+            for {
+              fiber <- service.streamCall("stall").toZIO.fork
+              sent <- zio.ZIO.attemptBlocking(stalled.awaitHeadersSent())
+              exit <- fiber.interrupt
+            } yield (sent, exit)
+          )
+          sent shouldBe true
+          exit.isInterrupted shouldBe true
+          stalled.awaitAborted() shouldBe true
+        } finally engine.close()
+      }
+    }
+
+    "abort the request when a stream download call's Future run is cancelled" in {
+      val stalled = new StalledBody
+      stalled.serve { port =>
+        val engine = newEngine()
+        try {
+          val service = new DownloadService(engine, SiteBinding(s"http://localhost:$port"))
+          val run = service.streamCall("stall").run()
+          stalled.awaitHeadersSent() shouldBe true
+          run.cancel()
+          Try(Await.result(run.result, 30.seconds)).failed.get shouldBe
+            a[java.util.concurrent.CancellationException]
+          stalled.awaitAborted() shouldBe true
+        } finally engine.close()
+      }
+    }
+
+    "abort the request when a bytes download call is interrupted while the body flows" in {
+      import io.cequence.wsclient.stream.ZioInterop._
+
+      val slow = new EndlessBody
+      withServer("/slow" -> slow.handler) { port =>
+        val engine = newEngine()
+        try {
+          val service = new DownloadService(engine, SiteBinding(s"http://localhost:$port"))
+          val (received, exit) = runTask(
+            for {
+              fiber <- service.bytesCall("slow").toZIO.fork
+              received <- zio.ZIO.attemptBlocking(slow.awaitReceived())
+              exit <- fiber.interrupt
+            } yield (received, exit)
+          )
+          received shouldBe true
+          exit.isInterrupted shouldBe true
+          slow.awaitAborted() shouldBe true
+        } finally engine.close()
+      }
+    }
+
     "run a service's own execXRich for its calls by default (an override is never bypassed)" in {
       import io.cequence.wsclient.stream.CallDiagnostics
       import io.cequence.wsclient.stream.ZioInterop._

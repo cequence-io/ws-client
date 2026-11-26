@@ -81,6 +81,16 @@ abstract class AsyncStream[+A] private[wsclient] () {
   /** `mapAsync(1)`: one future at a time, in order. A failed future fails the stream. */
   def evalMap[B](f: A => Future[B]): AsyncStream[B] = EvalMap(this, f)
 
+  /**
+   * As `evalMap`, with calls (since 1.3.0): one call at a time, in order - the next element is
+   * taken after the call of the previous one ended. Compiled for ZIO the call runs in the
+   * stream's own fiber, so an interrupted stream interrupts it (a zio-http request is
+   * aborted). A throw in `f` fails the stream, as a failed call does. It is `flatMapConcat`
+   * over [[AsyncStream.fromCall]].
+   */
+  def evalMapCall[B](f: A => AsyncCall[B]): AsyncStream[B] =
+    flatMapConcat(a => AsyncStream.fromCall(AsyncCall.defer(f(a))))
+
   /** `create` runs once per run; the function it returns is applied to every element. */
   def statefulMapConcat[B](create: () => A => immutable.Iterable[B]): AsyncStream[B] =
     Stateful[A, A => immutable.Iterable[B], B](
@@ -325,7 +335,67 @@ abstract class AsyncStream[+A] private[wsclient] () {
         NeutralRunner.preflight(this)
     }
 
+  /**
+   * `preflight` as a call (since 1.3.0): per run, the request is sent and the call completes
+   * once the first element (or the empty completion) arrived, with the single-shot stream
+   * `preflight` returns - and fails if the run fails before.
+   *
+   * Interrupting the call before it completed aborts the request and holds nothing, on every
+   * backend: a native ZIO stream (the zio-http engine's) and a native Akka / Pekko stream (the
+   * Play and pekko-http engines') are preflighted by their own backend and cancelled natively;
+   * any other stream is the neutral `preflight`, cancelled with the call.
+   *
+   * Ownership: once the call completed, the stream it returned belongs to its consumer, which
+   * must run or cancel it (as with `preflight`). A call that completes at the very instant it
+   * is cancelled - as the loser of `AsyncCall.firstCompletedOf` or of a `timeout`, or because
+   * its caller was cancelled - may have its stream discarded unrun, and a discarded stream
+   * holds its request open (nothing cancels a value nobody received). The window is the
+   * instant between the first element and the cancel; do not race or time out a call that
+   * yields a stream where that matters, but the request that delivers its head (`execXRich`).
+   */
+  def preflightCall: AsyncCall[AsyncStream[A]] =
+    AsyncCall.defer(
+      StreamCompiler.leafOf(this) match {
+        case Native(leaf: NativePreflight) =>
+          leaf.preflightCall(this)
+        case _ =>
+          RunPreflight(this)
+      }
+    )
+
   // ---------------------------------------------------------------------------- running
+
+  /**
+   * The fold of the stream as a call (since 1.3.0): `zero` (by-name) is evaluated once per
+   * run, and the stream is run - and its elements folded - per run of the call. Compiled for
+   * ZIO this is the ZIO stream's own run (a native ZIO stream is no bridge), interrupted with
+   * its fiber; on the `Future` interpreter it is a run of the neutral stream interpreter that
+   * is cancelled with the call. A throw in `zero` or `f` fails the call.
+   */
+  def runFoldCall[S](
+    zero: => S
+  )(
+    f: (S, A) => S
+  ): AsyncCall[S] =
+    RunStream(this, () => zero, f)
+
+  /** All elements, in order, as a call - see [[runFoldCall]]. */
+  def runToSeqCall: AsyncCall[immutable.Seq[A]] =
+    runFoldCall(Vector.newBuilder[A])(
+      (
+        builder,
+        a
+      ) => builder += a
+    ).map(_.result())
+
+  /** Runs the stream for its effects, as a call - see [[runFoldCall]]. */
+  def runDrainCall: AsyncCall[Unit] =
+    runFoldCall(())(
+      (
+        _,
+        _
+      ) => ()
+    )
 
   def runForeach(
     f: A => Unit
@@ -507,6 +577,27 @@ object AsyncStream {
 
   /** `thunk` is evaluated once per run - the place for per-run state. */
   def defer[A](thunk: => AsyncStream[A]): AsyncStream[A] = Defer(() => thunk)
+
+  /**
+   * One element: the call's value (since 1.3.0). The call runs once per run of the stream and
+   * is cancelled (on ZIO interrupted) with it; a failed call fails the stream. Compiled for
+   * ZIO it is `ZStream.fromZIO` over the natively compiled call: no bridge for a ZIO leaf, one
+   * for a `Future` leaf. Akka / Pekko and fs2 run it on the `Future` interpreter: a `Future`
+   * leaf costs no bridge there (as with `futureStream`), a ZIO leaf one. The call starts with
+   * the first demand on Akka / Pekko, fs2 and ZIO; the neutral interpreter starts it as the
+   * run opens (before the first pull, which follows at once in every consumer but a Reactive
+   * Streams subscriber that has not requested yet) - a run cancelled before its first pull
+   * cancels it.
+   */
+  def fromCall[A](call: AsyncCall[A]): AsyncStream[A] = FromCall(call)
+
+  /**
+   * The stream a call yields (since 1.3.0), for a stream whose start is a plain call (e.g. a
+   * session or a cache created before the stream is opened). Per run the call runs first and
+   * is cancelled with the stream; once it completed its stream follows.
+   */
+  def unwrapCall[A](call: AsyncCall[AsyncStream[A]]): AsyncStream[A] =
+    fromCall(call).flatMapConcat(stream => stream)
 
   /** One element: the future's value. `f` (by-name) is evaluated once per run. */
   def future[A](f: => Future[A]): AsyncStream[A] =

@@ -7,7 +7,7 @@ import io.cequence.wsclient.service.{
   WSClientOutputStreamCore,
   WSClientWithEngineAsyncStreamingBase
 }
-import io.cequence.wsclient.stream.{AsyncStream, Bytes, StreamDiagnostics}
+import io.cequence.wsclient.stream.{AsyncStream, ByteFraming, Bytes, StreamDiagnostics}
 import play.api.libs.json.{JsValue, Json}
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
@@ -32,11 +32,20 @@ final case class AsyncStreamContract(
   // a run cancelled before the response head arrived: the request is aborted - at the cancel,
   // or as soon as the late head is there (never read to the end of its body)
   cancelBeforeHeadAbortedRequest: Boolean,
+  // the same for `preflightCall` of the stream with a (neutral) framing pipe, cancelled while
+  // the head is still held back
+  cancelPreflightBeforeHeadAbortedRequest: Boolean,
   rawBytesIntact: Boolean,
   downloadBytesIntact: Boolean,
   postDownloadBytesIntact: Boolean,
   streamedDownloadIntact: Boolean,
   notFoundDownload: Option[String],
+  // the same downloads as calls (`execGETBytesCall`, `execPOSTBytesCall`, `execGETStreamCall`:
+  // run as a Future): the same bytes, the same 404
+  downloadCallBytesIntact: Boolean,
+  postDownloadCallBytesIntact: Boolean,
+  streamedDownloadCallIntact: Boolean,
+  notFoundDownloadCall: Option[String],
   // the plan (`describe`) of a streamed download: its 404 preflight replays a neutral stream,
   // or - on an engine whose streams are native Akka / Pekko / ZIO leaves - stays native
   downloadPlan: String,
@@ -58,11 +67,16 @@ object AsyncStreamContract {
     statusFailure = Some("CequenceWSHttpStatusException: 503"),
     takeOneAbortedRequest = true,
     cancelBeforeHeadAbortedRequest = true,
+    cancelPreflightBeforeHeadAbortedRequest = true,
     rawBytesIntact = true,
     downloadBytesIntact = true,
     postDownloadBytesIntact = true,
     streamedDownloadIntact = true,
     notFoundDownload = Some("None"),
+    downloadCallBytesIntact = true,
+    postDownloadCallBytesIntact = true,
+    streamedDownloadCallIntact = true,
+    notFoundDownloadCall = Some("None"),
     downloadPlan = "preflight -> mapError",
     neutralBridges = 0,
     wireUrlMatchesRequest = true,
@@ -137,6 +151,8 @@ object AsyncStreamContract {
     val streamFinished = new CountDownLatch(1)
     val lateRequested, lateFinished = new CountDownLatch(1)
     val lateAborted = new AtomicBoolean(false)
+    val latePfRequested, latePfFinished = new CountDownLatch(1)
+    val latePfAborted = new AtomicBoolean(false)
     val received = new AtomicReference[(String, Array[Byte])](("", Array.emptyByteArray))
 
     def sendBytes(
@@ -203,6 +219,27 @@ object AsyncStreamContract {
       },
       // the response head only after 600 ms, then events every 20 ms until the client goes
       // away (or 6 s pass)
+      "/latepf" -> { exchange =>
+        exchange.getRequestBody.readAllBytes()
+        latePfRequested.countDown()
+        try {
+          Thread.sleep(600)
+          exchange.getResponseHeaders.add("Content-Type", "text/event-stream")
+          exchange.sendResponseHeaders(200, 0)
+          val out = exchange.getResponseBody
+          val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(6)
+          while (System.nanoTime() < deadline) {
+            out.write(":keepalive\n\n".getBytes("UTF-8"))
+            out.flush()
+            Thread.sleep(20)
+          }
+        } catch {
+          case _: java.io.IOException => latePfAborted.set(true)
+        } finally {
+          Try(exchange.close())
+          latePfFinished.countDown()
+        }
+      },
       "/late" -> { exchange =>
         exchange.getRequestBody.readAllBytes()
         lateRequested.countDown()
@@ -282,6 +319,17 @@ object AsyncStreamContract {
       lateFinished.await(15, TimeUnit.SECONDS)
       val cancelBeforeHeadAborted = lateAborted.get()
 
+      // a preflight call cancelled while the head is held back, on a stream with a pipe
+      val latePreflight = engine
+        .execRawAsyncStream(site, "latepf", "GET")
+        .via(ByteFraming.delimiter(Bytes("\n\n".getBytes("UTF-8")), 65536))
+        .preflightCall
+        .run()
+      latePfRequested.await(15, TimeUnit.SECONDS)
+      latePreflight.cancel()
+      latePfFinished.await(15, TimeUnit.SECONDS)
+      val cancelPreflightBeforeHeadAborted = latePfAborted.get()
+
       // binary-safe downloads
       val download = await(service.execGETBytes("raw"))
       val postDownload =
@@ -291,6 +339,20 @@ object AsyncStreamContract {
       val streamedDownload =
         downloadStream.map(s => await(s.runToBytes())).map(_.toArray.toSeq)
       val notFound = await(service.execGETStream("missing")).map(_ => "Some").getOrElse("None")
+
+      // the same as calls
+      val downloadCall = await(service.execGETBytesCall("raw").toFuture)
+      val postDownloadCall =
+        await(
+          service
+            .execPOSTBytesCall("raw", bodyParams = Seq("a" -> Some(Json.toJson(1))))
+            .toFuture
+        )
+      val streamedDownloadCall = await(service.execGETStreamCall("raw").toFuture)
+        .map(s => await(s.runToBytes()))
+        .map(_.toArray.toSeq)
+      val notFoundCall =
+        await(service.execGETStreamCall("missing").toFuture).map(_ => "Some").getOrElse("None")
 
       val neutralBridges = bridges.get + rawBridges.get
 
@@ -319,11 +381,16 @@ object AsyncStreamContract {
         statusFailure = statusFailure,
         takeOneAbortedRequest = takeOneAborted,
         cancelBeforeHeadAbortedRequest = cancelBeforeHeadAborted,
+        cancelPreflightBeforeHeadAbortedRequest = cancelPreflightBeforeHeadAborted,
         rawBytesIntact = rawBytes.toArray.toSeq == AllBytes.toSeq,
         downloadBytesIntact = download == Bytes(AllBytes),
         postDownloadBytesIntact = postDownload == Bytes(AllBytes),
         streamedDownloadIntact = streamedDownload.contains(AllBytes.toSeq),
         notFoundDownload = Some(notFound),
+        downloadCallBytesIntact = downloadCall == Bytes(AllBytes),
+        postDownloadCallBytesIntact = postDownloadCall == Bytes(AllBytes),
+        streamedDownloadCallIntact = streamedDownloadCall.contains(AllBytes.toSeq),
+        notFoundDownloadCall = Some(notFoundCall),
         downloadPlan = downloadPlan,
         neutralBridges = neutralBridges,
         wireUrlMatchesRequest = wireTarget == target,

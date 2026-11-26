@@ -10,7 +10,7 @@ import io.cequence.wsclient.domain.{
   StatusData
 }
 import io.cequence.wsclient.service.spi.{DummyEngine, TransportSettings}
-import io.cequence.wsclient.stream.{AsyncStream, Bytes}
+import io.cequence.wsclient.stream.{AsyncCall, AsyncStream, Bytes}
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 import play.api.libs.json.{JsValue, Json}
@@ -214,6 +214,22 @@ class WSClientWithEngineAsyncStreamingBaseSpec extends AnyWordSpec with Matchers
     ): Future[Bytes] =
       execBytesDownload(endPoint, method, bodyParams = body)
 
+    def bytesCall(
+      endPoint: String,
+      maxBytes: Long = Bytes.DefaultMaxBytes
+    ): AsyncCall[Bytes] =
+      execBytesDownloadCall(endPoint, "GET", maxBytes = maxBytes)
+
+    def streamCall(endPoint: String): AsyncCall[Option[AsyncStream[Bytes]]] =
+      execStreamDownloadCall(endPoint, "POST")
+
+    def downloadCall(
+      endPoint: String,
+      method: String,
+      body: Seq[(String, Option[JsValue])]
+    ): AsyncCall[Bytes] =
+      execBytesDownloadCall(endPoint, method, bodyParams = body)
+
     // a service-level override: the download helpers go straight to the engine on every engine
     override def execGETRich(
       endPoint: String,
@@ -265,6 +281,90 @@ class WSClientWithEngineAsyncStreamingBaseSpec extends AnyWordSpec with Matchers
       Try(await(negative)).failed.get shouldBe an[IllegalArgumentException]
       Try(await(AsyncStream.single(allBytes).runToBytes(-1))).failed.get shouldBe
         an[IllegalArgumentException]
+    }
+  }
+
+  private def awaitCall[T](call: AsyncCall[T]): T = await(call.toFuture)
+
+  "the download call twins" should {
+
+    "download bytes like the Future methods - GET and POST, bounded, classified" in {
+      val engine = new StreamingDummyEngine
+      val service = new Service(engine)
+      val get = service.execGETBytesCall("ok")
+      val post =
+        service.execPOSTBytesCall("ok", bodyParams = Seq("text" -> Some(Json.toJson("speak"))))
+      engine.calls.size shouldBe 0 // cold: building a call sends nothing
+      awaitCall(get) shouldBe allBytes
+      awaitCall(post) shouldBe allBytes
+      engine.calls.asScala.toList.map(c => (c._1, c._2)) shouldBe List(
+        ("ok", "GET"),
+        ("ok", "POST")
+      )
+      engine.calls.asScala.last._3 shouldBe Seq("text" -> Some(Json.toJson("speak")))
+
+      // a run is a new request
+      awaitCall(get)
+      engine.calls.size shouldBe 3
+
+      val tooLarge = Try(awaitCall(service.execGETBytesCall("ok", maxBytes = 4))).failed.get
+      tooLarge shouldBe a[CequenceWSException]
+      tooLarge.getMessage should include("4 bytes")
+      Try(awaitCall(service.execGETBytesCall("busy"))).failed.get shouldBe a[RateLimited]
+    }
+
+    "stream a download: None for a 404, a classified failure, else a single-run body" in {
+      val engine = new StreamingDummyEngine
+      val service = new Service(engine)
+      val missing = service.execGETStreamCall("missing")
+      engine.calls.size shouldBe 0
+      awaitCall(missing) shouldBe None
+      Try(awaitCall(service.execGETStreamCall("busy"))).failed.get shouldBe a[RateLimited]
+
+      val body = awaitCall(service.execPOSTStreamCall("ok")).get
+      await(body.runToBytes()) shouldBe allBytes
+      Try(await(body.runToSeq)).failed.get shouldBe an[IllegalStateException] // single run
+    }
+
+    "serve the same on a non-streaming engine, from the buffered body" in {
+      val service = new BufferedService(new BufferedDummyEngine)
+      awaitCall(service.bytesCall("ok")) shouldBe allBytes
+      awaitCall(service.streamCall("missing")) shouldBe None
+      await(awaitCall(service.streamCall("ok")).get.runToBytes()) shouldBe allBytes
+      Try(awaitCall(service.streamCall("busy"))).failed.get shouldBe a[RateLimited]
+      Try(awaitCall(service.bytesCall("busy"))).failed.get shouldBe a[RateLimited]
+      Try(
+        awaitCall(service.bytesCall("ok", maxBytes = 4))
+      ).failed.get.getMessage should include(
+        "4 bytes"
+      )
+    }
+
+    "read the raw stream on a streaming engine, straight to the engine" in {
+      val service = new BufferedService(new StreamingDummyEngine)
+      awaitCall(service.bytesCall("ok")) shouldBe allBytes
+      awaitCall(service.streamCall("missing")) shouldBe None
+    }
+
+    "send body parameters on POST / PUT / PATCH only; reject a negative limit and a bad method" in {
+      val engine = new StreamingDummyEngine
+      val service = new BufferedService(engine)
+      val body = Seq("q" -> Some(Json.toJson("x")))
+      awaitCall(service.downloadCall("ok", "GET", body)) shouldBe allBytes
+      awaitCall(service.downloadCall("ok", "delete", body)) shouldBe allBytes
+      awaitCall(service.downloadCall("ok", "POST", body)) shouldBe allBytes
+      engine.calls.asScala.toList.map { case (_, method, bodyParams) =>
+        (method, bodyParams)
+      } shouldBe List("GET" -> Nil, "DELETE" -> Nil, "POST" -> body)
+
+      Try(
+        awaitCall(service.downloadCall("ok", "HEAD", Nil))
+      ).failed.get.getMessage should include(
+        "Unsupported download method: HEAD"
+      )
+      Try(awaitCall(service.bytesCall("ok", maxBytes = -1))).failed.get shouldBe an[
+        IllegalArgumentException
+      ]
     }
   }
 

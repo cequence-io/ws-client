@@ -1,6 +1,7 @@
 package io.cequence.wsclient.service.adapter
 
 import io.cequence.wsclient.service.CloseableService
+import io.cequence.wsclient.stream.AsyncCall
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.control.NonFatal
@@ -34,6 +35,21 @@ private final class RepackExceptionsAdapter[+S <: CloseableService](
         }
     }
   }
+
+  // `fun` runs per run, a throw in it fails the call; an interruption is never repacked
+  override protected[adapter] def wrapCall[T](
+    fun: S => AsyncCall[T]
+  ): AsyncCall[T] =
+    AsyncCall.defer(fun(underlying)).recoverWith {
+      case e if repackExceptions.isDefinedAt(e) =>
+        // Be defensive in case repackExceptions itself throws
+        try AsyncCall.failed(repackExceptions(e))
+        catch {
+          case NonFatal(thrownDuringRepack) =>
+            thrownDuringRepack.addSuppressed(e)
+            AsyncCall.failed(thrownDuringRepack)
+        }
+    }
 
   override def close(): Unit = underlying.close()
 }

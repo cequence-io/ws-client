@@ -1,6 +1,12 @@
 package io.cequence.wsclient.stream.impl
 
-import io.cequence.wsclient.stream.{AsyncStream, NativePipe, NativeStream, Termination}
+import io.cequence.wsclient.stream.{
+  AsyncCall,
+  AsyncStream,
+  NativePipe,
+  NativeStream,
+  Termination
+}
 
 import java.util.concurrent.Flow
 import scala.collection.immutable
@@ -55,6 +61,11 @@ private[wsclient] final case class Defer[+A](thunk: () => AsyncStream[A]) extend
 private[wsclient] final case class FutureStream[+A](thunk: () => Future[AsyncStream[A]])
     extends Leaf[A] {
   def compileLeaf(c: StreamCompiler): c.R[A] = c.futureStream(thunk)
+}
+
+/** `fromCall`: one element, the call's value; the call runs once per run of the stream. */
+private[wsclient] final case class FromCall[+A](call: AsyncCall[A]) extends Leaf[A] {
+  def compileLeaf(c: StreamCompiler): c.R[A] = c.fromCall(call)
 }
 
 /** One factory call per run. */

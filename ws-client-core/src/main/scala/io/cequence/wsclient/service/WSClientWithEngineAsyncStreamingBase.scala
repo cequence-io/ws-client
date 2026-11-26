@@ -1,6 +1,6 @@
 package io.cequence.wsclient.service
 
-import io.cequence.wsclient.stream.{AsyncStream, Bytes}
+import io.cequence.wsclient.stream.{AsyncCall, AsyncStream, Bytes}
 import play.api.libs.json.JsValue
 
 import scala.concurrent.Future
@@ -131,4 +131,52 @@ trait WSClientWithEngineAsyncStreamingBase[T <: WSClientEngine with WSClientOutp
     extraHeaders: Seq[(String, String)] = Nil
   ): Future[Option[AsyncStream[Bytes]]] =
     execStreamDownload(endPoint, "POST", endPointParam, params, bodyParams, extraHeaders)
+
+  /** [[execGETBytes]] as a call (since 1.3.0) - see [[execBytesDownloadCall]]. */
+  def execGETBytesCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    maxBytes: Long = Bytes.DefaultMaxBytes
+  ): AsyncCall[Bytes] =
+    execBytesDownloadCall(endPoint, "GET", endPointParam, params, Nil, extraHeaders, maxBytes)
+
+  /** [[execPOSTBytes]] as a call (since 1.3.0) - see [[execBytesDownloadCall]]. */
+  def execPOSTBytesCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil,
+    maxBytes: Long = Bytes.DefaultMaxBytes
+  ): AsyncCall[Bytes] =
+    execBytesDownloadCall(
+      endPoint,
+      "POST",
+      endPointParam,
+      params,
+      bodyParams,
+      extraHeaders,
+      maxBytes
+    )
+
+  /** [[execGETStream]] as a call (since 1.3.0) - see [[execStreamDownloadCall]]. */
+  def execGETStreamCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil
+  ): AsyncCall[Option[AsyncStream[Bytes]]] =
+    execStreamDownloadCall(endPoint, "GET", endPointParam, params, Nil, extraHeaders)
+
+  /** [[execPOSTStream]] as a call (since 1.3.0) - see [[execStreamDownloadCall]]. */
+  def execPOSTStreamCall(
+    endPoint: PEP,
+    endPointParam: Option[String] = None,
+    params: Seq[(PT, Option[Any])] = Nil,
+    bodyParams: Seq[(PT, Option[JsValue])] = Nil,
+    extraHeaders: Seq[(String, String)] = Nil
+  ): AsyncCall[Option[AsyncStream[Bytes]]] =
+    execStreamDownloadCall(endPoint, "POST", endPointParam, params, bodyParams, extraHeaders)
 }

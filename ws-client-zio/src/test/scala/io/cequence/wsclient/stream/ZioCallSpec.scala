@@ -254,6 +254,30 @@ class ZioCallSpec extends AnyWordSpec with Matchers with ZioTestSupport {
       unsafeRun(ZIO.succeed(1).toAsyncCall.timeout(5.seconds).toZIO) shouldBe 1
     }
 
+    "wait for the upstream of an interrupted timeout: its hooks run first, innermost first" in {
+      // ZIO's own `timeout` interrupts its loser in the background: the outer hook would run
+      // before the inner one (found by the plan trees of verification's CallTreeSpec)
+      (1 to 20).foreach { _ =>
+        val order = new ConcurrentLinkedQueue[String]()
+        val parked = new AtomicBoolean(false)
+        val call = ZIO
+          .succeed(parked.set(true))
+          .zipRight(ZIO.never)
+          .toAsyncCall
+          .onTerminate(_ => { order.add("inner"); () })
+          .timeout(1.minute)
+          .onTerminate(_ => { order.add("outer"); () })
+        unsafeRun(
+          for {
+            fiber <- call.toZIO.fork
+            _ <- ZIO.succeed(()).repeatUntil(_ => parked.get)
+            _ <- fiber.interrupt
+          } yield ()
+        )
+        order.asScala.toList shouldBe List("inner", "outer")
+      }
+    }
+
     "fail with the default TimeoutException for a null error, and with what the error thunk throws" in {
       failure(ZIO.never.toAsyncCall.timeout(20.millis, null)).getMessage shouldBe
         "AsyncCall timed out after 20 milliseconds"

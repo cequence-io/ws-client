@@ -23,6 +23,30 @@ Use one version for all ws-client artifacts on a classpath (see
   Its `Future` methods run the same effect.
 - **zio-http for Scala 3** (3.3 LTS - zio-http's own Scala 3 artifacts need 3.3+).
 - `CallDiagnostics.counted` counts a call's bridges (hops between an effect and a `Future`).
+- **Every plain call can stay native on ZIO** (for a service that sits behind wrappers, or reads
+  a stream, or downloads):
+  - `ServiceWrapper.wrapCall` - the call twin of `wrap`, with a `Future`-leaf default (existing
+    wrappers keep working) and native overrides in `roundRobin`, `randomOrder`, `log`,
+    `preAction`, `repackExceptions`, `parallelTakeFirst` and the delegating wrappers - the
+    service is applied per run.
+  - `AsyncCall.firstCompletedOf(calls)` - a race; the losers are cancelled (on ZIO
+    interrupted). `parallelTakeFirst`'s call twin uses it - in both variants, the Akka-free one
+    and the `Materializer`-based `ServiceBaseAdaptersAkka`. A loser that completed in the same
+    instant as the winner is discarded with its value: a call that yields a stream (the
+    downloads) leaves it held, so race the requests that deliver heads, not those.
+  - `AsyncStream.fromCall` / `unwrapCall` / `evalMapCall`, and `runFoldCall` / `runToSeqCall` /
+    `runDrainCall` / `runToBytesCall` - streams and calls together, compiled natively for ZIO; on Akka / Pekko / fs2 `fromCall` runs on the `Future`
+    interpreter - no bridge for a `Future` leaf. ZIO's `futureStream` now counts its `Future` as
+    one bridge (diagnostics only).
+  - `execGETBytesCall`, `execPOSTBytesCall`, `execGETStreamCall`, `execPOSTStreamCall` on
+    `WSClientWithEngineAsyncStreamingBase` (and the protected `execBytesDownloadCall` /
+    `execStreamDownloadCall` on `WSClientWithEngineBase`), built on `AsyncStream.preflightCall`:
+    on zio-http the status check and the body are one effect, and interrupting the call before
+    the body started aborts the request - on the Play and pekko-http engines (a native Akka /
+    Pekko preflight) and on any other stream too (the neutral interpreter). Once the call
+    completed, the stream is its consumer's: a call cancelled at the very instant it completes
+    (a timeout firing as the first chunk arrives) may leave it unrun and held.
+  See [Calls](docs/calls.md).
 
 **Fixes**
 
@@ -61,9 +85,24 @@ Use one version for all ws-client artifacts on a classpath (see
 
 **Verification**
 
-- `AsyncCall`: a small-scope spec (every plan of up to 3 operators - 418,965 of them - on both
-  interpreters, against a model written from the scaladoc) and four model-check scenarios of a
-  run (`cancel()`, a timeout's timer and a failing `traverse` element racing completions).
+- `AsyncCall`: a small-scope spec (every plan of up to 3 operators - 698,275 of them - on both
+  interpreters, against a model written from the scaladoc) and eight model-check scenarios of a
+  run (`cancel()`, a timeout's timer and a failing `traverse` element racing completions, a
+  race, a stream fold, `fromCall`'s cursor).
+- Plan trees (`CallTreeSpec`): every `AsyncCall` plan of up to 3 operators in which a
+  continuation, a recovery or a hook holds a plan of its own (895,400 of them), and 200,000
+  random deep ones, on both interpreters, with the run cancelled where it first parks - against
+  a model of the call and of its run loop. It found a real defect before release: on ZIO a run
+  interrupted below a `timeout` ran the hooks above the timeout before the hooks below it (ZIO's
+  own `timeout` interrupts its loser in the background); the timeout now waits for its upstream.
+- The Lean model of the call run loop is extracted from the Scala source the tests run
+  (`sbt leanExtract`), not transliterated: `machine_correct` proves, for every plan, that the
+  frame-stack machine ends with the plan's meaning, and `stack_bounded` that it never holds more
+  frames than the plan's nesting depth (a chain of `flatMap` continuations or a retry chain of
+  any length runs on one frame). Two checks (`leanExtract --check`, `--cases`) keep the
+  extraction honest.
+- A model check of the neutral preflight (a cancel racing the first element holds nothing); the
+  model checks are 35 scenarios now.
 - Lean 4 proofs, for every input, of what four pure parts compute: both delimiter framers (they
   agree, and differ from their documented model only at the two known edges near the frame
   limit), `WireFormat.encodeQueryComponent` and `WireFormat.url` (RFC 3986), the multipart

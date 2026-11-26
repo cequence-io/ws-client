@@ -12,8 +12,9 @@ trait ParallelServiceAdapters[S <: CloseableService] { self: ServiceBaseAdapters
   /**
    * Runs every call on ALL `underlyings` at once and completes with the first one to complete
    * (a response or a failure). Privacy and cost: the full request reaches every provider, and
-   * the losing calls are not cancelled - they complete (and are billed) anyway. Only combine
-   * providers that may all see the data.
+   * the losing calls are not cancelled - they complete (and are billed) anyway. (The call
+   * twins, since 1.3.0, cancel the losers: on ZIO a zio-http request is aborted, a `Future`
+   * engine's request runs on.) Only combine providers that may all see the data.
    */
   def parallelTakeFirst(underlyings: S*): S =
     wrapAndDelegate(new FirstCompletedAdapter(underlyings))

@@ -139,7 +139,10 @@ private[wsclient] final class CallFiber(
   private def resume(signal: Signal): Unit =
     try
       ec.execute(new Runnable {
-        override def run(): Unit = loop(signal)
+        // the run's bridge counter is the thread's while the loop runs: a thunk, a user
+        // function or a `start()` that builds or compiles a stream (a native preflight's
+        // `preflightCall`) counts its bridges into the scope that started the run
+        override def run(): Unit = BridgeCounter.withCounter(bridges)(loop(signal))
       })
     catch {
       // the run's ec rejects (e.g. shut down): nothing can run user code any more
@@ -204,11 +207,54 @@ private[wsclient] final class CallFiber(
         }
 
     case NativeCallLeaf(native) =>
-      bridges.add(1)
+      native match {
+        case _: FutureBackedCall => // this interpreter's own kind of run
+        case _                   => bridges.add(1)
+      }
       Try(native.start()) match {
         case Failure(e)   => new Err(e)
         case Success(run) =>
           // the native run's cancellation is not waited for (see the class comment)
+          val suspension = suspend(
+            Cancellable,
+            () => {
+              run.cancel()
+              Nil
+            }
+          )
+          run.result.onComplete(outcome => suspension.complete(signalOf(outcome)))(Trampoline)
+          checkCancelled(suspension)
+          null
+      }
+
+    case RunStream(stream, zero, f) =>
+      // a run of the neutral stream interpreter, cancelled with this one (not waited for)
+      Try(zero()).flatMap(z =>
+        Try(
+          NeutralRunner.startFold(stream, z)(f.asInstanceOf[(Any, Any) => Any])(
+            StreamRuntime.context(ec, bridges)
+          )
+        )
+      ) match {
+        case Failure(e) => new Err(e)
+        case Success(run) =>
+          val suspension = suspend(
+            Cancellable,
+            () => {
+              run.cancel()
+              Nil
+            }
+          )
+          run.result.onComplete(outcome => suspension.complete(signalOf(outcome)))(Trampoline)
+          checkCancelled(suspension)
+          null
+      }
+
+    case RunPreflight(stream) =>
+      // the neutral preflight, cancelled with this run: the request is aborted
+      Try(NeutralRunner.startPreflight(stream, StreamRuntime.context(ec, bridges))) match {
+        case Failure(e) => new Err(e)
+        case Success(run) =>
           val suspension = suspend(
             Cancellable,
             () => {

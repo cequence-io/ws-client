@@ -94,6 +94,14 @@ call.toZIO                           // a ZIO Task - ws-client-zio
   once, the next starting as one finishes, results in input order. The first failure fails the
   whole: no further item starts, the running ones are cancelled. `parallelism = 1` runs them
   one after the other.
+- **Race:** `AsyncCall.firstCompletedOf(calls)` - the outcome (a value or a failure) of
+  whichever call ends first; the others are then cancelled - on ZIO interrupted, so a
+  `zio-http` request is aborted; on the `Future` interpreter a native leaf is cancelled and a
+  `Future` in flight runs on. That differs from `Future.firstCompletedOf`, whose losers always
+  run on. No calls: a `NoSuchElementException`. A loser that completed in the same instant as
+  the winner is discarded with its value - of no consequence for a plain value, but a call that
+  yields a resource (a preflighted stream: `preflightCall`, the download twins) leaves it held:
+  race the requests that deliver heads (`execXRichCall`), not the calls that yield streams.
 - **Lifecycle:** `onTerminate(f)` / `guaranteeCase(f)` - exactly once per run that reached
   the call, with `Completed`, `Failed(e)` or `Cancelled`, before the outcome goes on; the hook
   itself is not interrupted. A failing hook fails a completed call and is added (suppressed) to
@@ -117,6 +125,52 @@ request, inside a retry - not around the retry.
 On the `Future` interpreter a timer the scheduler refuses (a limit beyond what an actor
 scheduler takes, a scheduler shut down) leaves the call unlimited: `onUnscheduled` is told
 (the other `timeout`s log a warning).
+
+## Calls and streams together
+
+Since 1.3.0 the two meet without a bridge on ZIO:
+
+- `AsyncStream.fromCall(call)` - a stream of one element, the call's value;
+  `AsyncStream.unwrapCall(call)` - the stream a call yields (a session or a cache created
+  before the stream opens). The call runs once per run of the stream and is interrupted with
+  it. On Akka / Pekko / fs2 it runs on the `Future` interpreter (a `Future` leaf in it costs no
+  bridge, as with `futureStream`; a native ZIO leaf counts one); on ZIO a `Future` leaf is
+  foreign and counts one - and so does `futureStream` (since 1.3.0). The call starts with the
+  first demand on Akka / Pekko, fs2 and ZIO; the neutral interpreter starts it as the run
+  opens, just before the first pull.
+- `stream.evalMapCall(f)` - `evalMap` with calls: one call at a time, in order (it is
+  `flatMapConcat` over `fromCall`). On ZIO the call runs in the stream's own fiber, so
+  FiberRefs reach it and an interrupted stream interrupts it.
+- `stream.runFoldCall(zero)(f)`, `runToSeqCall`, `runDrainCall` (and `runToBytesCall` for a
+  byte stream) - a stream's fold as a call. `zero` is by-name, evaluated per run (a mutable
+  accumulator is not shared between runs). On ZIO it is the ZIO stream's own run; on the
+  `Future` interpreter a run of the neutral stream interpreter that is cancelled with the
+  call.
+- `stream.preflightCall` - `preflight` as a call: per run the request is sent and the call
+  completes once the body started. Interrupting the call before the body started aborts the
+  request on every engine: a native ZIO stream (the `zio-http` engine's) and a native Akka /
+  Pekko stream (Play, pekko-http) are preflighted by their own backend, any other stream by the
+  neutral interpreter (the `RunPreflight` node), each cancelled with the call. Once the call
+  completed, the stream it returned is its consumer's - to run or to cancel. A call that
+  completes at the very instant it is cancelled (the loser of a race, a timeout firing as the
+  first chunk arrives) may have its stream discarded unrun, and a discarded stream holds its
+  request open: do not race or time out a call that yields a stream where that matters.
+
+The service downloads have call twins: `execGETBytesCall`, `execPOSTBytesCall`,
+`execGETStreamCall`, `execPOSTStreamCall` (and the protected `execBytesDownloadCall` /
+`execStreamDownloadCall`), built on those. Like the `Future` downloads they go straight to the
+engine - a service's own `execXRich` overrides apply to neither.
+
+## Service wrappers
+
+`ServiceWrapper` (the base of `roundRobin`, `randomOrder`, `log`, `preAction`,
+`repackExceptions` and `parallelTakeFirst`) has `wrapCall(fun: S => AsyncCall[T])` next to
+`wrap`: the function is applied to the wrapped service PER RUN, so a service behind a wrapper
+keeps its calls native. The default is a `Future` leaf over `wrap` (a wrapper written before
+1.3.0 keeps working); every wrapper of the library overrides it: the service picked per run
+(a re-run of a call goes to the next one), the `log` line written per run (the twin `fooCall`
+is logged as `foo`), the `preAction` action and the exception repacking inside the call, and
+`parallelTakeFirst` as a race whose losers are cancelled.
 
 ## Bridges and diagnostics
 

@@ -2,6 +2,7 @@ package io.cequence.wsclient.service.adapter
 
 import io.cequence.wsclient.StackWalkerUtil
 import io.cequence.wsclient.service.CloseableService
+import io.cequence.wsclient.stream.AsyncCall
 
 import java.util.Optional
 import java.util.function.Predicate
@@ -21,6 +22,26 @@ private final class LogServiceAdapter[+S <: CloseableService](
     log(s"${serviceName} - calling '${getFunctionName()}'")
     fun(underlying)
   }
+
+  // the name is read here, where the stack still has the caller's method (the twin `fooCall`
+  // is logged as `foo`); the line is written per run
+  override protected[adapter] def wrapCall[T](
+    fun: S => AsyncCall[T]
+  ): AsyncCall[T] = {
+    val twinName = getFunctionName()
+    val functionName =
+      if (twinName.length > CallSuffix.length && twinName.endsWith(CallSuffix))
+        twinName.dropRight(CallSuffix.length)
+      else
+        twinName
+
+    AsyncCall.defer {
+      log(s"${serviceName} - calling '${functionName}'")
+      fun(underlying)
+    }
+  }
+
+  private val CallSuffix = "Call"
 
   override def close(): Unit =
     underlying.close()

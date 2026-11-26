@@ -235,6 +235,18 @@ private[wsclient] final class Fs2Compiler[F[_]](
         bridge[A](foreign.openPublisher())
     }
 
+  // the call on the Future interpreter (a Future leaf in it is no bridge, as with
+  // `futureStream`); an interrupt cancels the run
+  override def fromCall[A](call: AsyncCall[A]): Stream[F, A] =
+    Stream.eval(
+      F.flatMap(F.executionContext) { ec =>
+        F.fromFutureCancelable(F.delay {
+          val run = BridgeCounter.withCounter(bridges)(CallRunner.start(call, ec))
+          (run.result, F.delay(run.cancel()))
+        })
+      }
+    )
+
   // a run of the neutral interpreter (hub sources, preflight): one bridge
   def fromCursor[A](
     open: RunContext => Cursor[A],

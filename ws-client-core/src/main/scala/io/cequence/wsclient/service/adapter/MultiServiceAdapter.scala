@@ -2,6 +2,8 @@ package io.cequence.wsclient.service.adapter
 
 import io.cequence.wsclient.service.CloseableService
 
+import io.cequence.wsclient.stream.AsyncCall
+
 import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.Future
 import scala.util.Random
@@ -18,6 +20,12 @@ private trait MultiServiceAdapter[+S <: CloseableService]
     fun: S => Future[T]
   ): Future[T] =
     fun(underlyings(calcIndex))
+
+  // the service is picked per run: a re-run of a call goes to the next one
+  override protected[adapter] def wrapCall[T](
+    fun: S => AsyncCall[T]
+  ): AsyncCall[T] =
+    AsyncCall.defer(fun(underlyings(calcIndex)))
 
   override def close(): Unit =
     underlyings.foreach(_.close())

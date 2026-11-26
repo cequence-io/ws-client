@@ -1,6 +1,6 @@
 package io.cequence.wsclient.stream.impl
 
-import io.cequence.wsclient.stream.AsyncStream
+import io.cequence.wsclient.stream.{AsyncCall, AsyncStream}
 
 import scala.concurrent.Future
 
@@ -19,6 +19,15 @@ import scala.concurrent.Future
  */
 private[wsclient] trait NativePreflight {
   def preflight[A](stream: AsyncStream[A]): Future[AsyncStream[A]]
+
+  /**
+   * `preflight` as a call (`AsyncStream.preflightCall`): per run, the same as `preflight`. A
+   * backend overrides it with a call that is native to it, interrupted - before it completed -
+   * with the fiber that runs it: the request is aborted and nothing is held. The default is a
+   * `Future` leaf.
+   */
+  def preflightCall[A](stream: AsyncStream[A]): AsyncCall[AsyncStream[A]] =
+    AsyncCall.future(preflight(stream))
 }
 
 private[wsclient] object NativePreflight {
@@ -27,3 +36,11 @@ private[wsclient] object NativePreflight {
   def singleRunOnly(): IllegalStateException =
     new IllegalStateException("A preflighted stream supports a single run only")
 }
+
+/**
+ * Marks a [[io.cequence.wsclient.stream.NativeCall]] whose `start()` is a plain `Future` run
+ * (an Akka / Pekko preflight): the `Future` interpreter - the call's own - counts no bridge
+ * for it, where any other interpreter (ZIO) does, as for every foreign leaf. It is still a
+ * native leaf: its `cancel()` is what a cancelled call reaches.
+ */
+private[wsclient] trait FutureBackedCall

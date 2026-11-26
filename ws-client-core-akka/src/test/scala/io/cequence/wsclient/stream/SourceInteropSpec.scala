@@ -111,6 +111,75 @@ class SourceInteropSpec extends AnyWordSpec with Matchers with BeforeAndAfterAll
       count shouldBe 1
     }
 
+    "run fromCall / unwrapCall / evalMapCall on the Future interpreter - no bridge" in {
+      val (result, count) = bridges(
+        runAkka(
+          AsyncStream
+            .unwrapCall(AsyncCall.successful(AsyncStream(1, 2)))
+            .evalMapCall(n => AsyncCall.successful(n * 10))
+            .toSource
+        )
+      )
+      result shouldBe Seq(10, 20)
+      count shouldBe 0
+    }
+
+    "run preflightCall of a native stream on the Future interpreter - no bridge, cancellable" in {
+      val (call, count) = CallDiagnostics.counted(Source(1 to 3).toAsyncStream.preflightCall)
+      val preflighted = await(call.toFuture)
+      count.get shouldBe 0
+      await(preflighted.runToSeq) shouldBe Seq(1, 2, 3)
+    }
+
+    "cancel the call when the stream of fromCall is cancelled" in {
+      val started = new java.util.concurrent.atomic.AtomicBoolean(false)
+      val cancelled = new java.util.concurrent.atomic.AtomicBoolean(false)
+      val native = new NativeCall[Int] {
+        override def start(): CallRun[Int] = {
+          started.set(true)
+          new CallRun[Int] {
+            private val promise = scala.concurrent.Promise[Int]()
+            override def result: Future[Int] = promise.future
+            override def cancel(): Unit = {
+              cancelled.set(true)
+              promise.tryFailure(new java.util.concurrent.CancellationException())
+              ()
+            }
+          }
+        }
+        override def backend: String = "test"
+      }
+      val (killSwitch, done) = AsyncStream
+        .fromCall(AsyncCall.fromNative(native))
+        .toSource
+        .viaMat(KillSwitches.single)(Keep.right)
+        .toMat(Sink.ignore)(Keep.both)
+        .run()
+      eventually(started.get shouldBe true)
+      killSwitch.shutdown()
+      await(done)
+      eventually(cancelled.get shouldBe true)
+    }
+
+    "start the call of fromCall with the first demand: a stream cancelled before it sends nothing" in {
+      val started = new java.util.concurrent.atomic.AtomicBoolean(false)
+      val native = new NativeCall[Int] {
+        override def start(): CallRun[Int] = {
+          started.set(true)
+          new CallRun[Int] {
+            override def result: Future[Int] = Future.successful(1)
+            override def cancel(): Unit = ()
+          }
+        }
+        override def backend: String = "test"
+      }
+      await(
+        AsyncStream.fromCall(AsyncCall.fromNative(native)).toSource.take(0).runWith(Sink.seq)
+      ) shouldBe Seq.empty
+      Thread.sleep(100)
+      started.get shouldBe false
+    }
+
     "run an Akka leaf on the neutral interpreter through its fallback (one bridge)" in {
       val (result, count) = bridges(await(Source(1 to 3).toAsyncStream.map(_ * 10).runToSeq))
       result shouldBe Seq(10, 20, 30)

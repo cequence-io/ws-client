@@ -1,6 +1,12 @@
 package io.cequence.wsclient.stream
 
-import io.cequence.wsclient.stream.impl.{BridgeCounter, CallCompiler, LateScope}
+import io.cequence.wsclient.stream.impl.{
+  BridgeCounter,
+  CallCompiler,
+  LateScope,
+  NeutralRunner,
+  StreamRuntime
+}
 import zio._
 
 import scala.collection.immutable
@@ -60,9 +66,11 @@ private[wsclient] final class ZioCallCompiler(bridges: BridgeCounter) extends Ca
   def compile[A](call: AsyncCall[A]): Task[A] =
     CallCompiler.compile(this, call)
 
-  // a call a user function builds, per run: a throw is a failure
+  // a call a user function builds, per run: a throw is a failure. The run's bridge counter is
+  // the thread's while it builds (a thunk that compiles a stream counts into the scope that
+  // compiled this call)
   private def child[A](build: => AsyncCall[A]): Task[A] =
-    ZIO.attempt(build).flatMap { call =>
+    ZIO.attempt(BridgeCounter.withCounter(bridges)(build)).flatMap { call =>
       if (call == null)
         ZIO.fail(new NullPointerException("A user function returned a null AsyncCall"))
       else
@@ -106,11 +114,50 @@ private[wsclient] final class ZioCallCompiler(bridges: BridgeCounter) extends Ca
       bridges.add(1)
       // the run is started and its cancel registered in one uninterruptible step
       ZIO.uninterruptibleMask { restore =>
-        ZIO.attempt(foreign.start()).flatMap { run =>
+        ZIO.attempt(BridgeCounter.withCounter(bridges)(foreign.start())).flatMap { run =>
           restore(ZIO.fromFuture(_ => run.result)).onInterrupt(ZIO.succeed(run.cancel()))
         }
       }
   }
+
+  // the neutral preflight (a non-ZIO stream), interrupted with the fiber: the request is aborted
+  def runPreflight[A](stream: AsyncStream[A]): Task[AsyncStream[A]] = {
+    bridges.add(1)
+    ZIO.uninterruptibleMask { restore =>
+      ZIO.executor.flatMap { executor =>
+        ZIO
+          .attempt(
+            NeutralRunner.startPreflight(
+              stream,
+              StreamRuntime.context(executor.asExecutionContext, bridges)
+            )
+          )
+          .flatMap { run =>
+            restore(ZIO.fromFuture(_ => run.result)).onInterrupt(ZIO.succeed(run.cancel()))
+          }
+      }
+    }
+  }
+
+  // the stream natively (ZioCompiler: a ZIO leaf stays itself), folded by ZIO's own run;
+  // `zero` and the user's function run under ZIO.attempt (a throw is a failure)
+  def runStream[A, S](
+    stream: AsyncStream[A],
+    zero: () => S,
+    f: (S, A) => S
+  ): Task[S] =
+    ZIO
+      .attempt(zero())
+      .flatMap(z =>
+        new ZioCompiler(bridges)
+          .compile(stream)
+          .runFoldZIO(z)(
+            (
+              s,
+              a
+            ) => ZIO.attempt(f(s, a))
+          )
+      )
 
   def sleep(duration: FiniteDuration): Task[Unit] =
     ZIO.sleep(Duration.fromScala(duration))
@@ -162,10 +209,10 @@ private[wsclient] final class ZioCallCompiler(bridges: BridgeCounter) extends Ca
       a => child(f(Success(a)))
     )
 
-  // ZIO's clock takes any limit. Without `onLate` the loser is interrupted. With it, the
-  // upstream runs on a fiber of its own: when the limit passes, a loser with a Future in
-  // flight (LateScope) is left to finish and reported; any other is interrupted, and
-  // reported if it still ended with an outcome of its own
+  // ZIO's clock takes any limit. The upstream runs on a fiber of its own. Without `onLate` the
+  // loser is interrupted - and waited for. With it, when the limit passes, a loser with a
+  // Future in flight (LateScope) is left to finish and reported; any other is interrupted,
+  // and reported if it still ended with an outcome of its own
   def timeout[A](
     up: Task[A],
     limit: FiniteDuration,
@@ -176,10 +223,21 @@ private[wsclient] final class ZioCallCompiler(bridges: BridgeCounter) extends Ca
       ZIO.suspendSucceed(ZIO.fail(CallCompiler.timeoutFailure(limit, error)))
 
     onLate match {
+      // the upstream on a fiber of its own, as ZIO's `timeout` runs it - but an interrupt of
+      // this fiber, and a limit that passes, WAIT for it to end (ZIO's own `timeout`
+      // interrupts the loser in the background): the hooks below ran, innermost first, before
+      // the outcome goes on, as on the `Future` interpreter
       case None =>
-        up.timeout(Duration.fromScala(limit)).flatMap {
-          case Some(a) => ZIO.succeed(a)
-          case None    => timedOut
+        ZIO.uninterruptibleMask { restore =>
+          for {
+            fiber <- restore(up).forkDaemon
+            raced <- restore(fiber.await.timeout(Duration.fromScala(limit)))
+              .onInterrupt(fiber.interrupt)
+            result <- raced match {
+              case Some(exit) => fiber.inheritAll *> ZIO.suspendSucceed(exit)
+              case None       => fiber.interrupt *> timedOut
+            }
+          } yield result
         }
 
       case Some(late) =>

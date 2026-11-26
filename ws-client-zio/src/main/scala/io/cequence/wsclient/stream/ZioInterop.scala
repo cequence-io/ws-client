@@ -41,6 +41,13 @@ private[wsclient] final class ZioLeaf[A] private[wsclient] (
 
   override def preflight[B](whole: AsyncStream[B]): Future[AsyncStream[B]] =
     ZioBridges.preflight(ZioCompiler.toZStream(whole), runtime)
+
+  // the same as an effect: native to ZIO, so interrupting it before it completed aborts the
+  // request (the preflight's scope is closed)
+  override def preflightCall[B](whole: AsyncStream[B]): AsyncCall[AsyncStream[B]] =
+    AsyncCall.fromNative(
+      new ZioCall(ZioBridges.preflightTask(ZioCompiler.toZStream(whole), runtime), runtime)
+    )
 }
 
 /** A ZIO pipeline kept native inside an [[AsyncPipe]]. */
@@ -250,38 +257,24 @@ private[wsclient] object ZioBridges {
   ): Future[AsyncStream[A]] = {
     val result = scala.concurrent.Promise[AsyncStream[A]]()
 
-    def hand(run: PreflightedRun[A]): UIO[Unit] =
-      ZIO.succeed {
-        result.trySuccess(AsyncStream.fromNative(new ZioLeaf(run.native, runtime, Some(run))))
-        ()
-      }
-
-    val start: ZIO[Any, Nothing, Unit] =
-      ZIO.uninterruptibleMask { restore =>
-        for {
-          scope <- Scope.make
-          runEnded <- Promise.make[Nothing, Unit]
-          started <- restore(
-            scope
-              .extend[Any](stream.toPull)
-              .flatMap(pull => pull.repeatUntil(_.nonEmpty).unsome.map(first => (first, pull)))
-          ).exit
-          _ <- started match {
-            case Exit.Success((Some(first), pull)) =>
-              val run = new PreflightedRun[A](
-                ZStream.fromChunk(first) ++ ZStream.repeatZIOChunkOption(pull),
-                exit => scope.close(exit).ensuring(runEnded.succeed(()))
+    val start: UIO[Unit] =
+      preflightFiber[A](
+        stream,
+        {
+          case Right(run) =>
+            ZIO.succeed {
+              result.trySuccess(
+                AsyncStream.fromNative(new ZioLeaf(run.native, runtime, Some(run)))
               )
-              hand(run) *> restore(runEnded.await)
-            case Exit.Success((None, _)) =>
-              scope.close(Exit.unit) *>
-                hand(new PreflightedRun[A](ZStream.empty, _ => ZIO.unit))
-            case Exit.Failure(cause) =>
-              // the stream's own exception, as it is (nothing attached)
-              scope.close(started) *> ZIO.succeed(result.tryFailure(cause.squash))
-          }
-        } yield ()
-      }
+              ()
+            }
+          case Left(error) =>
+            ZIO.succeed {
+              result.tryFailure(error)
+              ()
+            }
+        }
+      )
 
     // a fiber that ended without a result (a finalizer's defect, a runtime shutting down)
     Unsafe
@@ -290,6 +283,77 @@ private[wsclient] object ZioBridges {
       .foreach(result.tryFailure)(Trampoline)
     result.future
   }
+
+  /**
+   * `preflight` as an effect (`AsyncStream.preflightCall`): the same preflight, on a daemon
+   * fiber of its own (the pulls' children must outlive this call), awaited by the calling
+   * fiber. Interrupting the call before it completed interrupts that fiber: the preflight's
+   * scope is closed, so the request is aborted - and a run handed over in the same instant is
+   * released. Once the call completed, the stream it returned belongs to its consumer.
+   */
+  def preflightTask[A](
+    stream: ZStream[Any, Throwable, A],
+    runtime: Runtime[Any]
+  ): Task[AsyncStream[A]] =
+    ZIO.uninterruptibleMask { restore =>
+      for {
+        handoff <- Promise.make[Throwable, PreflightedRun[A]]
+        fiber <- preflightFiber[A](
+          stream,
+          {
+            case Right(run)  => handoff.succeed(run).unit
+            case Left(error) => handoff.fail(error).unit
+          }
+        )
+          // a fiber that ended without delivering (a finalizer's defect while the scope was
+          // closed): the waiting call must not wait for ever
+          .onError(cause => handoff.fail(cause.squash).unit)
+          .forkDaemon
+        run <- restore(handoff.await).onInterrupt(
+          // the fiber ended: a run it delivered before is ours to release
+          fiber.interrupt *> handoff.poll.flatMap {
+            case Some(delivered) => delivered.foldZIO(_ => ZIO.unit, _.abandon)
+            case None            => ZIO.unit
+          }
+        )
+      } yield AsyncStream.fromNative(new ZioLeaf(run.native, runtime, Some(run)))
+    }
+
+  // the preflight itself: `deliver` gets the run once the first chunk arrived (the effect then
+  // stays - holding the pulls' fiber - until the run ended), or the stream's own exception.
+  // The pulls and the wait are interruptible whatever the status of the fiber that forked this
+  // (a fiber inherits it): `ZIO.interruptible`, not the `uninterruptibleMask`'s `restore`
+  private def preflightFiber[A](
+    stream: ZStream[Any, Throwable, A],
+    deliver: Either[Throwable, PreflightedRun[A]] => UIO[Unit]
+  ): UIO[Unit] =
+    ZIO.uninterruptible(
+      for {
+        scope <- Scope.make
+        runEnded <- Promise.make[Nothing, Unit]
+        started <- ZIO
+          .interruptible(
+            scope
+              .extend[Any](stream.toPull)
+              .flatMap(pull => pull.repeatUntil(_.nonEmpty).unsome.map(first => (first, pull)))
+          )
+          .exit
+        _ <- started match {
+          case Exit.Success((Some(first), pull)) =>
+            val run = new PreflightedRun[A](
+              ZStream.fromChunk(first) ++ ZStream.repeatZIOChunkOption(pull),
+              exit => scope.close(exit).ensuring(runEnded.succeed(()))
+            )
+            deliver(Right(run)) *> ZIO.interruptible(runEnded.await)
+          case Exit.Success((None, _)) =>
+            scope.close(Exit.unit) *>
+              deliver(Right(new PreflightedRun[A](ZStream.empty, _ => ZIO.unit)))
+          case Exit.Failure(cause) =>
+            // the stream's own exception, as it is (nothing attached)
+            scope.close(started) *> deliver(Left(cause.squash))
+        }
+      } yield ()
+    )
 
   /**
    * The rest of a preflighted stream (`body`: the replayed first chunk, then the same pull)
@@ -318,6 +382,10 @@ private[wsclient] object ZioBridges {
           )
           .map(won => if (won) body else ZStream.fail(NativePreflight.singleRunOnly()))
       )
+
+    // a run nobody will consume: released unless a consumer claimed it
+    def abandon: UIO[Unit] =
+      if (claim()) release(Exit.unit).unit else ZIO.unit
 
     def publisher(runtime: Runtime[Any]): JFlow.Publisher[A] =
       if (claim()) ZioBridges.publisher(body, runtime, release)

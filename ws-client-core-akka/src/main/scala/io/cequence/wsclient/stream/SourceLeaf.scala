@@ -3,7 +3,7 @@ package io.cequence.wsclient.stream
 import akka.NotUsed
 import akka.stream.Materializer
 import akka.stream.scaladsl.{JavaFlowSupport, Source}
-import io.cequence.wsclient.stream.impl.NativePreflight
+import io.cequence.wsclient.stream.impl.{FutureBackedCall, NativePreflight}
 
 import java.util.concurrent.{Flow => JFlow}
 import scala.concurrent.Future
@@ -25,6 +25,20 @@ private[wsclient] final class SourceLeaf[A] private[wsclient] (
 
   override def preflight[B](stream: AsyncStream[B]): Future[AsyncStream[B]] =
     SourceCompiler.preflight(stream, fallbackMaterializer)
+
+  // cancelled before it completed, the run is aborted - the request too - and nothing is held
+  override def preflightCall[B](stream: AsyncStream[B]): AsyncCall[AsyncStream[B]] =
+    AsyncCall.fromNative(new NativeCall[AsyncStream[B]] with FutureBackedCall {
+      override def start(): CallRun[AsyncStream[B]] = {
+        val (future, cancelPreflight) =
+          SourceCompiler.startPreflight(stream, fallbackMaterializer)
+        new CallRun[AsyncStream[B]] {
+          override def result: Future[AsyncStream[B]] = future
+          override def cancel(): Unit = cancelPreflight()
+        }
+      }
+      override def backend: String = SourceLeaf.Backend
+    })
 
   override def backend: String = SourceLeaf.Backend
 }

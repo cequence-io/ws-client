@@ -5,6 +5,7 @@ import akka.stream.scaladsl.{Flow, JavaFlowSupport, Keep, Sink, Source}
 import akka.stream.{
   ActorAttributes,
   Attributes,
+  KillSwitches,
   Materializer,
   StreamSubscriptionTimeoutTerminationMode,
   SystemMaterializer
@@ -20,6 +21,7 @@ import io.cequence.wsclient.stream.stages.{
   TerminationStage
 }
 
+import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{Flow => JFlow}
 import scala.collection.immutable
@@ -125,32 +127,54 @@ private[wsclient] object SourceCompiler {
     stream: AsyncStream[A],
     materializer: () => Materializer
   ): Future[AsyncStream[A]] =
-    try
-      toSource(stream)
-        // no subscription timeout on the tail: a preflighted stream is run whenever its
-        // caller gets to it (and holds its run until then, like a neutral one)
-        .via(Flow[A].prefixAndTail(1).addAttributes(NoSubscriptionTimeout))
-        .runWith(Sink.head)(materializer())
-        .map { case (first, tail) =>
-          val used = new AtomicBoolean(false)
-          // claimed when a run is materialized (not at its first demand): a run cancelled
-          // before it pulled must still cancel the tail
-          def claim(): Source[A, NotUsed] =
-            if (used.compareAndSet(false, true)) Source(first).concatLazy(tail)
-            else Source.failed[A](NativePreflight.singleRunOnly())
-          val replay =
-            Source
-              .fromMaterializer(
-                (
-                  _,
-                  _
-                ) => claim()
-              )
-              .mapMaterializedValue(_ => NotUsed)
+    startPreflight(stream, materializer)._1
 
-          AsyncStream.fromNative(new SourceLeaf[A](replay, materializer))
-        }(Trampoline)
-    catch { case NonFatal(e) => Future.failed(e) }
+  /**
+   * `preflight` with a cancel: until the first element arrived it aborts the run (the request
+   * too, also one whose head has not arrived yet); once the stream was handed over it does
+   * nothing - the stream is the caller's. Never throws.
+   */
+  def startPreflight[A](
+    stream: AsyncStream[A],
+    materializer: () => Materializer
+  ): (Future[AsyncStream[A]], () => Unit) =
+    try {
+      // false until the stream is handed over - or the cancel decided first
+      val decided = new AtomicBoolean(false)
+      val (killSwitch, result) =
+        toSource(stream)
+          .viaMat(KillSwitches.single[A])(Keep.right)
+          // no subscription timeout on the tail: a preflighted stream is run whenever its
+          // caller gets to it (and holds its run until then, like a neutral one)
+          .via(Flow[A].prefixAndTail(1).addAttributes(NoSubscriptionTimeout))
+          .toMat(Sink.head)(Keep.both)
+          .run()(materializer())
+      val future = result.map { case (first, tail) =>
+        if (!decided.compareAndSet(false, true))
+          throw new CancellationException("preflight cancelled")
+        val used = new AtomicBoolean(false)
+        // claimed when a run is materialized (not at its first demand): a run cancelled
+        // before it pulled must still cancel the tail
+        def claim(): Source[A, NotUsed] =
+          if (used.compareAndSet(false, true)) Source(first).concatLazy(tail)
+          else Source.failed[A](NativePreflight.singleRunOnly())
+        val replay =
+          Source
+            .fromMaterializer(
+              (
+                _,
+                _
+              ) => claim()
+            )
+            .mapMaterializedValue(_ => NotUsed)
+
+        AsyncStream.fromNative(new SourceLeaf[A](replay, materializer))
+      }(Trampoline)
+      val cancel = () =>
+        if (decided.compareAndSet(false, true))
+          killSwitch.abort(new CancellationException("preflight cancelled"))
+      (future, cancel)
+    } catch { case NonFatal(e) => (Future.failed(e), () => ()) }
 
   // a substream (a prefixAndTail tail) that may be subscribed late, or never
   private val NoSubscriptionTimeout: Attributes =
@@ -242,6 +266,40 @@ private[wsclient] final class SourceCompiler(bridges: BridgeCounter) extends Str
             foreign.openPublisher().asInstanceOf[JFlow.Publisher[A]]
           )
         )
+    }
+
+  // the call on the Future interpreter (a Future leaf in it is Akka's own: no bridge, as with
+  // `futureStream`; a foreign native leaf counts through its fallback). It starts with the
+  // first demand, as `futureStream`'s future does (a stream cancelled before it sends nothing);
+  // cancelling the stream (or its end, a no-op) cancels the run.
+  override def fromCall[A](call: AsyncCall[A]): Source[A, NotUsed] =
+    lazily { () =>
+      Source.fromMaterializer {
+        (
+          materializer,
+          _
+        ) =>
+          val started =
+            try
+              Right(
+                BridgeCounter.withCounter(bridges)(
+                  CallRunner.start(call, materializer.executionContext)
+                )
+              )
+            catch { case NonFatal(e) => Left(e) }
+          started match {
+            case Left(e) => Source.failed[A](e)
+            case Right(run) =>
+              Source.future(run.result).watchTermination() {
+                (
+                  _,
+                  done
+                ) =>
+                  done.onComplete(_ => run.cancel())(Trampoline)
+                  NotUsed
+              }
+          }
+      }.mapMaterializedValue(_ => NotUsed)
     }
 
   // a run of the neutral interpreter (hub sources, preflight): one bridge

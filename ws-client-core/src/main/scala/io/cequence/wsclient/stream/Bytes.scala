@@ -186,6 +186,33 @@ object Bytes {
       else
         collect(maxBytes)
 
+    /**
+     * As [[runToBytes]], a call (since 1.3.0): per run, the stream is read - compiled for ZIO,
+     * natively - and interrupting the call cancels it.
+     */
+    def runToBytesCall(
+      maxBytes: Long = DefaultMaxBytes
+    ): AsyncCall[Bytes] =
+      if (maxBytes < 0)
+        AsyncCall.failed(
+          new IllegalArgumentException(s"maxBytes must not be negative: $maxBytes")
+        )
+      else
+        stream
+          .runFoldCall(new Builder)(
+            (
+              builder,
+              chunk
+            ) =>
+              if (builder.length.toLong + chunk.length > maxBytes)
+                throw new io.cequence.wsclient.domain.CequenceWSException(
+                  s"The response body exceeds the limit of $maxBytes bytes"
+                )
+              else
+                builder += chunk
+          )
+          .map(_.result())
+
     private def collect(
       maxBytes: Long
     )(
