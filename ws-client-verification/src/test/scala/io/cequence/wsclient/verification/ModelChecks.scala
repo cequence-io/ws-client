@@ -34,7 +34,8 @@ object ModelChecks {
       BridgeModelCheck,
       HubModelCheck,
       ZioCursorModelCheck,
-      CallRunModelCheck
+      CallRunModelCheck,
+      PreflightModelCheck
     )
 
   private def knob(

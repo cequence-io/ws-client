@@ -1,0 +1,13 @@
+--- a/PreflightHandover.tla	2026-11-26 23:27:08.139231073 +0100
++++ b/PreflightHandover.tla	2026-11-26 23:27:08.179231221 +0100
+@@ -34,9 +34,7 @@
+ begin
+ B1: bodyStarted := TRUE;
+     cancelledBeforeStart := cancelReturned;
+-    if cancelled then                     \* a cancel that came while this was queued
+-      goto BDone;
+-    end if;
++    skip;                                 \* (mutant) no pre-check
+ B2: cursorOpen := TRUE;                   \* Cursors.open: the request is sent
+ B3: opened := TRUE;                       \* opened.set(cursor)
+ B4: if cancelled then                     \* the cancel came while the stream opened

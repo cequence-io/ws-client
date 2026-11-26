@@ -18,3 +18,6 @@ import WsClientProofs.Multipart.Proofs
 import WsClientProofs.SseFrames.Spec
 import WsClientProofs.SseFrames.Model
 import WsClientProofs.SseFrames.Proofs
+import WsClientProofs.Calls.Model
+import WsClientProofs.Calls.Proofs
+import WsClientProofs.Calls.StackProofs

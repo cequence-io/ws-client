@@ -61,6 +61,49 @@ In words:
   (`indexOf("\n" + fieldPrefix)`), which finds the first line starting with the field and, in a
   raw payload, nothing.
 
+## The run loop of `AsyncCall`: extracted, not transliterated (since 1.3.0)
+
+`Calls/Model.lean` is not written by hand: `sbt leanExtract` generates it from
+`ws-client-verification/.../calls/CallModel.scala` - a small Scala subset (sealed traits and
+case classes, structurally recursive `def`s, `match`, `val`, `if`, `Int` arithmetic, `List` /
+`Option`; anything else fails the extraction). The same Scala file is what the plan-tree spec
+(`CallTreeSpec`) runs against the real `Future` interpreter and the ZIO compiler. It holds the
+plans (a call as first-order data), `denote` (what a plan means, from the scaladoc of
+`AsyncCall`) and `step` (the run loop of `CallFiber` as a transition function: signals, one
+continuation frame per operator, a hook as a child run beside its parent, `Stop` for a
+cancellation).
+
+`Calls/Proofs.lean` proves `machine_correct`: for EVERY plan - whatever the nesting of
+continuations, recoveries and hooks - the loop started on it reaches a configuration it cannot
+leave, whose outcome (a value, a failure, cancelled) and hook log are `denote p`
+(`machine_result` states it for any such end; `Steps.det` is why there is only one). That is
+the correctness of the defunctionalized run loop - the explicit frame stack that makes the
+interpreter stack-safe - against the compositional meaning.
+
+`Calls/StackProofs.lean` proves the other half of the claim, `stack_bounded`: the loop never
+holds more frames - the running fiber's and the waiting parents' together - than `depth p`,
+the number of operators the plan nests on the way down to its leaf, whatever the number of
+steps. A continuation (`flatMap`'s function, a recovery, a transformation) adds nothing: it
+runs with only the frames below it. So a chain of `n` calls, each the continuation of the one
+before (`chainRight`), and a retry chain (`retryChain`, each attempt's recovery the next
+attempt) run with ONE frame for any `n` (`chainRight_constant_stack`,
+`retryChain_constant_stack`), while `n` operators nested on one leaf (`chainLeft`) need `n`
+(`depth_chainLeft`) - the stack-safety the interpreter's tests pin at 100,000 `flatMap`s, as a
+theorem about the loop for every depth. (Plans are finite data: an infinite recursion is a
+family of ever longer plans, which the bound covers one by one.)
+
+Two checks keep the chain honest: `sbt "leanExtract --check"` fails when `Model.lean` is not the
+extraction of the Scala file, and `sbt "leanExtract --cases 3000"` evaluates the generated
+`denote` and `step` in the Lean interpreter on small-scope and random plans against the Scala
+model. Shown to fail on planted bugs: a recovery that adds one in the machine makes
+`Proofs.lean` fail to build; `+` extracted as `-` makes 71 of 500 plans differ.
+
+What is not covered: time (a `timeout` that does not fire is its upstream), `traverse`, races
+and streams, and concurrency (cancel racing a completion): the model checks and the linear
+small-scope spec cover those. `Int` is Scala's 32-bit `Int` in the tests and Lean's unbounded
+`Int` here - the plans use small numbers. A `Gate` in a hook (a hook is never cancelled in the
+real run loop) is not excluded from the theorem, only from the tests (`hooksOk`).
+
 ## What the proofs surfaced
 
 - A backslash in a multipart name or file name goes out as it is - as the WHATWG encoding (and
@@ -81,6 +124,9 @@ In words:
 formal/lean/check.sh         # build every proof and the conformance executable; fails on any
                              # `sorry` or an axiom beyond Lean's standard three (Axioms.lean)
 sbt leanConformance          # the models against the Scala code (after check.sh)
+sbt leanExtract              # rewrite Calls/Model.lean from CallModel.scala (then lake build)
+sbt "leanExtract --check"    # fail when Calls/Model.lean is not that extraction (CI)
+sbt "leanExtract --cases 3000"  # the generated Lean evaluated against the Scala model
 ```
 
 `check.sh` needs [elan](https://github.com/leanprover/elan); the toolchain is pinned in
@@ -96,8 +142,10 @@ executable; found from the working directory up by default).
 ## Conventions
 
 - A spec is written from the scaladoc / the RFC text alone, never from the code.
-- A model follows its Scala original line by line; a change to a modelled method changes its
-  model in the same commit (the conformance check fails otherwise). Java library calls go
+- A model follows its Scala original line by line (a model that is EXTRACTED - `Calls` - is the
+  Scala file itself: `sbt leanExtract` after any change to it, `--check` fails otherwise); a
+  change to a modelled method changes its model in the same commit (the conformance check
+  fails otherwise). Java library calls go
   through the shared models in `Java.lean` (arrays) and `JavaString.lean` (`String.replace`).
 - Every model has a conformance target, and a conformance target is first shown to fail on a
   bug planted in the Scala code.
@@ -115,6 +163,9 @@ Framing/                       Spec, Scan (the search loop both framers share), 
 WireFormat/                    Spec, Model, Proofs
 Multipart/                     Spec, Model, Proofs
 SseFrames/                     Spec, Model, Proofs
+Calls/                         Model (GENERATED by `sbt leanExtract`), Proofs (the loop
+                               computes `denote`), StackProofs (and holds at most `depth`
+                               frames)
 Conformance.lean               the executable `sbt leanConformance` drives
 Axioms.lean                    #print axioms of every headline theorem
 ```

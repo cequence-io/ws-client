@@ -1,6 +1,6 @@
 # TLA+ specs of the stream layer
 
-Design-level models of the three pieces of the stream layer whose correctness rests on an
+Design-level models of the four pieces of the stream layer whose correctness rests on an
 interleaving argument. Each spec is a PlusCal algorithm in which **one label is one atomic step
 of the implementation** (a volatile read or write, a compare-and-set, a monitor enter / exit, a
 promise completion), checked exhaustively with TLC for a small configuration.
@@ -14,6 +14,7 @@ these check every interleaving of a model, deadlock freedom and termination incl
 | `ZioCursor.tla` | the demand hand-over between `next()`, the stream's one fiber and `cancel()` | `ZioCursor` (ws-client-zio, `ZioInterop.scala`) |
 | `CursorDrain.tla` | the work-in-progress drain loop of a published run | `CursorSubscription` (ws-client-core, `stream/impl/CursorPublisher.scala`) |
 | `TransformChain.tla` | two chained transform stages between a source and a consumer | `TransformPublisher` (ws-client-core, `stream/TransformPublisher.scala`) |
+| `PreflightHandover.tla` | a preflight cancelled by its caller: the queued start, the pull's completion and `cancel()` | `NeutralRunner.startPreflight` (ws-client-core, `stream/impl/NeutralRunner.scala`) |
 
 ## Running
 
@@ -90,6 +91,26 @@ per input and, with `EarlyDone`, may end the stream early (the `[DONE]` event).
 TLC finds its deadlock - stage 2 calls stage 1 holding its own monitor while stage 1 signals
 stage 2 holding its own - within about 200 distinct states.
 
+### PreflightHandover
+
+The preflight of a stream (the call `AsyncStream.preflightCall` on the neutral interpreter, and
+`NeutralRunner.preflight`): three threads - the queued start (opens the stream, registers the
+pull), the pull's completion (hands the stream over, or - cancelled - drops it) and `cancel()`.
+
+- `NoLeak` - a preflight that ended cancelled holds nothing: if it sent a request, the cursor
+  was cancelled (also when the first element arrived in the instant before: the preflight
+  cancels the stream it could not hand over)
+- `NoRequestAfterCancel` - a `cancel()` that returned before the queued start began: no
+  request is sent at all
+- the config `PreflightHandoverWindow` checks `NoDisclaimedStream` and TLC finds the
+  counterexample on purpose: a stream handed over in the instant its caller cancelled (a race's
+  loser, a timeout firing as the first chunk arrives) is dropped unrun, and nothing releases
+  it. That is the window the docs of `preflightCall` / `firstCompletedOf` name; closing it
+  needs releasable results at every discard site of both interpreters.
+
+Its pair among the model checks is `PreflightModelCheck` (the real class); the Lincheck
+scenario was first shown to fail on the code without the cancel of the dropped stream.
+
 ## Results
 
 TLC 2.19. The state counts of the specs that hold do not depend on the run; a rejected spec or
@@ -106,6 +127,8 @@ each).
 | `TransformChainBurst` | 1 element, 1 or 2 outputs per input | holds | 592,199 |
 | `TransformChainOuts` | 2 elements, 0 or 2 outputs per input | holds | 4,000,050 |
 | `TransformChainLegacy` | `TransformChain` with `Legacy = TRUE` | deadlock (expected) | about 200 |
+| `PreflightHandover` | start, completion and cancel, one stream | holds | 522 |
+| `PreflightWindow` | as above, `NoDisclaimedStream` | invariant violated (expected: the documented window) | 522 |
 
 ## Mutants
 
@@ -123,6 +146,8 @@ A spec that passes says little unless it can fail: each mutant seeds one bug int
 | `TransformChainM1` | the flush is not left to the outermost frame while the monitor is held (config `TransformChainBurst`) | deadlock |
 | `TransformChainM2` | the flush loop is left without re-checking for missed calls | `Flushed` |
 | `TransformChainM3` | no flush after an entry point's synchronized block | `Flushed` |
+| `PreflightHandoverM1` | the stream the preflight could not hand over (the cancel won the promise) is not cancelled | `NoLeak` |
+| `PreflightHandoverM2` | the queued start does not look for a cancel that came while it was queued | `NoRequestAfterCancel` |
 
 Two observations the mutants gave:
 

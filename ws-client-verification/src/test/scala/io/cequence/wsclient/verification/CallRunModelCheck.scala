@@ -1,7 +1,7 @@
 package io.cequence.wsclient.verification
 
 import io.cequence.wsclient.concurrent.{AsyncCancellable, AsyncScheduler}
-import io.cequence.wsclient.stream.{AsyncCall, CallRun, NativeCall, Termination}
+import io.cequence.wsclient.stream.{AsyncCall, AsyncStream, CallRun, NativeCall, Termination}
 
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicInteger
@@ -229,5 +229,97 @@ object CallRunModelCheck extends ModelCheckSuite("AsyncCall run") {
       native.cancelled.get == native.started.get,
       s"started ${native.started.get} native runs, cancelled ${native.cancelled.get}"
     )
+  }
+
+  scenario("firstCompletedOf: the winner's outcome, and every started loser cancelled") {
+    val ec = new ThreadPerTask
+    val native = new ControlledNative
+    val winner = Promise[Int]()
+
+    val run = AsyncCall
+      .firstCompletedOf(Seq(AsyncCall.fromNative(native), AsyncCall.future(winner.future)))
+      .run()(ec)
+
+    val completer = thread {
+      winner.trySuccess(7)
+      ()
+    }
+    completer.join()
+    ec.joinAll()
+
+    ensure(run.result.value.contains(Success(7)), s"the race: ${run.result.value}")
+    ensure(
+      native.cancelled.get == native.started.get,
+      s"started ${native.started.get} native runs, cancelled ${native.cancelled.get}"
+    )
+  }
+
+  scenario("cancel() racing the completion of a stream's fold (runFoldCall): value or stop") {
+    val ec = new ThreadPerTask
+    val upstream = Promise[Int]()
+
+    val run = AsyncStream.future(upstream.future).runFoldCall(10)(_ + _).run()(ec)
+
+    val canceller = thread(run.cancel())
+    val completer = thread {
+      upstream.trySuccess(5)
+      ()
+    }
+    canceller.join()
+    completer.join()
+    ec.joinAll()
+
+    run.result.value match {
+      case Some(Success(15)) => ()
+      case other =>
+        ensure(isCancellation(other), s"neither the fold nor a cancellation: $other")
+    }
+  }
+
+  scenario(
+    "fromCall: cancel() racing the start of its call: a started native run is cancelled"
+  ) {
+    val ec = new ThreadPerTask
+    val native = new ControlledNative
+    val elements = new AtomicInteger()
+
+    val streamRun =
+      AsyncStream
+        .fromCall(AsyncCall.fromNative(native))
+        .run(_ => elements.incrementAndGet())(ec)
+
+    val canceller = thread(streamRun.cancel())
+    canceller.join()
+    ec.joinAll()
+
+    ensure(streamRun.done.value.exists(_.isSuccess), s"the stream: ${streamRun.done.value}")
+    ensure(elements.get == 0, s"${elements.get} elements from a cancelled stream")
+    ensure(
+      native.started.get <= 1 && native.cancelled.get == native.started.get,
+      s"started ${native.started.get} native runs, cancelled ${native.cancelled.get}"
+    )
+  }
+
+  scenario("fromCall: cancel() racing the call's completion: one end, at most one element") {
+    val ec = new ThreadPerTask
+    val upstream = Promise[Int]()
+    val elements = new AtomicInteger()
+
+    val streamRun =
+      AsyncStream
+        .fromCall(AsyncCall.future(upstream.future))
+        .run(_ => elements.incrementAndGet())(ec)
+
+    val canceller = thread(streamRun.cancel())
+    val completer = thread {
+      upstream.trySuccess(1)
+      ()
+    }
+    canceller.join()
+    completer.join()
+    ec.joinAll()
+
+    ensure(streamRun.done.value.exists(_.isSuccess), s"the stream: ${streamRun.done.value}")
+    ensure(elements.get <= 1, s"${elements.get} elements from a single call")
   }
 }

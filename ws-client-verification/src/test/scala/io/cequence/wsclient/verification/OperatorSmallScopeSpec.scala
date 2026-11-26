@@ -5,7 +5,7 @@ import akka.stream.scaladsl.Sink
 import cats.effect.IO
 import cats.effect.unsafe.implicits.{global => ioRuntime}
 import com.typesafe.config.ConfigFactory
-import io.cequence.wsclient.stream.AsyncStream
+import io.cequence.wsclient.stream.{AsyncCall, AsyncStream}
 import io.cequence.wsclient.stream.AsyncStream.Step
 import io.cequence.wsclient.stream.Fs2Interop._
 import io.cequence.wsclient.stream.SourceInterop._
@@ -32,9 +32,9 @@ import scala.util.control.{NoStackTrace, NonFatal}
  * scope is skipped. The neutral interpreter, fs2 and ZIO must match the model exactly; Akka
  * may differ in the one sanctioned way (`FailedFast`), nothing else.
  *
- * The scope is `-Dwsclient.verify.operators.depth` (default 2: about 26,000 pipelines on each
- * backend, 20 s; 3 is the scope the operators were audited with - about 270,000 pipelines on
- * each backend over four of the sources, 2 minutes).
+ * The scope is `-Dwsclient.verify.operators.depth` (default 2: 38,740 pipelines on each
+ * backend, 20 s; 3 is the scope the operators were audited with - 364,164 pipelines on each
+ * backend, 2 minutes).
  */
 class OperatorSmallScopeSpec extends AnyWordSpec with Matchers with BeforeAndAfterAll {
 
@@ -464,6 +464,26 @@ object OperatorSmallScopeSpec {
         Outcome(Vector(1, 2), Completed)
       ),
       Src(
+        "fromCall(3)",
+        () => AsyncStream.fromCall(AsyncCall.successful(3)),
+        Outcome(Vector(3), Completed)
+      ),
+      Src(
+        "fromCall(async 3)",
+        () => AsyncStream.fromCall(AsyncCall.future(Future(3))),
+        Outcome(Vector(3), Completed)
+      ),
+      Src(
+        "fromCall(failed)",
+        () => AsyncStream.fromCall(AsyncCall.failed[Int](new Boom("src"))),
+        failed
+      ),
+      Src(
+        "fromCall(thunk throws)",
+        () => AsyncStream.fromCall(AsyncCall.defer[Int](boom("src"))),
+        failed
+      ),
+      Src(
         "blockingIterator(1,2,3)",
         () => AsyncStream.fromBlockingIterator(() => Iterator(1, 2, 3)),
         Outcome(Vector(1, 2, 3), Completed)
@@ -572,6 +592,32 @@ object OperatorSmallScopeSpec {
         "evalMap(throws@2)",
         _.evalMap(at2("evalThrow")(i => Future.successful(i))),
         each(_)(i => one(at2("evalThrow")(identity)(i))),
+        failsFast = true
+      ),
+      Op(
+        "evalMapCall(now)",
+        _.evalMapCall(i => AsyncCall.successful(i + 100)),
+        each(_)(i => one(i + 100)),
+        failsFast = true
+      ),
+      Op(
+        "evalMapCall(async)",
+        _.evalMapCall(i => AsyncCall.future(Future(i + 100))),
+        each(_)(i => one(i + 100)),
+        failsFast = true
+      ),
+      Op(
+        "evalMapCall(failed@2)",
+        _.evalMapCall(i =>
+          if (i == 2) AsyncCall.failed(new Boom("evalCall")) else AsyncCall.successful(i)
+        ),
+        each(_)(i => one(at2("evalCall")(identity)(i))),
+        failsFast = true
+      ),
+      Op(
+        "evalMapCall(throws@2)",
+        _.evalMapCall(at2("evalCallThrow")(i => AsyncCall.successful(i))),
+        each(_)(i => one(at2("evalCallThrow")(identity)(i))),
         failsFast = true
       ),
       Op(

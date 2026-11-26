@@ -48,6 +48,10 @@ CursorDrainM4        CursorDrain    CursorDrain          CursorDrainM4   invaria
 TransformChainM1     TransformChain TransformChainBurst  TransformChainM1 deadlock
 TransformChainM2     TransformChain TransformChain       TransformChainM2 invariant
 TransformChainM3     TransformChain TransformChain       TransformChainM3 invariant
+PreflightHandover    PreflightHandover PreflightHandover  -               ok
+PreflightWindow      PreflightHandover PreflightHandoverWindow -          invariant
+PreflightHandoverM1  PreflightHandover PreflightHandover  PreflightHandoverM1 invariant
+PreflightHandoverM2  PreflightHandover PreflightHandover  PreflightHandoverM2 invariant
 "
 
 fetch=false

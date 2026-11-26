@@ -511,6 +511,8 @@ lazy val `ws-client-verification` =
       crossScalaVersions := List(scala213),
       libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test,
       libraryDependencies += "org.jetbrains.lincheck" % "lincheck" % lincheckVersion % Test,
+      // reads the call model's source for the Lean extraction (leanExtract) - a parser only
+      libraryDependencies += "org.scalameta" %% "scalameta" % "4.13.10" % Test,
       testLoggingSettings,
       Test / fork := true,
       Test / javaOptions += "-Xmx2g",
@@ -544,6 +546,15 @@ addCommandAlias(
 addCommandAlias(
   "leanConformance",
   "ws-client-verification/Test/runMain io.cequence.wsclient.verification.LeanConformance"
+)
+
+// the Lean model of the call plans, EXTRACTED from the model the tests run (CallModel.scala):
+// `leanExtract` rewrites formal/lean/WsClientProofs/Calls/Model.lean, `leanExtract --check`
+// fails when it is out of date, `leanExtract --cases 5000` evaluates the generated Lean on
+// plans and compares it with the Scala model (translation validation)
+addCommandAlias(
+  "leanExtract",
+  "ws-client-verification/Test/runMain io.cequence.wsclient.verification.calls.LeanExtract"
 )
 
 lazy val root = (project in file("."))

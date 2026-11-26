@@ -12,10 +12,10 @@ SSE frame parsing.
 
 | Layer | Checks | Run | Current scope |
 |---|---|---|---|
-| Small-scope (bounded-exhaustive) specs | the code against a list model written from the scaladoc alone, on EVERY input of a small scope | part of `sbt test` | framing: every string up to 5 bytes x every chunking x 4 frame limits x 5 delimiters (about 130,000 cases); operators: every pipeline of up to 2 operators over small sources, with a failure injected at every user function (25,616 pipelines on each of 4 backends); calls: every `AsyncCall` plan of up to 3 operators over 15 leaves (418,965 plans on each of 2 interpreters) |
-| Model checks ([Lincheck](https://github.com/JetBrains/lincheck)) | the real classes under the interleavings of a scenario's threads: deadlocks, hangs, lost signals | `sbt modelCheck` (about 7 minutes) | 29 scenarios x 1000 interleavings: `TransformPublisher`, `CursorPublisher`, `SubscriberCursor`, `AsyncBroadcastHub`, `ZioCursor`, a run of an `AsyncCall` |
-| TLA+ specs (TLC) | the synchronization *designs*, every interleaving of a model, deadlock freedom and termination included | `formal/tla/check.sh --fetch` (about 5 minutes) | 3 specs (`ZioCursor`, the `CursorPublisher` drain loop, two chained `TransformPublisher`s), 8 configurations of up to 4 million states, 9 mutants |
-| Lean proofs ([Lean 4](https://lean-lang.org)) | line-by-line models of the code against a spec written from the scaladoc / RFC, for EVERY input; a conformance check ties each model to the code | `formal/lean/check.sh` (about 30 seconds), then `sbt leanConformance` (about a minute) | 23 theorems: both framers, `WireFormat.encodeQueryComponent` / `url`, `MultipartParams`, `JsonStreamFrames.parseFrame`; 20,000 conformance cases per piece |
+| Small-scope (bounded-exhaustive) specs | the code against a list model written from the scaladoc alone, on EVERY input of a small scope | part of `sbt test` | framing: every string up to 5 bytes x every chunking x 4 frame limits x 5 delimiters (about 130,000 cases); operators: every pipeline of up to 2 operators over small sources, with a failure injected at every user function (38,740 pipelines on each of 4 backends); calls: every `AsyncCall` plan of up to 3 operators over 25 leaves (698,275 plans on each of 2 interpreters), and plan TREES - an operator's function returns plans of its own - with a cancellation at the first gate (895,400 plans of depth 3 plus 200,000 random deep ones, on both interpreters and a model of the run loop) |
+| Model checks ([Lincheck](https://github.com/JetBrains/lincheck)) | the real classes under the interleavings of a scenario's threads: deadlocks, hangs, lost signals | `sbt modelCheck` (about 7 minutes) | 35 scenarios x 1000 interleavings: `TransformPublisher`, `CursorPublisher`, `SubscriberCursor`, `AsyncBroadcastHub`, `ZioCursor`, a run of an `AsyncCall`, the neutral preflight |
+| TLA+ specs (TLC) | the synchronization *designs*, every interleaving of a model, deadlock freedom and termination included | `formal/tla/check.sh --fetch` (about 5 minutes) | 4 specs (`ZioCursor`, the `CursorPublisher` drain loop, two chained `TransformPublisher`s, the preflight's hand-over), 10 configurations of up to 4 million states, 11 mutants |
+| Lean proofs ([Lean 4](https://lean-lang.org)) | line-by-line models of the code against a spec written from the scaladoc / RFC, for EVERY input; a conformance check ties each model to the code | `formal/lean/check.sh` (about 30 seconds), then `sbt leanConformance` (about a minute) | 34 theorems: both framers, `WireFormat.encodeQueryComponent` / `url`, `MultipartParams`, `JsonStreamFrames.parseFrame`; 20,000 conformance cases per piece - and the run loop of `AsyncCall`, whose Lean model is extracted from the Scala source the tests run |
 
 ```mermaid
 flowchart LR
@@ -48,7 +48,7 @@ flowchart LR
 All four layers pass; the CI workflow runs them (the last three in a job of their own).
 
 - *Operators:* the neutral interpreter, fs2 and ZIO match the model on every pipeline of the
-  scope (also at depth 3, about 270,000 pipelines per backend -
+  scope (also at depth 3, 364,164 pipelines per backend -
   `-Dwsclient.verify.operators.depth=3`, 2 minutes); Akka differs only in the documented way (a
   failure overtakes elements a stage still holds).
 - *Calls (since 1.3.0):* the `Future` interpreter and the ZIO compiler of `AsyncCall` match the
@@ -63,14 +63,15 @@ All four layers pass; the CI workflow runs them (the last three in a job of thei
   frame are dropped with the failure.
 - *Model checks:* the scenarios include the two races fixed on the way to 1.2.0 - a cancel
   racing the next element across two chained transforms (the released 1.1.5 deadlocks there),
-  and an upstream result racing `AsyncBroadcastHub.shutdown()`. The four scenarios of a call's
+  and an upstream result racing `AsyncBroadcastHub.shutdown()`. The eight scenarios of a call's
   run (since 1.3.0) race `cancel()`, a timeout's timer and a failing `traverse` element against
   completions; the timer scenario found, before any release, a call that finished just as its
   timeout fired and whose outcome was neither returned nor reported late - it now also checks
   that the outcome of a request that was sent is never lost.
 - *TLA+:* every spec holds for its configurations; the 1.1.5 design of `TransformPublisher`,
-  kept as a configuration, deadlocks as expected; each of the 9 mutants (one seeded bug per
-  patch) is rejected. Details, invariants and state counts:
+  kept as a configuration, deadlocks as expected; the preflight's hand-over holds, and TLC finds the
+  documented window (a stream handed over in the instant its caller cancelled stays open) on
+  purpose; each of the 11 mutants (one seeded bug per patch) is rejected. Details, invariants and state counts:
   [`formal/tla/README.md`](../formal/tla/README.md).
 - *Lean (since 1.3.0):* both framers compute the same function of the chunks, and against the
   scaladoc model they differ only at the two edges above - proved for every input, so those are
@@ -82,6 +83,38 @@ All four layers pass; the CI workflow runs them (the last three in a job of thei
   multipart name goes out as it is (as browsers send it), which an RFC 9110 quoted-string reader
   takes as an escape. Details: [`formal/lean/README.md`](../formal/lean/README.md).
 
+## One source for the tests and the proof (calls)
+
+The Lean proofs of the first four pieces are about models transliterated by hand, tied to the
+code by a sampling conformance check. For the run loop of `AsyncCall` the model is not
+transliterated at all: `CallModel.scala` (in the verification module) is a small Scala subset -
+plans as first-order data, `denote` (what a plan means, from the scaladoc), and `step` (the
+frame-stack machine of `CallFiber`) - and it is used twice:
+
+- `CallTreeSpec` runs every plan of a scope, and a large random sample of deep ones, through
+  the `Future` interpreter and the ZIO compiler, cancelling the run where it first parks at a
+  `Gate`, and requires the end (a value, a failure, cancelled) and the hook log to equal
+  `denote` - and the machine to reach the same.
+- `sbt leanExtract` parses that same file (scalameta) and translates it construct by construct
+  into `formal/lean/WsClientProofs/Calls/Model.lean`; anything outside the subset fails the
+  extraction. `Calls/Proofs.lean` proves, for EVERY plan, that the machine ends with `denote`
+  (`machine_correct`), and `Calls/StackProofs.lean` that it never holds more frames than the
+  plan's nesting depth (`stack_bounded`: a chain of continuations or a retry chain of any length
+  runs on one frame - the loop's stack safety, for every depth).
+
+So what the tests compare the real interpreters with is exactly what is proved, and nothing is
+transliterated by hand. Two checks guard the chain: `leanExtract --check` fails when the
+generated Lean is out of date, and `leanExtract --cases N` evaluates the generated Lean in the
+Lean interpreter on N plans against the Scala model (a translation error - an operator, a
+pattern order - would show there). Each was first shown to fail on a planted bug: a wrong
+recovery in the machine makes the proof fail; `+` translated as `-` makes 71 of 500 plans
+differ.
+
+The plan trees found a real defect before release: on ZIO, a run interrupted while parked below
+a `timeout` ran the hooks above the timeout BEFORE the hooks below it, because ZIO's own
+`timeout` interrupts its loser in the background (the `Future` interpreter waits). The timeout
+now waits for its upstream.
+
 ## Not covered (yet)
 
 The scopes are small by design (a few elements, two or three calls per thread, pipelines of two
@@ -91,5 +124,8 @@ interleavings and check no liveness. There is no design-level spec of `Subscribe
 `AsyncBroadcastHub` or the Akka / Pekko stages, no model check of the fs2 bridge, and the
 engines' HTTP paths are covered by example-based and scenario tests only. A call's run has no
 design-level spec (its suspension hand-over and the timeout race are model-checked, not
-specified in TLA+), and its run loop no Lean model. The Lean proofs are
-about models of the code; the conformance check samples the link between model and code.
+specified in TLA+); the Lean proof of its run loop covers the sequential fragment and one
+cancellation (not time, `traverse`, races or streams: their model checks and the linear
+small-scope spec are what covers those). The Lean proofs of the first four pieces are about
+hand-transliterated models of the code; the conformance check samples the link between model
+and code.

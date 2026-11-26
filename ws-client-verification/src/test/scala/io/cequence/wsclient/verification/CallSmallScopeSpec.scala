@@ -1,14 +1,15 @@
 package io.cequence.wsclient.verification
 
 import io.cequence.wsclient.stream.ZioInterop._
-import io.cequence.wsclient.stream.{AsyncCall, Termination}
+import io.cequence.wsclient.stream.{AsyncCall, AsyncStream, Termination}
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
+import zio.stream.ZStream
 import zio.{Runtime, Unsafe, ZIO}
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.concurrent.duration._
-import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 import scala.jdk.CollectionConverters._
 import scala.util.control.{NoStackTrace, NonFatal}
 import scala.util.{Failure, Success}
@@ -27,8 +28,8 @@ import scala.util.{Failure, Success}
  * native leaf's defect that no operator handles stays a defect - observed as the failure it
  * carries).
  *
- * The scope is `-Dwsclient.verify.calls.depth` (default 3: about 419,000 plans per
- * interpreter, 20 seconds).
+ * The scope is `-Dwsclient.verify.calls.depth` (default 3: 698,275 plans per interpreter, 30
+ * seconds).
  */
 class CallSmallScopeSpec extends AnyWordSpec with Matchers {
 
@@ -208,6 +209,89 @@ object CallSmallScopeSpec {
           )
           .map(_.sum),
       Failed("item")
+    ),
+    // a race: the call that never ends loses (on ZIO it is interrupted, on the Future
+    // interpreter abandoned or cancelled) - so the outcome is the other's, on both
+    Leaf(
+      "firstCompletedOf(never, successful(7))",
+      () =>
+        AsyncCall.firstCompletedOf(
+          Seq(AsyncCall.future(Promise[Int]().future), AsyncCall.successful(7))
+        ),
+      Value(7)
+    ),
+    Leaf(
+      "firstCompletedOf(never, failed(R))",
+      () =>
+        AsyncCall.firstCompletedOf(
+          Seq(AsyncCall.future(Promise[Int]().future), AsyncCall.failed[Int](boom("R")))
+        ),
+      Failed("R")
+    ),
+    Leaf(
+      "firstCompletedOf(never, defer(throw))",
+      () =>
+        AsyncCall.firstCompletedOf(
+          Seq(
+            AsyncCall.future(Promise[Int]().future),
+            AsyncCall.defer[Int](throw boom("raceThrow"))
+          )
+        ),
+      Failed("raceThrow")
+    ),
+    Leaf(
+      "firstCompletedOf(zio never, zio(8))",
+      () =>
+        AsyncCall.firstCompletedOf(
+          Seq((ZIO.never: zio.Task[Int]).toAsyncCall, ZIO.succeed(8).toAsyncCall)
+        ),
+      Value(8)
+    ),
+    // the fold of a stream as a call
+    Leaf(
+      "stream.runFoldCall(sum)",
+      () => AsyncStream(1, 2, 3).runFoldCall(0)(_ + _),
+      Value(6)
+    ),
+    Leaf(
+      "stream.runFoldCall(throwing f)",
+      () =>
+        AsyncStream(1, 2, 3).runFoldCall(0)(
+          (
+            sum,
+            a
+          ) => if (a == 2) throw boom("fold") else sum + a
+        ),
+      Failed("fold")
+    ),
+    Leaf(
+      "failed stream.runFoldCall",
+      () => AsyncStream.failed[Int](boom("S")).runFoldCall(0)(_ + _),
+      Failed("S")
+    ),
+    Leaf(
+      "zio stream.runFoldCall(sum)",
+      () => ZStream(1, 2, 3).toAsyncStream.runFoldCall(0)(_ + _),
+      Value(6)
+    ),
+    Leaf(
+      "stream.evalMapCall(failing call).runFoldCall",
+      () =>
+        AsyncStream(1, 2, 3)
+          .evalMapCall(n =>
+            if (n == 2) AsyncCall.failed[Int](boom("E")) else AsyncCall.successful(n)
+          )
+          .runFoldCall(0)(_ + _),
+      Failed("E")
+    ),
+    Leaf(
+      "unwrapCall.evalMapCall.runFoldCall",
+      () =>
+        AsyncStream
+          .unwrapCall(AsyncCall.successful(AsyncStream(1, 2)))
+          .evalMapCall(n => AsyncCall.successful(n * 2))
+          .runFoldCall(0)(_ + _),
+      Value(6)
     )
   )
 

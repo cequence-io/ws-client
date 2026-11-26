@@ -1,0 +1,13 @@
+--- a/PreflightHandover.tla	2026-11-26 23:27:08.139231073 +0100
++++ b/PreflightHandover.tla	2026-11-26 23:27:08.173231199 +0100
+@@ -82,9 +82,7 @@
+      else
+        ok := FALSE;
+      end if;
+-Ls3: if ~ok then                          \* the stream nobody got is cancelled
+-       cursorCancelled := TRUE;
+-     end if;
++Ls3: skip;                                \* (mutant) the stream nobody got stays open
+      goto LDone;
+ Lc1: cur2 := opened;                      \* cancelOpened: getAndSet(null) ...
+      opened := FALSE;
