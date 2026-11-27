@@ -112,7 +112,17 @@ Use one version for all ws-client artifacts on a classpath (see
   run, over a small library prelude checked against the JVM. The two framers' imperative loops
   are extracted too (fuel-bounded recursion) and proved equal to the models the older proofs
   are about, so every framer theorem holds for the shipped code; the stages that run them are
-  two small hand-written drivers pinned to their Scala. See [Verification](docs/verification.md).
+  two small hand-written drivers pinned to their Scala. Extracted a second time with every Java
+  failure a step of `Except` (an `int` that wraps, an array access out of bounds, a rejected
+  `copyOfRange`), the framers are proved free of both for any input of at most
+  `Int.MaxValue - 8` bytes. See [Verification](docs/verification.md).
+- Four more TLA+ specs - `SubscriberCursor` (the lock-free loop that serializes `request` and
+  `cancel`), `AsyncBroadcastHub` (the buffer trimmed by the slowest consumer, the first
+  terminal event, `shutdown()`), and the two races of an `AsyncCall` run, a timeout (the child
+  run, the timer and a cancel race for one suspension; the loser's late outcome is reported
+  once) and `traverse` (the first failure cancels the rest and waits for them) - each with
+  seeded bugs it must reject; and a small-scope spec of the fs2 pull bridge (one outstanding
+  `next()`, one cancel, whatever way a run ends).
 
 ## 1.2.2 (2026-11-16) - engine discovery on any thread
 

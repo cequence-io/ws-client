@@ -440,7 +440,12 @@ Four layers beyond the example-based and random specs:
   `AsyncCall` plan up to a depth over 25 leaves and 30 operators - a throw injected at every
   kind of user function - on the `Future` interpreter and the ZIO compiler; the model is the
   outcome plus what the hooks saw, no sanctioned difference; `-Dwsclient.verify.calls.depth`,
-  default 3 - 698,275 plans per interpreter, 30 s). Scopes: `-Dwsclient.verify.framing.maxLength` (default 5; audited at 6) and
+  default 3 - 698,275 plans per interpreter, 30 s) and `Fs2PullBridgeSpec` (ws-client-fs2, an
+  ordinary test, since 1.3.0: every scripted cursor of up to 4 steps - immediate or late
+  elements, end, failure - under every way a run can end: complete, `take(k)`, an interrupt;
+  the bridge keeps at most ONE `next()` outstanding, cancels the cursor exactly once - none if
+  the run never opened it - pulls nothing after the cancel and delivers the script's elements in
+  order; shown to fail on a planted second pending `next()` and on a missing cancel). Scopes: `-Dwsclient.verify.framing.maxLength` (default 5; audited at 6) and
   `-Dwsclient.verify.operators.depth` (default 2; audited at 3, about 2 minutes). build.sbt's
   `verifyKnobs` forwards every `-Dwsclient.verify.*` into the forked JVMs.
 - **Lincheck model checks** - `sbt modelCheck` (a forked main in ws-client-verification, NOT part
@@ -463,9 +468,23 @@ Four layers beyond the example-based and random specs:
   committed): the designs of `ZioCursor`, the `CursorPublisher` drain loop, two chained
   `TransformPublisher`s and the preflight's hand-over (`PreflightHandover`: its config
   `PreflightHandoverWindow` EXPECTS a violation - the documented window of a stream handed
-  over as its caller cancelled), each label one atomic step of the implementation. A change to one of
-  those classes' synchronization changes its spec first; a new invariant gets a mutant that
-  violates it. See `formal/tla/README.md`.
+  over as its caller cancelled), and (since 1.3.0) `SubscriberCursor` (the work-in-progress loop
+  that serializes `request` / `cancel`, the `delivering` window), `BroadcastHub` (the ring buffer
+  trimmed by the slowest consumer, registration, the first terminal event, `shutdown()`,
+  `cancel()`, the refill pull) and the two races of an `AsyncCall` run - `CallTimeout` (the
+  child run, the timer and a cancel of the parent race for ONE suspension; the loser's late
+  outcome is reported once) and `CallTraverse` (at most `Parallelism` children, the first failure
+  cancels and waits for the rest, a cancel of the parent) - each label one atomic step of the
+  implementation. A change to one of those classes' synchronization changes its spec first; a new
+  invariant gets a mutant that violates it. A check marked `slow` in the table of `check.sh` (a
+  minute or more) runs only with `--slow` or by name. Two modelling rules the hub taught: a
+  process switched off by its constant is an EMPTY process set (`\in IF WithCancel THEN {..}
+  ELSE {}`) - a process idling at its end multiplied the states ninefold - and local bookkeeping
+  (a loop test, a choice) shares the step of the next shared access (1.7 million states became
+  104,000); TLC's SYMMETRY is unsound once a process singles out one consumer (the cancelling
+  config of two consumers has none). A counterexample is first read as a fact about the model: the
+  hub's first cancel deadlock was the spec cancelling a consumer before it was registered.
+  See `formal/tla/README.md`.
 - **Extracted Lean model of the call run loop** (since 1.3.0) - `CallModel.scala`
   (ws-client-verification, a small Scala subset: plans as first-order data, `denote`, the
   frame-stack machine `step`) is used twice: `CallTreeSpec` (plan TREES - an operator's function
@@ -507,14 +526,30 @@ Four layers beyond the example-based and random specs:
   prove the extracted code equal to the hand-written `*Model.lean` the older proofs
   (`ByteFramingProof`, `EngineFramerProof`, `Theorems`) are about, function by function, and
   `Framing/ExtractedTheorems.lean` restates the headline theorems about the extracted code
-  (plus `*_never_outOfFuel`: the stage's `fuelFor` is enough). What stays hand-written is what
-  RUNS the framers: `Framing/ExtractedDrivers.lean` (`ByteFraming.delimiter`'s stage, the
+  (plus `*_never_outOfFuel`: the stage's `fuelFor` is enough). CHECKED mode (since 1.3.0): each
+  framer is extracted a second time with every Java failure a step of `Except` - every `Int` /
+  `Long` operation (`i32` / `i64`: `intOverflow` where Java wraps), array read, `copyOf` /
+  `copyOfRange`, `arraycopy`, `new Array` and array `++` (`ByteFramingChecked`,
+  `EngineFramerChecked`; operands are hoisted before their use, a `&&` / `||` keeps its
+  short-circuit) - and `ByteFramingSafety` / `EngineFramerSafety` prove it EQUAL to the unchecked
+  code under the invariant `Ranges` (offsets ordered and non-negative, lengths at most
+  `Int.MaxValue - 8`) and the input bound: `byteRunC_eq` / `engineRunC_eq` - no overflow and no
+  array exception for any input of at most `Int.MaxValue - 8` bytes, so every unchecked theorem
+  holds for the Java code. The prelude's checked operations (`Java.readChecked`,
+  `copyOfRangeChecked`, ... `Scala.int32?`) run against the JVM in the `lib` conformance target;
+  its first run found the JDK's check order (`copyOfRange` reports `from > to` before a bad
+  `from`). What stays hand-written is what RUNS the framers: `Framing/ExtractedDrivers.lean` (`ByteFraming.delimiter`'s stage, the
   engines' `TransformPublisher`), PINNED to its Scala (`formal/lean/pins.txt`, a hash of each
   member's tokens; `leanExtract --check` fails on a change - re-read the driver, then
   `leanExtract --pin`). `sbt leanConformance` (a forked main in ws-client-verification, NOT part
   of `test`; `-Dwsclient.verify.lean.cases` / `.seed` / `.only` / `.exe`) runs the shipped code
   and the extracted Lean on the same random cases: 20,000 per target by default (framing, url,
-  multipart, frame, lib), outputs identical. A change to an extracted method = `sbt leanExtract`
+  multipart, frame, lib), outputs identical. The framing target runs the shipped STAGES, not
+  just their framers: `ByteFraming.delimiter` on the neutral interpreter, Akka, fs2 and ZIO
+  (neutral is the reference, fs2 / ZIO must be identical, Akka identical or - on a failure - a
+  prefix with the same ending: its stages fail fast) and the engines' framer inside a real
+  `TransformPublisher` with a collecting `Flow.Subscriber` - so the two hand-written drivers are
+  checked against the shipped stage code too. A change to an extracted method = `sbt leanExtract`
   + `lake build` in the same commit (a framer change that alters behavior fails the refinement
   proofs: update the model and proofs); to a pinned driver member = driver + `--pin`. See
   `formal/lean/README.md`.
@@ -524,7 +559,7 @@ CI runs the last three in a job of their own (`verification`; first run on GitHu
 minutes there; tests whose run time depends on the shared `ExecutionContext.global` need
 generous timeouts (the fs2 100,000-element concat run: 1 s locally, over 15 s on the runner).
 
-#### State of the formalization (2026-11-17) - continue from here
+#### State of the formalization (2026-11-27) - continue from here
 
 Last full run (20 cores, JDK 17), everything passes: small-scope specs at the default scopes
 (framing about 130,000 cases, 5 s; operators 38,740 pipelines per backend, 20 s) and at the
@@ -532,9 +567,10 @@ audit scopes (framing length 6: about 590,000 cases; operators depth 3: 364,164 
 backend, 2 minutes - manual, not in CI); calls 698,275 plans per interpreter (30 s);
 Lincheck 35 scenarios x 1000 interleavings (the 25 of 1.2.x: 398 s; the 8 of a call's run: 70
 s; the 2 of the neutral preflight: 7 s);
-TLC 10 configurations + 11 mutants, about 5 minutes (state counts in `formal/tla/README.md`);
-Lean (2026-11-27): 51 headline theorems, standard axioms only, build from scratch 30 s; the
-conformance check 5 targets x 500,000 cases (framing 143 s, url 17 s, frame 10 s, multipart 6 s,
+TLC 32 configurations + 35 mutants, about 11 minutes, 16 with `--slow` (state counts in
+`formal/tla/README.md`); the fs2 pull bridge small-scope spec 3 s;
+Lean (2026-11-27): 53 headline theorems, standard axioms only, build from scratch 30 s; the
+conformance check 5 targets x 500,000 cases (framing 313 s - four backends and the engines' stage -, url 17 s, frame 10 s, multipart 6 s,
 lib 3 s), the default 5 x 20,000 about 50 s; `leanExtract --check` covers the call model, the
 five extracted pieces and the two pins; the call plan trees: 895,400 plans of depth 3 +
 200,000 random deep ones per interpreter and for the machine, 76 s.
@@ -543,14 +579,15 @@ Coverage per subject (`-` = nothing):
 
 | Subject | Small-scope | Lincheck (scenarios) | TLA+ | Lean (proof + conformance) |
 |---|---|---|---|---|
-| `ByteFraming.delimiter`, `DelimiterFramer` | `FramingSmallScopeSpec` (2 pinned edges) | - | - | both = `chunkSpec`; the 2 edges are the only differences from the model; EXTRACTED from the shipped Scala and proved equal to the model, loops never out of fuel |
+| `ByteFraming.delimiter`, `DelimiterFramer` | `FramingSmallScopeSpec` (2 pinned edges) | - | - | both = `chunkSpec`; the 2 edges are the only differences from the model; EXTRACTED from the shipped Scala and proved equal to the model, loops never out of fuel; extracted again with every Java failure a step of `Except`: no `int` overflow, no array exception (`byteRunC_eq`, `engineRunC_eq`) |
 | operators on neutral / Akka / fs2 / ZIO | `OperatorSmallScopeSpec` (20 sources, 44 operators) | - | - | - |
 | `TransformPublisher` (two chained) | - | 5 | `TransformChain`: 4 configs + `Legacy`, 3 mutants | - |
 | `CursorPublisher` | - | 4 x sync / async cursor, + 1 with `SubscriberCursor` | `CursorDrain`: 2 configs, 4 mutants | - |
-| `SubscriberCursor` | - | 2 x sync / async cursor, + the one above | - | - |
-| `AsyncBroadcastHub` | - | 5 | - | - |
+| `SubscriberCursor` | - | 2 x sync / async cursor, + the one above | `SubscriberCursor`: 5 configs, 7 mutants | - |
+| `AsyncBroadcastHub` | - | 5 | `BroadcastHub`: 10 configs (2 slow), 7 mutants | - |
 | `ZioCursor` | - | 2 (loop bound 100,000) | `ZioCursor`: 1 config, 2 mutants | - |
-| `AsyncCall` (`CallFiber`, `ZioCallCompiler`) | `CallSmallScopeSpec` (25 leaves, 30 operators, 2 interpreters); `CallTreeSpec` (plan trees + a cancel at the first gate, 2 interpreters + the machine) | 8 (cancel / timer / traverse failure vs completion; a race; a stream fold; `fromCall`'s cursor) | - | `machine_correct`: the run loop's frame-stack machine ends with `denote`, for every plan, and `stack_bounded`: never more frames than the plan's nesting depth - the model EXTRACTED from the Scala the tests run |
+| the fs2 pull bridge (`Fs2Compiler.cursorStream`) | `Fs2PullBridgeSpec` (every scripted cursor of up to 4 steps x full / `take(k)` / interrupt; planted bugs fail it) | - | - | - |
+| `AsyncCall` (`CallFiber`, `ZioCallCompiler`) | `CallSmallScopeSpec` (25 leaves, 30 operators, 2 interpreters); `CallTreeSpec` (plan trees + a cancel at the first gate, 2 interpreters + the machine) | 8 (cancel / timer / traverse failure vs completion; a race; a stream fold; `fromCall`'s cursor) | `CallTimeout` (the timeout race, 3 configs, 5 mutants), `CallTraverse` (4 configs, 5 mutants) | `machine_correct`: the run loop's frame-stack machine ends with `denote`, for every plan, and `stack_bounded`: never more frames than the plan's nesting depth - the model EXTRACTED from the Scala the tests run |
 | the neutral preflight (`NeutralRunner.startPreflight`) | - | 2 (a cancel racing the first element / the start: nothing held) | `PreflightHandover`: 2 configs (1 expected violation: the documented window), 2 mutants | - |
 | `WireFormat.encodeQueryComponent` / `url` | - | - | - | = RFC 3986 for every text; a strict reader takes back the params (base without `#`); EXTRACTED from the shipped Scala |
 | `MultipartParams` | - | - | - | = WHATWG encoding; a value never leaves its parameter; backslash vs RFC 9110 shown; EXTRACTED from the shipped Scala |
@@ -563,10 +600,11 @@ What a pass does NOT say (the known gaps, most valuable first):
    scope has no `via(pipe)` / `zipVia`, `concurrently`, `preflight`, `guaranteeCase`, hub or
    publisher leaf. Next: a second observation - (elements, end, hook calls) under a cancel
    after k elements - on the same scope.
-2. No design-level spec of `SubscriberCursor` (the lock-free work-in-progress loop + the
-   `delivering` window) and of `AsyncBroadcastHub` (first terminal event wins; registration vs
-   shutdown): Lincheck samples their interleavings, nothing checks liveness. Next: `Hub.tla`,
-   `SubscriberCursor.tla` with mutants, same conventions as the four specs.
+2. The hub and the cursor specs are small: `BroadcastHub` has at most 2 consumers and 2
+   elements, `SubscriberCursor` 3 - 5 elements; the configurations that add an outside
+   `shutdown()` / `cancel()` to TWO consumers are `slow` (1.5 and 2.2 million states) and have
+   one `next()` per consumer, a single consumer has two. Their liveness is `AllDone` + deadlock
+   freedom, with weak fairness of every process.
 3. Nothing ties a TLA+ label to the code but review, and Lincheck checks no liveness. Each
    spec'd class has model-check scenarios for the same races - keep that pairing for every new
    spec (a spec without a model check of the real class, or the reverse, is half a result).
@@ -577,28 +615,34 @@ What a pass does NOT say (the known gaps, most valuable first):
    stage drivers of the framers (`ExtractedDrivers.lean`, pinned: a change fails the pin check,
    the link is sampled by the conformance check). `parseFrame`'s JSON parse and its error
    mapping are not modelled; Java strings with unpaired surrogates are outside the text
-   models; `Int` overflow is not modelled (the framer theorems bound the input by
-   `Int.MaxValue - 8` bytes). A multipart name with a backslash goes out as it is (as browsers
+   models. The framers' `Int` arithmetic and array accesses are proved safe (the checked
+   extraction) for inputs of at most `Int.MaxValue - 8` bytes; the pure pieces work on texts
+   and need no arithmetic bound; `concatChecked`'s overflow branch (two arrays beyond
+   `Int.MaxValue` together) is untestable - the allocation fails first. A multipart name with a backslash goes out as it is (as browsers
    send it), which an RFC 9110 quoted-string reader takes as an escape (proved witnesses in
    `Multipart/Proofs.lean`) - a behavior decision, left open.
 5. `AsyncCall`: the linear small-scope spec observes outcome + hook calls only; `CallTreeSpec`
    adds trees and ONE cancellation (the run parked at its first gate) - no cancel racing a
    step, no timing, no `traverse` / race / stream in the trees. Its model-check scenarios are 8
    races of one run and its streams (the timer one found the lost late outcome before
-   release). No TLA+ spec of the suspension hand-over / timeout race (`Racing` / `ChildEnded` /
-   `TimedOut` / `Detached`), and no Lean model of the concurrent parts (the sequential fragment
-   and one cancel are proved). A preflight's stream that completes in the instant its call is
-   cancelled is dropped unrun (documented; no spec of that window yet).
-6. Not modelled or model-checked: the fs2 pull bridge (`Fs2Compiler.cursorStream`), the
-   blocking cursor (reads on the pool vs cancel vs `close()` exactly once), the Akka / Pekko
-   stages (`NestedStreamsLogic`, `CursorSourceStage` - actor-confined, but their async
+   release); `CallTimeout` and `CallTraverse` (TLA+) specify the suspension hand-over
+   (`Racing` / `ChildEnded` / `TimedOut`, the `LateScope`, a cancel before the suspension
+   exists), the loser's late outcome and the traversal, with mutants. There is no Lean model of
+   the concurrent parts (the sequential fragment and one cancel are proved), and the specs do
+   not model the cancellation of a child that is itself a stream or a nested timeout. A
+   preflight's stream that completes in the instant its call is cancelled is dropped unrun
+   (documented; no spec of that window yet).
+6. Not modelled or model-checked: the fs2 pull bridge is covered by its small-scope spec only
+   (the bridge is sequential - at most one outstanding `next()` by construction - and its
+   cancel is the neutral cursor's), the blocking cursor (reads on the pool vs cancel vs
+   `close()` exactly once), the Akka / Pekko stages (`NestedStreamsLogic`, `CursorSourceStage` - actor-confined, but their async
    callbacks are not), `StreamedBody.of`, and the jdk engine's `IdleTimeoutPublisher` /
    `DeadlineBodySubscriber` / `BoundedBodyReader`.
 7. The framing spec's two pinned edges are real divergences from the scaladoc model, allowed
    in `classify` - and, by the Lean proof, the only ones. Fixing both framers together (then
    dropping the allowance, and the margin hypothesis of the Lean theorems) is open.
 8. Scopes: TLC configurations are 2 - 3 elements / calls per thread (the largest, 4 million
-   states, takes half the run); Lincheck's 1000 interleavings per scenario is a sample, not a
+   states, takes two minutes); Lincheck's 1000 interleavings per scenario is a sample, not a
    bound (the two historical bugs - the 1.1.5 transform deadlock, the hub's shutdown race -
    showed within 10 s).
 

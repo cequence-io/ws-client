@@ -29,7 +29,7 @@ named, and checked:
   `indexOf`, `substring`, `replace`, `stripPrefix`, `Pattern.split`, `URLEncoder.encode`, ...),
   each written from the library's documentation (`Scala.lean`, `Java.lean`, `JavaString.lean`,
   `WireFormat/JdkUrlEncoder.lean`): the conformance target `lib` runs every one against the JVM
-  on random texts (300,000 cases identical; indices compared in code points);
+  on random texts and arrays (indices compared in code points);
 - **the translator**: a mistranslation changes the extracted term, so either a proof about it
   breaks or the end-to-end conformance (the shipped Scala against the generated Lean, 500,000
   random cases per piece) differs. Shown on planted bugs: `value.substring(1)` changed to
@@ -73,10 +73,39 @@ hand-written drivers (`Framing/ExtractedDrivers.lean`), each PINNED to the Scala
 `pins.txt` records the SHA-256 of the member's tokens (white space and comments left out) and
 `sbt "leanExtract --check"` fails when it changed - re-read the driver, then renew the pin with
 `sbt "leanExtract --pin"`. The link between the shipped framers and the Lean is checked end to
-end by `sbt leanConformance`: every case through the Scala code and through the extracted Lean
-(compiled to an executable), outputs identical - 20,000 random cases per target by default
+end by `sbt leanConformance`: every case through the Scala code - `ByteFraming.delimiter`'s
+stage on four backends (neutral, Akka, fs2, ZIO: the first is the reference, fs2 and ZIO must be
+identical, Akka identical or, on a failure, a prefix with the same ending - its stages fail
+fast) and the engines' framer inside a real `TransformPublisher` - and through the extracted
+Lean (compiled to an executable), outputs identical - 20,000 random cases per target by default
 (500,000 in the audit run: long inputs, the buffer's compaction and growth, supplementary
 characters).
+
+**Java's own failures: the CHECKED extraction (framers).** The unchecked extraction above runs
+on Lean's unbounded `Int` and reads an array outside its bounds as `none` - it models no `int`
+that wraps and no `ArrayIndexOutOfBoundsException`. Each framer is therefore extracted a SECOND
+time, in checked mode (`*Checked.lean`, the same Scala, `checked = true` in the `ClassTarget`):
+every `Int` / `Long` operation is a step of `Except` (`i32` / `i64`: `intOverflow` /
+`longOverflow` where Java would wrap), every array read, `Arrays.copyOf` / `copyOfRange`,
+`System.arraycopy`, `new Array` and array `++` (`concatC`) is one too (`indexOutOfBounds`,
+`illegalArgument`, `negativeSize` - the exceptions the JDK throws, in the order it checks them),
+and an operand is computed before its use (the `&&` / `||` short-circuit is kept, so a guard
+still guards its read). `Framing/ByteFramingSafety.lean` and `EngineFramerSafety.lean` prove
+the checked code EQUAL to the unchecked one - lockstep, function by function - under the
+invariant `Ranges` (every offset non-negative and ordered, every length at most
+`Int.MaxValue - 8`) and the bound on the input (`end + chunk ≤ Int.MaxValue - 8`), and carry
+it through the whole stage: `byteRunC_eq` / `engineRunC_eq` - for every input of at most
+`Int.MaxValue - 8` bytes the checked run, in which every Java failure is a result, never meets
+one and ends exactly as the unchecked run (`some` of it). So everything proved about the
+unchecked code holds for the Java code, and the 32-bit and out-of-bounds gaps of the earlier
+proofs are closed for the framers. The prelude's checked operations (`Java.readChecked`,
+`copyOfRangeChecked`, `copyOfChecked`, `newArrayChecked`, `arraycopyChecked`, `concatChecked`,
+`Scala.int32?` / `int64?`) are compared with the JVM by the `lib` conformance target (every
+exception of the JDK, the boundaries of `int` and `long` included); its first run found the
+JDK's order of checks (`copyOfRange` reports `from > to` before a bad `from`), which the
+javadoc does not state. The one case that no test can reach is the sum of two array sizes
+beyond `Int.MaxValue` (`concatChecked`: the allocation itself fails first); the theorems stay
+far below it.
 
 Java's `URLEncoder` is JDK code: it is modelled from its javadoc, and the conformance check runs
 it against the JDK.
@@ -225,7 +254,10 @@ Framing/                       Spec, Scan (the search loop both framers share), 
                                ByteFramingExtracted, EngineFramerExtracted (GENERATED),
                                ExtractedDrivers (the stages that run them, pinned),
                                ByteFramingRefinement, EngineFramerRefinement (extracted = model),
-                               ExtractedTheorems (the headline theorems, about the shipped code)
+                               ExtractedTheorems (the headline theorems, about the shipped code);
+                               ByteFramingChecked, EngineFramerChecked (GENERATED, every Java
+                               failure a step of Except), ByteFramingSafety, EngineFramerSafety
+                               (checked = unchecked: no overflow, no array exception)
 WireFormat/                    Spec, Extracted (GENERATED), JdkUrlEncoder (the JDK's form
                                encoder, from its javadoc), Proofs
 Multipart/                     Spec, Extracted (GENERATED), Proofs
