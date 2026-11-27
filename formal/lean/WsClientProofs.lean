@@ -3,6 +3,8 @@ import WsClientProofs.Framing.Spec
 import WsClientProofs.Framing.ByteFramingExtracted
 import WsClientProofs.Framing.EngineFramerExtracted
 import WsClientProofs.Framing.ExtractedDrivers
+import WsClientProofs.Framing.ByteFramingRefinement
+import WsClientProofs.Framing.EngineFramerRefinement
 import WsClientProofs.Framing.SplitLemmas
 import WsClientProofs.Framing.ChunkSpecProofs
 import WsClientProofs.Framing.ByteFramingModel
@@ -11,6 +13,7 @@ import WsClientProofs.Framing.ByteFramingProof
 import WsClientProofs.Framing.EngineFramerModel
 import WsClientProofs.Framing.EngineFramerProof
 import WsClientProofs.Framing.Theorems
+import WsClientProofs.Framing.ExtractedTheorems
 import WsClientProofs.JavaString
 import WsClientProofs.Scala
 import WsClientProofs.WireFormat.Spec
