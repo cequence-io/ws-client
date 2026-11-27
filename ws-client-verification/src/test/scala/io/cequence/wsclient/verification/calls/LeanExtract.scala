@@ -103,6 +103,35 @@ object LeanExtract {
       methods = List("onInput", "onUpstreamComplete", "indexOfDelimiter"),
       about =
         "`StreamTransformers.DelimiterFramer`: the SSE framer of the jdk and zio-http engines."
+    ),
+    // the same two classes with Java's failures as steps of `Except`: an `int` / `long` that
+    // would wrap, an array access out of bounds, a negative size - the refinement proves none of
+    // them happens
+    ClassExtract.Target(
+      name = "byteFramingChecked",
+      source = "ws-client-core/src/main/scala/io/cequence/wsclient/stream/ByteFraming.scala",
+      cls = "DelimiterFramer",
+      out = "formal/lean/WsClientProofs/Framing/ByteFramingChecked.lean",
+      namespace = "WsClientProofs.Framing.ByteFramingChecked",
+      imports = List("WsClientProofs.Scala", "WsClientProofs.Java"),
+      methods = List("push", "finish", "append", "indexOfDelimiter"),
+      about =
+        "`ByteFraming.DelimiterFramer` with Java's failures (`int` overflow, an array\n" +
+          "access out of bounds, a negative size) as steps of `Except`.",
+      checked = true
+    ),
+    ClassExtract.Target(
+      name = "engineFramerChecked",
+      source =
+        "ws-client-core/src/main/scala/io/cequence/wsclient/stream/StreamTransformers.scala",
+      cls = "DelimiterFramer",
+      out = "formal/lean/WsClientProofs/Framing/EngineFramerChecked.lean",
+      namespace = "WsClientProofs.Framing.EngineFramerChecked",
+      imports = List("WsClientProofs.Scala", "WsClientProofs.Java"),
+      methods = List("onInput", "onUpstreamComplete", "indexOfDelimiter"),
+      about =
+        "`StreamTransformers.DelimiterFramer` with Java's failures as steps of `Except`.",
+      checked = true
     )
   )
 

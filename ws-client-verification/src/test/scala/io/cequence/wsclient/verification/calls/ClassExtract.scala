@@ -61,7 +61,11 @@ object ClassExtract {
     namespace: String,
     imports: List[String],
     methods: List[String],
-    about: String
+    about: String,
+    // CHECKED: every Int / Long operation and array operation that can throw or wrap in Java is
+    // a step of `Except` (see ProductionExtract.Translator): the file proves nothing by itself,
+    // the refinement says none of them fails
+    checked: Boolean = false
   )
 
   def lean(
@@ -211,6 +215,57 @@ object ClassExtract {
 
     // ------------------------------------------------------------------------------ render
 
+    private val CheckedFailures =
+      List(
+        "intOverflow",
+        "longOverflow",
+        "indexOutOfBounds",
+        "illegalArgument",
+        "negativeSize"
+      )
+
+    // the Java semantics of the operations the checked extraction makes steps of `Except`: the
+    // pure functions are `Java.lean`'s / `Scala.lean`'s (written from the javadoc, run against the
+    // JVM by the `lib` conformance target)
+    private val CheckedHelpers: String =
+      """
+        |/-- A Java operation that throws, as a failure of this code. -/
+        |def thrown {α : Type} : Except Java.Throw α → Except Failure α
+        |  | .ok a => .ok a
+        |  | .error .indexOutOfBounds => .error .indexOutOfBounds
+        |  | .error .illegalArgument => .error .illegalArgument
+        |  | .error .negativeSize => .error .negativeSize
+        |
+        |/-- A Java `int` result: the value, or an overflow (Java wraps around). -/
+        |def i32 (x : Int) : Except Failure Int :=
+        |  match Scala.int32? x with
+        |  | some v => .ok v
+        |  | none => .error .intOverflow
+        |
+        |/-- A Java `long` result. -/
+        |def i64 (x : Int) : Except Failure Int :=
+        |  match Scala.int64? x with
+        |  | some v => .ok v
+        |  | none => .error .longOverflow
+        |
+        |def readArr (a : List UInt8) (i : Int) : Except Failure UInt8 := thrown (Java.readChecked a i)
+        |
+        |def copyOfRangeC (a : List UInt8) (f t : Int) : Except Failure (List UInt8) :=
+        |  thrown (Java.copyOfRangeChecked a f t)
+        |
+        |def copyOfC (a : List UInt8) (n : Int) : Except Failure (List UInt8) :=
+        |  thrown (Java.copyOfChecked a n)
+        |
+        |def newArrayC (n : Int) : Except Failure (List UInt8) := thrown (Java.newArrayChecked n)
+        |
+        |def concatC (a b : List UInt8) : Except Failure (List UInt8) :=
+        |  thrown (Java.concatChecked a b)
+        |
+        |def arraycopyC (src : List UInt8) (sp : Int) (dst : List UInt8) (dp len : Int) :
+        |    Except Failure (List UInt8) :=
+        |  thrown (Java.arraycopyChecked src sp dst dp len)
+        |""".stripMargin
+
     private val ctorText: String =
       ctorParams.map { case (n, t) => s" (${esc(n)} : ${t.lean})" }.mkString
     private val ctorArgs: String = ctorParams.map { case (n, _) => " " + esc(n) }.mkString
@@ -239,8 +294,11 @@ object ClassExtract {
         "\n/-- The exceptions the code throws (their messages are not modelled), and running\nout of the fuel a loop is given. -/\n"
       )
       sb.append("inductive Failure where\n")
-      (failures :+ "outOfFuel").foreach(f => sb.append(s"  | $f\n"))
+      (failures ++ (if (target.checked) CheckedFailures else Nil) :+ "outOfFuel").foreach(f =>
+        sb.append(s"  | $f\n")
+      )
       sb.append("  deriving DecidableEq, Repr\n")
+      if (target.checked) sb.append(CheckedHelpers)
       sb.append("\n/-- The mutable fields. -/\nstructure State where\n")
       fieldDecls.foreach { case (n, _, t) => sb.append(s"  ${esc(n)} : ${t.lean}\n") }
       sb.append("  deriving DecidableEq, Repr\n")
@@ -314,7 +372,8 @@ object ClassExtract {
     private final class MethodTranslation(m: Method) {
 
       private val translator = new Translator(
-        new Ctx(Map.empty, Map.empty, Map.empty, Map.empty, Set.empty, fields)
+        new Ctx(Map.empty, Map.empty, Map.empty, Map.empty, Set.empty, fields),
+        target.checked
       )
       private val builders = mutable.Set.empty[String]
       private var loops = 0
@@ -385,7 +444,12 @@ object ClassExtract {
         val out = mutable.ListBuffer.empty[String]
         var locals = locals0
         val pad = "  " * ind
-        def add(l: String): Unit = out += pad + l
+        def add(l: String): Unit = {
+          translator
+            .takePre()
+            .foreach(entry => entry.linesIterator.foreach(x => out += pad + x))
+          out += pad + l
+        }
         // the statements; the value of a ValueTail method is the last one
         val (init, last) = tail match {
           case ValueTail => (ss.init, Some(ss.last))
@@ -480,6 +544,10 @@ object ClassExtract {
         out.toList
       }
 
+      // the bindings hoisted while translating an expression, as lines at `pad`
+      private def preLines(pad: String): List[String] =
+        translator.takePre().flatMap(_.linesIterator).map(pad + _)
+
       private def thrown(init: Init): String = init.tpe match {
         case Type.Name(n) => n
         case other        => fail("a thrown type", other)
@@ -504,13 +572,14 @@ object ClassExtract {
         t match {
           case i: Term.If =>
             val (cond, _) = expr(i.cond, locals, ind)
-            List(s"${pad}if $cond then") ++ valueBranch(i.thenp, locals, ind + 1) ++
+            preLines(pad) ++ List(s"${pad}if $cond then") ++
+              valueBranch(i.thenp, locals, ind + 1) ++
               List(s"${pad}else") ++ valueBranch(i.elsep, locals, ind + 1)
           case Term.Throw(Term.New(init)) => List(s"${pad}throw Failure.${thrown(init)}")
           case Term.Block(ss)             => lines(ss, locals, ind, ValueTail)
           case term: Term =>
             val (v, _) = expr(term, locals, ind, m.result)
-            List(s"${pad}return ${atom(ret(Some(atom(v))))}")
+            preLines(pad) ++ List(s"${pad}return ${atom(ret(Some(atom(v))))}")
           case other => fail("a method value", other)
         }
       }
@@ -604,9 +673,25 @@ object ClassExtract {
           require(op == "+", s"$op= on a builder")
           val (e, _) = expr(rhs, locals, ind)
           add(s"$n := $n ++ [${e}]")
+        } else if (target.checked) {
+          // the operation as an expression: its overflow check is hoisted in front of it
+          val plain = Term.ApplyInfix(
+            i.lhs,
+            Term.Name(op),
+            Type.ArgClause(Nil),
+            Term.ArgClause(List(rhs))
+          )
+          val (e, _) = expr(plain, locals, ind)
+          locals.find(_.name == n) match {
+            case Some(l) =>
+              require(l.mutable, s"$n $op= on a val")
+              add(s"${esc(n)} := $e")
+            case None if fieldNames(n) => add(s"s := { s with ${esc(n)} := $e }")
+            case None                  => sys.error(s"assignment to the unknown $n")
+          }
         } else {
           val (e, t) = expr(rhs, locals, ind, TInt)
-          require(t == TInt, s"$n $op= a non-Int")
+          require(isNum(t), s"$n $op= a non-Int")
           locals.find(_.name == n) match {
             case Some(l) =>
               require(l.mutable, s"$n $op= on a val")
@@ -628,10 +713,15 @@ object ClassExtract {
         val args = a.argClause.values
         val translated = args.map(x => atom(expr(x, locals, ind, TInt)._1))
         val Seq(src, sp, dest, dp, len) = translated
-        val copy = s"Java.arraycopy $src ($sp).toNat $dest ($dp).toNat ($len).toNat"
-        val target = arrayCopyTarget(a)
-        if (locals.exists(_.name == target)) add(s"${esc(target)} := $copy")
-        else add(s"s := { s with ${esc(target)} := $copy }")
+        val dst = arrayCopyTarget(a)
+        val copy =
+          if (target.checked) {
+            val t = tmp("copied")
+            add(s"let $t ← arraycopyC $src $sp $dest $dp $len")
+            t
+          } else s"Java.arraycopy $src ($sp).toNat $dest ($dp).toNat ($len).toNat"
+        if (locals.exists(_.name == dst)) add(s"${esc(dst)} := $copy")
+        else add(s"s := { s with ${esc(dst)} := $copy }")
       }
 
       // ---- the get-into idiom for a ByteBuffer
@@ -715,6 +805,8 @@ object ClassExtract {
         val wasInLoop = inLoop
         inLoop = true
         val (cond, _) = expr(w.expr, loopLocals, 2)
+        // what the condition hoists (a checked read, ...) runs before it, in the def
+        val condPre = preLines("    ")
         val bodyLines = lines(bodyStats, loopLocals, 3, LoopTail(recursive))
         inLoop = wasInLoop
 
@@ -737,7 +829,9 @@ object ClassExtract {
              |  match steps with
              |  | 0 => throw Failure.outOfFuel
              |  | steps + 1 => do
-             |${mutLines.mkString("\n")}${if (mutLines.nonEmpty) "\n" else ""}    if $cond then
+             |${mutLines.mkString("\n")}${if (mutLines.nonEmpty) "\n" else ""}${condPre
+              .map(_ + "\n")
+              .mkString}    if $cond then
              |${bodyLines.mkString("\n")}
              |    else
              |      $exit

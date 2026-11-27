@@ -144,4 +144,12 @@ inductive JsValue where
   | parsed (text : List Char)
   deriving DecidableEq, Repr
 
+/-- A Java `int` result: the value, or `none` where Java wraps around. -/
+def int32? (x : Int) : Option Int :=
+  if (-2147483648 : Int) ≤ x ∧ x ≤ 2147483647 then some x else none
+
+/-- A Java `long` result. -/
+def int64? (x : Int) : Option Int :=
+  if (-9223372036854775808 : Int) ≤ x ∧ x ≤ 9223372036854775807 then some x else none
+
 end WsClientProofs.Scala

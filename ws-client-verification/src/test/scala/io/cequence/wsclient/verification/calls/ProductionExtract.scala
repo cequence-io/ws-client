@@ -55,6 +55,8 @@ object ProductionExtract {
     def atom: String = if (lean.contains(' ')) s"($lean)" else lean
   }
   case object TInt extends Ty { val lean = "Int" }
+  // a Java long: Lean's Int too, but with its own 64-bit range in the checked extraction
+  case object TLong extends Ty { val lean = "Int" }
   case object TBool extends Ty { val lean = "Bool" }
   case object TChar extends Ty { val lean = "Char" }
   case object TByte extends Ty { val lean = "UInt8" }
@@ -70,6 +72,13 @@ object ProductionExtract {
 
   private val PatternType = TUser("Scala.Pattern")
   private val JsValueType = TUser("Scala.JsValue")
+
+  private[calls] def isNum(t: Ty): Boolean = t == TInt || t == TLong
+  // Scala widens an Int to a Long in a mixed expression
+  private[calls] def numJoin(
+    a: Ty,
+    b: Ty
+  ): Ty = if (a == TLong || b == TLong) TLong else TInt
 
   // a type known on one side only is the other's
   private[calls] def join(
@@ -149,12 +158,13 @@ object ProductionExtract {
   ): Ty = {
     def go(x: Type): Ty = scalaTypeOf(x, userTypes)
     t match {
-      case Type.Name("Int") | Type.Name("Long") => TInt
-      case Type.Name("Boolean")                 => TBool
-      case Type.Name("Char")                    => TChar
-      case Type.Name("Byte")                    => TByte
-      case Type.Name("Unit")                    => TUnit
-      case Type.Name("String")                  => TText
+      case Type.Name("Int")     => TInt
+      case Type.Name("Long")    => TLong
+      case Type.Name("Boolean") => TBool
+      case Type.Name("Char")    => TChar
+      case Type.Name("Byte")    => TByte
+      case Type.Name("Unit")    => TUnit
+      case Type.Name("String")  => TText
       // a value of type Any is used only through toString: its text
       case Type.Name("Any") => TText
       // a Bytes / a ByteBuffer is its content (the backing array's offset only says where)
@@ -383,7 +393,34 @@ object ProductionExtract {
 
   private[calls] type Env = Map[String, Ty]
 
-  private[calls] final class Translator(ctx: Ctx) {
+  private[calls] final class Translator(
+    ctx: Ctx,
+    checked: Boolean = false
+  ) {
+
+    // CHECKED mode (the framers' `*Checked` extraction): every Int / Long operation and every
+    // array operation that can throw or wrap in Java becomes a step of the `Except` monad -
+    // hoisted in front of the statement that uses it, `&&` / `||` keeping their short
+    // circuit - so a theorem can say that none of them fails
+    private val pre = mutable.ListBuffer.empty[String]
+    private var tmpCount = 0
+
+    private def hoist(
+      rhs: String,
+      ty: Ty
+    ): (String, Ty) = {
+      tmpCount += 1
+      val name = s"t_$tmpCount"
+      pre += s"let $name ← $rhs"
+      (name, ty)
+    }
+
+    /** The bindings hoisted since the last call (one text each; may span lines). */
+    def takePre(): List[String] = {
+      val list = pre.toList
+      pre.clear()
+      list
+    }
 
     def fail(
       what: String,
@@ -413,9 +450,10 @@ object ProductionExtract {
       a: Ty,
       b: Ty
     ): Boolean = (a, b) match {
-      case (TUnknown, _) | (_, TUnknown) => true
-      case (TList(x), TList(y))          => sameShape(x, y)
-      case (TOpt(x), TOpt(y))            => sameShape(x, y)
+      case (TUnknown, _) | (_, TUnknown)  => true
+      case (x, y) if isNum(x) && isNum(y) => true
+      case (TList(x), TList(y))           => sameShape(x, y)
+      case (TOpt(x), TOpt(y))             => sameShape(x, y)
       case (TTuple(xs), TTuple(ys)) =>
         xs.size == ys.size && xs.zip(ys).forall((sameShape _).tupled)
       case _ => a == b
@@ -433,7 +471,7 @@ object ProductionExtract {
       case Lit.Boolean(b) => (b.toString, TBool)
       case Lit.String(s)  => (charList(s), TText)
       case Lit.Char(c)    => (leanChar(c), TChar)
-      case Lit.Long(n)    => (s"($n : Int)", TInt)
+      case Lit.Long(n)    => (s"($n : Int)", TLong)
 
       case Term.Name("None") =>
         ("none", expected match { case o: TOpt => o; case _ => TOpt(TUnknown) })
@@ -465,8 +503,9 @@ object ProductionExtract {
       case Term.Select(Term.Name("Array"), Term.Name("emptyByteArray")) => ("[]", TList(TByte))
       case n: Term.New if arrayByteSize(n).isDefined =>
         val (size, st) = operand(arrayByteSize(n).get, env, ind)
-        require(st == TInt, "new Array[Byte] of a non-Int size")
-        (s"List.replicate ($size).toNat 0", TList(TByte))
+        require(isNum(st), "new Array[Byte] of a non-Int size")
+        if (checked) hoist(s"newArrayC $size", TList(TByte))
+        else (s"List.replicate ($size).toNat 0", TList(TByte))
       case Term.Select(qual, Term.Name(m)) => method(qual, m, Nil, env, ind, t)
 
       case a: Term.Apply => apply(a, env, ind, expected)
@@ -599,33 +638,49 @@ object ProductionExtract {
         case List(single) => single
         case _            => fail("an infix operator without one argument", i)
       }
-      val (l, lt) = operand(i.lhs, env, ind)
-      val (r, rt) = operand(rhs, env, ind, lt)
       val op = i.op.value
-      (op, lt) match {
-        case ("+", TText) =>
-          require(rt == TText, s"text + ${rt.lean}")
-          (s"$l ++ $r", TText)
-        case ("+", TInt) | ("-", TInt) | ("*", TInt) =>
-          require(rt == TInt, s"Int $op ${rt.lean}")
-          (s"$l $op $r", TInt)
-        case ("<" | "<=" | ">" | ">=", TInt | TChar) =>
-          require(sameShape(lt, rt), s"$op on ${lt.lean} and ${rt.lean}")
-          (s"$l $op $r", TBool)
-        case ("==", _) =>
-          require(sameShape(lt, rt), s"== on ${lt.lean} and ${rt.lean}")
-          (s"$l == $r", TBool)
-        case ("!=", _) =>
-          require(sameShape(lt, rt), s"!= on ${lt.lean} and ${rt.lean}")
-          (s"$l != $r", TBool)
-        case ("&&" | "||", TBool) =>
-          require(rt == TBool, s"$op on ${rt.lean}")
-          (s"$l $op $r", TBool)
-        case ("::", _) =>
-          (s"$l :: $r", TList(join(lt, rt match { case TList(e) => e; case _ => TUnknown })))
-        case ("++", TList(_)) => (s"$l ++ $r", join(lt, rt))
-        case _                => fail(s"operator $op on ${lt.lean}", i)
-      }
+      val (l, lt) = operand(i.lhs, env, ind)
+      // the right operand of && / || runs only when the left one does not decide: what it hoists
+      // goes under the condition
+      val rhsStart = pre.size
+      val (r, rt) = operand(rhs, env, ind, lt)
+      val rhsPre = pre.drop(rhsStart).toList
+      if ((op == "&&" || op == "||") && rhsPre.nonEmpty) {
+        pre.trimEnd(pre.size - rhsStart)
+        require(lt == TBool && rt == TBool, s"$op on ${lt.lean}")
+        val body = rhsPre.flatMap(_.linesIterator).map("    " + _).mkString("\n")
+        val cond = if (op == "&&") l else s"!$l"
+        val other = if (op == "&&") "false" else "true"
+        hoist(s"(if $cond then (do\n$body\n    pure ($r : Bool)) else pure $other)", TBool)
+      } else
+        (op, lt) match {
+          case ("+", TText) =>
+            require(rt == TText, s"text + ${rt.lean}")
+            (s"$l ++ $r", TText)
+          case ("+" | "-" | "*", t) if isNum(t) =>
+            require(isNum(rt), s"Int $op ${rt.lean}")
+            val ty = numJoin(lt, rt)
+            if (checked) hoist(s"${if (ty == TLong) "i64" else "i32"} ($l $op $r)", ty)
+            else (s"$l $op $r", ty)
+          case ("<" | "<=" | ">" | ">=", t) if isNum(t) || t == TChar =>
+            require(sameShape(lt, rt), s"$op on ${lt.lean} and ${rt.lean}")
+            (s"$l $op $r", TBool)
+          case ("==", _) =>
+            require(sameShape(lt, rt), s"== on ${lt.lean} and ${rt.lean}")
+            (s"$l == $r", TBool)
+          case ("!=", _) =>
+            require(sameShape(lt, rt), s"!= on ${lt.lean} and ${rt.lean}")
+            (s"$l != $r", TBool)
+          case ("&&" | "||", TBool) =>
+            require(rt == TBool, s"$op on ${rt.lean}")
+            (s"$l $op $r", TBool)
+          case ("::", _) =>
+            (s"$l :: $r", TList(join(lt, rt match { case TList(e) => e; case _ => TUnknown })))
+          // an array concatenation allocates the sum of the sizes (an Int in Java)
+          case ("++", TList(TByte)) if checked => hoist(s"concatC $l $r", TList(TByte))
+          case ("++", TList(_))                => (s"$l ++ $r", join(lt, rt))
+          case _                               => fail(s"operator $op on ${lt.lean}", i)
+        }
     }
 
     // ----------------------------------------------------------------------------- calls
@@ -648,8 +703,9 @@ object ProductionExtract {
             if args.size == 1 && env.get(f).orElse(ctx.fields.get(f)).contains(TList(TByte)) =>
           val (arr, _) = operand(a.fun, env, ind)
           val (i, it) = operand(args.head, env, ind)
-          require(it == TInt, "an array index that is not an Int")
-          (s"(Scala.arrayGet $arr $i)", TOpt(TByte))
+          require(isNum(it), "an array index that is not an Int")
+          if (checked) hoist(s"readArr $arr $i", TByte)
+          else (s"(Scala.arrayGet $arr $i)", TOpt(TByte))
         case Term.Select(qual, Term.Name(m)) => method(qual, m, args, env, ind, a)
         case Term.Name("Some") =>
           require(args.size == 1)
@@ -733,17 +789,19 @@ object ProductionExtract {
       case ("math", "max" | "min", List(a, b)) =>
         val (x, xt) = operand(a, env, ind)
         val (y, yt) = operand(b, env, ind, xt)
-        require(xt == TInt && yt == TInt, s"math.$m of a non-Int")
-        (s"($m $x $y)", TInt)
+        require(isNum(xt) && isNum(yt), s"math.$m of a non-Int")
+        (s"($m $x $y)", numJoin(xt, yt))
       case ("Arrays", "copyOfRange", List(a, i, j)) =>
         val (arr, at) = operand(a, env, ind)
         val (from, _) = operand(i, env, ind, TInt)
         val (to, _) = operand(j, env, ind, TInt)
-        (s"(Java.copyOfRange $arr ($from).toNat ($to).toNat)", at)
+        if (checked) hoist(s"copyOfRangeC $arr $from $to", at)
+        else (s"(Java.copyOfRange $arr ($from).toNat ($to).toNat)", at)
       case ("Arrays", "copyOf", List(a, n)) =>
         val (arr, at) = operand(a, env, ind)
         val (size, _) = operand(n, env, ind, TInt)
-        (s"(Java.copyOf $arr ($size).toNat)", at)
+        if (checked) hoist(s"copyOfC $arr $size", at)
+        else (s"(Java.copyOf $arr ($size).toNat)", at)
       // a Bytes / a ByteBuffer is its content
       case ("Bytes", "unsafeWrap", List(x)) => operand(x, env, ind, TList(TByte))
       case ("ByteBuffer", "wrap", List(x))  => operand(x, env, ind, TList(TByte))
@@ -855,7 +913,11 @@ object ProductionExtract {
         case (TText, "exists") => (s"$r.any ${predicate(TChar)}", TBool)
 
         // ---- numbers: no overflow in the model (the proofs bound the sizes)
-        case (TInt, "toLong" | "toInt") => (r, TInt)
+        case (TInt, "toLong")  => (r, TLong)
+        case (TInt, "toInt")   => (r, TInt)
+        case (TLong, "toLong") => (r, TLong)
+        // narrowing wraps in Java: the checked extraction says the value fits
+        case (TLong, "toInt") => if (checked) hoist(s"i32 $r", TInt) else (r, TInt)
 
         // ---- arrays, byte buffers, builders (a builder is the list it has built)
         case (TList(_), "length")           => (s"($r.length : Int)", TInt)

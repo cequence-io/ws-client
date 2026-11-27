@@ -104,3 +104,5 @@ open WsClientProofs.Framing.ExtractedTheorems in
 #print axioms engineFramer_chunking_independent
 #print axioms WsClientProofs.Framing.ByteFramingRefinement.byteRun_eq
 #print axioms WsClientProofs.Framing.EngineFramerRefinement.engineRun_eq
+#print axioms WsClientProofs.Framing.ByteFramingSafety.byteRunC_eq
+#print axioms WsClientProofs.Framing.EngineFramerSafety.engineRunC_eq
