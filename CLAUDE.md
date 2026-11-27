@@ -485,16 +485,30 @@ Four layers beyond the example-based and random specs:
   found the ZIO `timeout` ordering defect (see the AsyncCall bullet below)
 - **Lean proofs** (since 1.3.0) - `formal/lean` (Lean 4.24.0, no dependencies; `check.sh` builds
   every proof and fails on `sorry` or a non-standard axiom - `Axioms.lean` lists the headline
-  theorems): line-by-line MODELS of four pure parts - both delimiter framers,
-  `WireFormat.encodeQueryComponent` / `url` (`URLEncoder` modelled from its javadoc),
-  `MultipartParams`, `JsonStreamFrames.parseFrame` up to the `Json.parse` - proved against specs
-  written from the scaladoc / RFC alone, for EVERY input. `sbt leanConformance` (a forked main
-  in ws-client-verification, NOT part of `test`; `-Dwsclient.verify.lean.cases` / `.seed` /
-  `.only` / `.exe`) ties each model to the code: 20,000 random cases per piece through both,
-  outputs identical. A change to a modelled method changes its model in the same commit (the
-  conformance check fails otherwise); `Int` arithmetic becomes natural arithmetic where it is
-  non-negative, each place where it can be negative says how it is translated; Java library
-  calls go through `Java.lean` / `JavaString.lean`. See `formal/lean/README.md`.
+  theorems): four pure parts - both delimiter framers, `WireFormat.encodeQueryComponent` /
+  `url`, `MultipartParams`, `JsonStreamFrames.parseFrame` up to the `Json.parse` - proved
+  against specs written from the scaladoc / RFC alone, for EVERY input. The last three are
+  EXTRACTED from the shipped Scala: `sbt leanExtract` (`ProductionExtract`, scalameta) translates
+  the named members of `WireFormat`, `MultipartParams` and `JsonStreamFrames` into
+  `WireFormat/Extracted.lean`, `Multipart/Extracted.lean`, `SseFrames/Extracted.lean` (the
+  Scala quoted above each definition; a construct outside the subset fails the extraction), and
+  the proofs are about that translation. Trusted: the library prelude (`Scala.lean`,
+  `Java.lean`, `JavaString.lean`, `WireFormat/JdkUrlEncoder.lean` - written from the library's
+  docs, run against the JVM by the `lib` conformance target), the translator (a mistranslation
+  breaks a proof or the end-to-end conformance), and three stated decisions: `Json.parse` is
+  the free constructor `JsValue.parsed`, a `try` whose handlers all rethrow is its body, an
+  `Any` is its `toString` text. A new Java / Scala library call in extracted code needs a prelude
+  function, an entry in `ProductionExtract.method` / `.static`, and a `lib` case. The framers'
+  loops over arrays are outside the subset: their models (`*Model.lean`) are hand-written and
+  PINNED (`formal/lean/pins.txt`, a hash of the Scala member's tokens; `leanExtract --check`
+  fails on a change - re-read the model and proofs, then `leanExtract --pin`). `sbt
+  leanConformance` (a forked main in ws-client-verification, NOT part of `test`;
+  `-Dwsclient.verify.lean.cases` / `.seed` / `.only` / `.exe`) runs the shipped code and the Lean
+  on the same random cases: 20,000 per target by default (framing, url, multipart, frame, lib),
+  outputs identical. A change to an extracted method = `sbt leanExtract` + `lake build` in the
+  same commit; to a pinned framer = model + proofs + `--pin`. `Int` is Lean's unbounded `Int`
+  (the framer models: natural arithmetic where non-negative, each place where it can be
+  negative says how it is translated). See `formal/lean/README.md`.
 
 CI runs the last three in a job of their own (`verification`; first run on GitHub 2026-11-11:
 13 minutes on the hosted runner, tools-jar download included). The `test` job takes about 20
@@ -510,8 +524,10 @@ backend, 2 minutes - manual, not in CI); calls 698,275 plans per interpreter (30
 Lincheck 35 scenarios x 1000 interleavings (the 25 of 1.2.x: 398 s; the 8 of a call's run: 70
 s; the 2 of the neutral preflight: 7 s);
 TLC 10 configurations + 11 mutants, about 5 minutes (state counts in `formal/tla/README.md`);
-Lean (2026-11-26): 34 headline theorems, standard axioms only, build from scratch 30 s; the
-conformance check 4 x 20,000 cases, about 45 s; the call plan trees: 895,400 plans of depth 3 +
+Lean (2026-11-27): 34 headline theorems, standard axioms only, build from scratch 30 s; the
+conformance check 5 targets x 500,000 cases (framing 143 s, url 17 s, frame 10 s, multipart 6 s,
+lib 3 s), the default 5 x 20,000 about 50 s; `leanExtract --check` covers the call model, the
+three extracted pieces and the three pins; the call plan trees: 895,400 plans of depth 3 +
 200,000 random deep ones per interpreter and for the machine, 76 s.
 
 Coverage per subject (`-` = nothing):
@@ -527,9 +543,9 @@ Coverage per subject (`-` = nothing):
 | `ZioCursor` | - | 2 (loop bound 100,000) | `ZioCursor`: 1 config, 2 mutants | - |
 | `AsyncCall` (`CallFiber`, `ZioCallCompiler`) | `CallSmallScopeSpec` (25 leaves, 30 operators, 2 interpreters); `CallTreeSpec` (plan trees + a cancel at the first gate, 2 interpreters + the machine) | 8 (cancel / timer / traverse failure vs completion; a race; a stream fold; `fromCall`'s cursor) | - | `machine_correct`: the run loop's frame-stack machine ends with `denote`, for every plan, and `stack_bounded`: never more frames than the plan's nesting depth - the model EXTRACTED from the Scala the tests run |
 | the neutral preflight (`NeutralRunner.startPreflight`) | - | 2 (a cancel racing the first element / the start: nothing held) | `PreflightHandover`: 2 configs (1 expected violation: the documented window), 2 mutants | - |
-| `WireFormat.encodeQueryComponent` / `url` | - | - | - | = RFC 3986 for every text; a strict reader takes back the params (base without `#`) |
-| `MultipartParams` | - | - | - | = WHATWG encoding; a value never leaves its parameter; backslash vs RFC 9110 shown |
-| `JsonStreamFrames.parseFrame` | - | - | - | = the line rules (fast path, joined-content search) for field prefixes without CR / LF / leading `:` |
+| `WireFormat.encodeQueryComponent` / `url` | - | - | - | = RFC 3986 for every text; a strict reader takes back the params (base without `#`); EXTRACTED from the shipped Scala |
+| `MultipartParams` | - | - | - | = WHATWG encoding; a value never leaves its parameter; backslash vs RFC 9110 shown; EXTRACTED from the shipped Scala |
+| `JsonStreamFrames.parseFrame` | - | - | - | = the line rules (fast path, joined-content search) for field prefixes without CR / LF / leading `:`; EXTRACTED from the shipped Scala |
 
 What a pass does NOT say (the known gaps, most valuable first):
 
@@ -545,12 +561,17 @@ What a pass does NOT say (the known gaps, most valuable first):
 3. Nothing ties a TLA+ label to the code but review, and Lincheck checks no liveness. Each
    spec'd class has model-check scenarios for the same races - keep that pairing for every new
    spec (a spec without a model check of the real class, or the reverse, is half a result).
-4. The Lean proofs are about MODELS: what ties a model to its code is the transliteration
-   (review) and the conformance check, which samples. `JsonStreamFrames.parseFrame`'s JSON
-   parse and its error mapping are not modelled; Java strings with unpaired surrogates are
-   outside the text models. A multipart name with a backslash goes out as it is (as browsers
-   send it), which an RFC 9110 quoted-string reader takes as an escape (proved witnesses in
-   `Multipart/Proofs.lean`) - a behavior decision, left open.
+4. The Lean proofs of the framers are about hand-written MODELS: what ties a model to its code is
+   the transliteration (review), the pin (a change to the Scala member fails `leanExtract
+   --check`) and the conformance check, which samples - a transliteration mistake the samples do
+   not reach would stay. Next: extract the framers too (imperative: `var`, `while` with an early
+   `return`, arrays, `throw` - a fuel-bounded translation plus a refinement proof to the
+   existing models). The extracted pieces (query encoding, multipart, `parseFrame`) are the
+   shipped code through a library prelude; `parseFrame`'s JSON parse and its error mapping are
+   not modelled; Java strings with unpaired surrogates are outside the text models. A multipart
+   name with a backslash goes out as it is (as browsers send it), which an RFC 9110
+   quoted-string reader takes as an escape (proved witnesses in `Multipart/Proofs.lean`) - a
+   behavior decision, left open.
 5. `AsyncCall`: the linear small-scope spec observes outcome + hook calls only; `CallTreeSpec`
    adds trees and ONE cancellation (the run parked at its first gate) - no cancel racing a
    step, no timing, no `traverse` / race / stream in the trees. Its model-check scenarios are 8
@@ -579,7 +600,8 @@ is for (revert the fix locally, or run it against the last release jar); a TLA+ 
 a mutant, and an invariant TLC rejects is first read as a fact about the class (see
 `CancelCompletes` in the README) before the spec is weakened; never put an exact state count
 of a counterexample run into a doc (it varies per run); a Lean spec is written from the
-scaladoc / RFC alone, a model follows its code line by line, every model gets a conformance
+scaladoc / RFC alone, extracted code is the shipped Scala (`leanExtract`; a hand model follows
+its code line by line and is pinned), every model and extraction gets a conformance
 target that is first shown to fail on a bug planted in the Scala code, and a divergence from
 the spec is a theorem (proved the only one, or shown by a computed witness).
 

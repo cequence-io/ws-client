@@ -53,8 +53,9 @@ jobs:
       # TLC: the designs (formal/tla) - the specs must hold, the seeded bugs must be rejected
       - name: TLA+ specs
         run: formal/tla/check.sh --fetch
-      # Lean (formal/lean): the proofs about the models of the code, then the models against
-      # the code - the toolchain is pinned in formal/lean/lean-toolchain
+      # Lean (formal/lean): the proofs about the code (extracted from the shipped Scala, or
+      # hand models pinned to it), then the Lean against the shipped code on random cases - the
+      # toolchain is pinned in formal/lean/lean-toolchain
       - uses: actions/cache@v6
         with:
           path: ~/.elan
@@ -70,8 +71,10 @@ jobs:
         run: formal/lean/check.sh
       - name: Lean conformance
         run: sbt leanConformance
-      # the Lean model of the call plans is EXTRACTED from the Scala model the tests run
-      # (CallModel.scala): up to date, and the generated Lean agrees with the Scala model
+      # the generated Lean is up to date: the call plans (extracted from the Scala model the
+      # tests run, CallModel.scala), the query / multipart / SSE-frame code (extracted from the
+      # shipped Scala), and no pinned framer changed without its model being re-read; the
+      # generated call model agrees with the Scala model
       - name: Lean extraction
         run: |
           sbt "leanExtract --check"
