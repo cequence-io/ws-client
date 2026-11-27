@@ -80,14 +80,14 @@ def urlCase : List String → Except String String
     let n ← parseNat nS
     let params ← parseParams rest
     if params.length != n then throw s!"expected {n} params, got {params.length}"
-    return textHex (WsClientProofs.WireFormat.url base params)
+    return textHex (WsClientProofs.WireFormat.Extracted.url base params)
   | _ => throw "url: expected <base> <n> <params>"
 
 def multipartCase : List String → Except String String
   | [textS] => do
     let t ← parseText textS
     let m := fun f => textHex (f t)
-    return s!"{m WsClientProofs.Multipart.escape} {m WsClientProofs.Multipart.quoted} {m WsClientProofs.Multipart.dataPartName}"
+    return s!"{m WsClientProofs.Multipart.Extracted.escape} {m WsClientProofs.Multipart.Extracted.quoted} {m WsClientProofs.Multipart.Extracted.dataPartName}"
   | _ => throw "multipart: expected <text>"
 
 def frameCase : List String → Except String String
@@ -98,10 +98,10 @@ def frameCase : List String → Except String String
       if w == "-" then pure none else some <$> parseText w
     let p ← optional prefixS
     let q ← optional suffixS
-    return match WsClientProofs.SseFrames.parseFrame frame p q item with
-      | .skip => "skip"
-      | .done => "done"
-      | .payload data => s!"payload {textHex data}"
+    return match WsClientProofs.SseFrames.Extracted.parseFrame frame p q item with
+      | .Skip => "skip"
+      | .EndOfStream => "done"
+      | .JsonFrame (.parsed data) => s!"payload {textHex data}"
   | _ => throw "frame: expected <frame> <itemPrefix> <stripPrefix> <stripSuffix>"
 
 def framing : List String → Except String String
@@ -118,6 +118,40 @@ def framing : List String → Except String String
       return s!"{showResult byteFraming} | {showResult engine}"
   | _ => throw "framing: expected <delimiter> <max> <allowTruncation> <n> <chunks>"
 
+def boolText (b : Bool) : String := if b then "true" else "false"
+
+def libCase : List String → Except String String
+  | ["trim", a] => do return textHex (WsClientProofs.Scala.trim (← parseText a))
+  | ["startsWith", a, b] => do
+    return boolText (WsClientProofs.Scala.startsWith (← parseText a) (← parseText b))
+  | ["stripPrefix", a, b] => do
+    return textHex (WsClientProofs.Scala.stripPrefix (← parseText a) (← parseText b))
+  | ["stripSuffix", a, b] => do
+    return textHex (WsClientProofs.Scala.stripSuffix (← parseText a) (← parseText b))
+  | ["containsText", a, b] => do
+    return boolText (WsClientProofs.Scala.containsText (← parseText a) (← parseText b))
+  | ["indexOfText", a, b] => do
+    return toString (WsClientProofs.Scala.indexOfText (← parseText a) (← parseText b))
+  | ["indexOfChar", a, c] => do
+    match (← parseText c) with
+    | [ch] => return toString (WsClientProofs.Scala.indexOfChar (← parseText a) ch)
+    | _ => throw "indexOfChar: expected one character"
+  | ["substring", a, k] => do
+    return textHex (WsClientProofs.Scala.substring (← parseText a) (Int.ofNat (← parseNat k)))
+  | ["replace", a, t, r] => do
+    return textHex (WsClientProofs.Java.replace (← parseText t) (← parseText r) (← parseText a))
+  | ["splitLines", a] => do
+    return " ".intercalate
+      ((WsClientProofs.Scala.Pattern.split .lineBreak (← parseText a)).map textHex)
+  | ["urlEncode", a] => do
+    return textHex (WsClientProofs.WireFormat.urlEncoderEncode (← parseText a))
+  | "mkString" :: sep :: n :: parts => do
+    let parts ← parts.mapM parseText
+    if parts.length != (← parseNat n) then throw "mkString: wrong part count"
+    return textHex (WsClientProofs.Scala.mkString (← parseText sep) parts)
+  | op :: _ => throw s!"lib: unknown function '{op}' or wrong arguments"
+  | [] => throw "lib: expected a function"
+
 def runCase (line : String) : String :=
   let words := (line.splitOn " ").filter (· ≠ "")
   let result := match words with
@@ -125,6 +159,7 @@ def runCase (line : String) : String :=
     | "url" :: args => urlCase args
     | "multipart" :: args => multipartCase args
     | "frame" :: args => frameCase args
+    | "lib" :: args => libCase args
     | w :: _ => throw s!"unknown target '{w}'"
     | [] => throw "empty line"
   match result with

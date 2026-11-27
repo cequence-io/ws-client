@@ -1,3 +1,5 @@
+import WsClientProofs.Scala
+
 /-!
 # SSE frames: the specification
 
@@ -21,6 +23,8 @@ Texts are `List Char`; `trim`, `stripPrefix` and `stripSuffix` are Java's / Scal
 
 namespace WsClientProofs.SseFrames
 
+open WsClientProofs.Scala (startsWith stripPrefix stripSuffix trim splitLines)
+
 /-- What `parseFrame` does with a frame (the JSON parse of a payload is not modelled). -/
 inductive Outcome where
   | skip
@@ -28,34 +32,9 @@ inductive Outcome where
   | payload (data : List Char)
   deriving DecidableEq, Repr
 
-def startsWith (s p : List Char) : Bool := p.isPrefixOf s
-
-/-- Scala's `stripPrefix`. -/
-def stripPrefix (s p : List Char) : List Char := if startsWith s p then s.drop p.length else s
-
-/-- Scala's `stripSuffix`. -/
-def stripSuffix (s p : List Char) : List Char :=
-  if startsWith s.reverse p.reverse then s.take (s.length - p.length) else s
-
-/-- Java's `String.trim`: every character up to U+0020 removed from both ends. -/
-def trim (s : List Char) : List Char :=
-  ((s.dropWhile (· ≤ ' ')).reverse.dropWhile (· ≤ ' ')).reverse
-
 def isComment (line : List Char) : Bool := startsWith line [':']
 
 def blank (line : List Char) : Bool := (trim line).isEmpty
-
-/-- The lines of a text, separated by CRLF, CR or LF (`Pattern.compile("\r\n|\r|\n")
-.split(text, -1)`: every line, the trailing empty one included). -/
-def splitLines : List Char → List (List Char)
-  | [] => [[]]
-  | '\r' :: '\n' :: rest => [] :: splitLines rest
-  | '\r' :: rest => [] :: splitLines rest
-  | '\n' :: rest => [] :: splitLines rest
-  | c :: rest =>
-    match splitLines rest with
-    | l :: ls => (c :: l) :: ls
-    | [] => [[c]]
 
 /-- `mkString("\n")`. -/
 def joinLines : List (List Char) → List Char

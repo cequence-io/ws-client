@@ -1,4 +1,7 @@
-import WsClientProofs.WireFormat.Model
+import WsClientProofs.WireFormat.Extracted
+import WsClientProofs.WireFormat.Spec
+import WsClientProofs.WireFormat.JdkUrlEncoder
+import WsClientProofs.JavaString
 
 /-!
 # Query encoding: the results
@@ -14,6 +17,9 @@ import WsClientProofs.WireFormat.Model
 -/
 
 namespace WsClientProofs.WireFormat
+
+open WsClientProofs.WireFormat.Extracted
+open WsClientProofs.Scala (mkString)
 
 open WsClientProofs.Java
 
@@ -472,6 +478,34 @@ def expected (params : List (List Char × Option (List Char))) : List (List Nat 
 def fields (params : List (List Char × Option (List Char))) : List (List Char) :=
   params.filterMap fun p => p.2.map fun v => encodeQueryComponent p.1 ++ '=' :: encodeQueryComponent v
 
+/-- Any function that defines the encoded field of a defined parameter and nothing for an
+undefined one - what the extracted `collect` does - collects `fields`. -/
+theorem filterMap_fields (f : List Char × Option (List Char) → Option (List Char))
+    (hs : ∀ k v, f (k, some v) = some (encodeQueryComponent k ++ '=' :: encodeQueryComponent v))
+    (hn : ∀ k, f (k, none) = none) (params : List (List Char × Option (List Char))) :
+    params.filterMap f = fields params := by
+  induction params with
+  | nil => rfl
+  | cons p ps ih =>
+    obtain ⟨k, v?⟩ := p
+    cases v? with
+    | none => simp only [fields, List.filterMap_cons, hn, Option.map_none] at ih ⊢; exact ih
+    | some v =>
+      simp only [fields, List.filterMap_cons, hs, Option.map_some] at ih ⊢
+      rw [ih]
+
+/-- `url`, with the extracted `collect` read as `fields`. -/
+theorem url_eq (base : List Char) (params : List (List Char × Option (List Char))) :
+    url base params =
+      if (mkString ['&'] (fields params)).isEmpty then base
+      else if base.contains '?' then base ++ '&' :: mkString ['&'] (fields params)
+      else base ++ '?' :: mkString ['&'] (fields params) := by
+  unfold url
+  rw [filterMap_fields]
+  · simp only [Scala.containsText_single, List.append_assoc, List.singleton_append]
+  · intro k v; simp
+  · intro k; rfl
+
 theorem fields_mapM (params : List (List Char × Option (List Char))) :
     (fields params).mapM readField = some (expected params) := by
   induction params with
@@ -513,10 +547,7 @@ theorem readQuery_url (base : List Char) (params : List (List Char × Option (Li
   by_cases hnil : fields params = []
   · have he : expected params = [] := by rw [hnil] at hm; simpa using hm.symm
     have : url base params = base := by
-      simp only [url]
-      rw [show (params.filterMap fun p => p.2.map fun value =>
-          encodeQueryComponent p.1 ++ '=' :: encodeQueryComponent value) = fields params from rfl,
-        hnil]
+      rw [url_eq, hnil]
       rfl
     rw [this, he]
     cases readQuery base <;> simp
@@ -533,10 +564,7 @@ theorem readQuery_url (base : List Char) (params : List (List Char × Option (Li
     have hurl : url base params =
         if base.contains '?' then base ++ '&' :: mkString ['&'] (fields params)
         else base ++ '?' :: mkString ['&'] (fields params) := by
-      simp only [url]
-      rw [show (params.filterMap fun p => p.2.map fun value =>
-          encodeQueryComponent p.1 ++ '=' :: encodeQueryComponent value) = fields params from rfl,
-        if_neg (by simpa using hq)]
+      rw [url_eq, if_neg (by simpa using hq)]
     rw [hurl]
     by_cases hc : base.contains '?' = true
     · rw [if_pos hc]

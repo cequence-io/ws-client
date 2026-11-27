@@ -1,4 +1,6 @@
-import WsClientProofs.Multipart.Model
+import WsClientProofs.Multipart.Extracted
+import WsClientProofs.Multipart.Spec
+import WsClientProofs.JavaString
 
 /-!
 # Multipart parameter values: the results
@@ -17,6 +19,8 @@ import WsClientProofs.Multipart.Model
 -/
 
 namespace WsClientProofs.Multipart
+
+open WsClientProofs.Multipart.Extracted
 
 open WsClientProofs.Java
 
@@ -50,9 +54,8 @@ theorem escape_safe {s : List Char} {c : Char} (h : c ∈ escape s) :
         exact ⟨by assumption, by assumption, by assumption⟩
 
 theorem quoted_one_line {s : List Char} {c : Char} (h : c ∈ quoted s) : c ≠ '\r' ∧ c ≠ '\n' := by
-  simp only [quoted, List.cons_append, List.mem_cons, List.mem_append, List.not_mem_nil,
-    or_false] at h
-  rcases h with rfl | h | rfl
+  simp only [quoted, List.mem_append, List.mem_singleton] at h
+  rcases h with (rfl | h) | rfl
   · decide
   · exact (escape_safe h).2
   · decide
@@ -73,7 +76,10 @@ theorem readValue_quoted (s rest : List Char) :
   exact readQuoted_append (fun c hc => (escape_safe hc).1)
 
 theorem isTokenChar_eq : isTokenChar = tchar := by
-  funext c; rfl
+  funext c
+  unfold isTokenChar tchar
+  rw [Scala.decide_indexOfChar]
+  rfl
 
 theorem takeWhile_append_stop {p : Char → Bool} {a b : List Char} (ha : ∀ c ∈ a, p c = true)
     (hb : b = [] ∨ ∃ c r, b = c :: r ∧ p c = false) : (a ++ b).takeWhile p = a := by

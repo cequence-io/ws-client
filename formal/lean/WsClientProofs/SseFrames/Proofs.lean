@@ -1,5 +1,7 @@
 import WsClientProofs.Framing.SplitLemmas
-import WsClientProofs.SseFrames.Model
+import WsClientProofs.SseFrames.Extracted
+import WsClientProofs.SseFrames.Spec
+import WsClientProofs.Framing.Spec
 
 /-!
 # SSE frames: the code is the line rules
@@ -18,6 +20,8 @@ where the code departs from the line structure:
 -/
 
 namespace WsClientProofs.SseFrames
+
+open WsClientProofs.Scala (startsWith stripPrefix stripSuffix trim splitLines)
 
 open WsClientProofs.Framing (firstOcc firstOcc_eq_some_iff firstOcc_eq_none_iff OccursAt)
 
@@ -407,15 +411,110 @@ def refData (frame fp itemPrefix : List Char) (lines kept : List (List Char)) : 
   | some (value, after) => joinLines (optSpace fp itemPrefix value :: after)
   | none => if isComment frame then joinLines (lines.dropWhile isComment) else frame
 
+/-- What the extracted result says, as the spec's outcome (`Json.parse` is the free
+constructor: the result carries the text handed to it). -/
+def outcome : Extracted.FrameResult → Outcome
+  | .EndOfStream => .done
+  | .Skip => .skip
+  | .JsonFrame (.parsed d) => .payload d
+
+theorem joinLines_eq_mkString (ls : List (List Char)) :
+    joinLines ls = Scala.mkString ['\n'] ls := by
+  induction ls with
+  | nil => rfl
+  | cons l ls ih =>
+    cases ls with
+    | nil => rfl
+    | cons m ms => simp [joinLines, Scala.mkString, ih]
+
+theorem containsText_lf_colon (frame : List Char) :
+    Scala.containsText frame ['\n', ':'] = (firstOcc ['\n', ':'] frame).isSome := by
+  unfold Scala.containsText Scala.indexOfText
+  rw [if_neg (by simp)]
+  cases h : firstOcc ['\n', ':'] frame with
+  | none => simp
+  | some v => simp; omega
+
+theorem decide_indexOfChar_gt (s : List Char) (c : Char) :
+    decide (Scala.indexOfChar s c > -1) = s.contains c := by
+  rw [← Scala.decide_indexOfChar]
+  simp only [decide_eq_decide]
+  omega
+
+/-- The code's data from a content, with the extracted `Int` arithmetic. -/
+theorem data_extracted (content fp itemPrefix : List Char) :
+    (let dataStart : Int :=
+        if startsWith content fp then 0
+        else
+          let i : Int := Scala.indexOfText content (['\n'] ++ fp)
+          if i > -1 then i + 1 else -1
+      if dataStart > -1 then
+        let value : List Char := Scala.substring content (dataStart + (fp.length : Int))
+        if ((fp.length : Int) < (itemPrefix.length : Int)) && startsWith value [' '] then
+          Scala.substring value 1
+        else value
+      else content) = dataOf content fp itemPrefix := by
+  unfold dataOf
+  by_cases hs : startsWith content fp = true
+  · simp only [hs, if_true]
+    simp [optSpace, Scala.substring]
+  · simp only [hs, if_false, Bool.false_eq_true, List.singleton_append, Scala.indexOfText,
+      List.cons_ne_nil]
+    cases hf : firstOcc ('\n' :: fp) content with
+    | none => simp
+    | some j =>
+      have h1 : ((j : Int) + 1 + (fp.length : Int)).toNat = j + 1 + fp.length := by omega
+      have h0 : (-1 : Int) < (j : Int) := by omega
+      have h2 : (-1 : Int) < (j : Int) + 1 := by omega
+      simp [optSpace, Scala.substring, h1, h0, h2]
+
+/-- The end of `parseFrame`: the `[DONE]` check and the stripping are `classify`. -/
+theorem tail_eq (data : List Char) (p q : Option (List Char)) :
+    outcome (if (trim data == Extracted.EndOfStreamToken) = true then Extracted.FrameResult.EndOfStream
+      else Extracted.FrameResult.JsonFrame
+        (Scala.JsValue.parsed (stripSuffix (stripPrefix data (p.getD [])) (q.getD [])))) =
+      classify data p q := by
+  have hE : "[DONE]".toList = Extracted.EndOfStreamToken := by decide
+  unfold classify
+  rw [hE]
+  by_cases h : trim data = Extracted.EndOfStreamToken
+  · simp [h, outcome]
+  · simp [h, outcome]
+
 theorem parseFrame_unfold (frame : List Char) (p q : Option (List Char)) (itemPrefix : List Char) :
-    parseFrame frame p q itemPrefix =
+    outcome (Extracted.parseFrame frame p q itemPrefix) =
       let fp := stripSuffix itemPrefix [' ']
       let nls := isComment frame || (firstOcc ['\n', ':'] frame).isSome || frame.contains '\r'
       let allLines := if nls then splitLines frame else [frame]
       let lines := if nls then allLines.filter (fun l => !isComment l) else allLines
       if lines.all (fun l => (trim l).isEmpty) then .skip
       else classify (dataOf (contentOf frame fp nls lines allLines) fp itemPrefix) p q := by
-  rfl
+  have hnls : ((Extracted.isComment frame || Scala.containsText frame ['\n', ':']) ||
+      decide (Scala.indexOfChar frame '\r' > -1)) =
+      (isComment frame || (firstOcc ['\n', ':'] frame).isSome || frame.contains '\r') := by
+    rw [containsText_lf_colon, decide_indexOfChar_gt]; rfl
+  have dx := data_extracted
+  simp only [] at dx
+  have hline : Extracted.LineBreak.split frame = splitLines frame := rfl
+  have hcom : Extracted.isComment = isComment := rfl
+  have hmk : ∀ x : List (List Char), Scala.mkString ['\n'] x = joinLines x :=
+    fun x => (joinLines_eq_mkString x).symm
+  unfold Extracted.parseFrame
+  dsimp only
+  rw [hnls]
+  simp only [hline, hcom, hmk]
+  rw [dx]
+  generalize hN : (isComment frame || (firstOcc ['\n', ':'] frame).isSome ||
+    frame.contains '\r') = N
+  cases N
+  · simp only [Bool.false_eq_true, if_false, if_true, Bool.not_false, contentOf]
+    split
+    · rfl
+    · exact tail_eq _ p q
+  · simp only [if_true, Bool.not_true, Bool.false_eq_true, if_false, contentOf]
+    split
+    · rfl
+    · exact tail_eq _ p q
 
 theorem reference_unfold (frame : List Char) (p q : Option (List Char)) (itemPrefix : List Char) :
     reference frame p q itemPrefix =
@@ -481,7 +580,7 @@ theorem parseFrame_eq_reference (frame : List Char) (p q : Option (List Char))
     (itemPrefix : List Char)
     (hbreak : ∀ c ∈ stripSuffix itemPrefix [' '], c ≠ '\r' ∧ c ≠ '\n')
     (hcolon : startsWith (stripSuffix itemPrefix [' ']) [':'] = false) :
-    parseFrame frame p q itemPrefix = reference frame p q itemPrefix := by
+    outcome (Extracted.parseFrame frame p q itemPrefix) = reference frame p q itemPrefix := by
   rw [parseFrame_unfold, reference_unfold]
   simp only []
   generalize stripSuffix itemPrefix [' '] = fp at hbreak hcolon ⊢

@@ -34,26 +34,171 @@ object LeanExtract {
 
   private val OutputFile = "formal/lean/WsClientProofs/Calls/Model.lean"
 
+  // The production code extracted directly: the Lean files the proofs of the pure pieces
+  // (query encoding, multipart parameters, SSE frames) are about
+  private val Targets: List[ProductionExtract.Target] = List(
+    ProductionExtract.Target(
+      name = "wire",
+      source =
+        "ws-client-core/src/main/scala/io/cequence/wsclient/service/ws/WireFormat.scala",
+      obj = "WireFormat",
+      out = "formal/lean/WsClientProofs/WireFormat/Extracted.lean",
+      namespace = "WsClientProofs.WireFormat.Extracted",
+      imports = List("WsClientProofs.Scala", "WsClientProofs.WireFormat.JdkUrlEncoder"),
+      take = List("encodeQueryComponent", "url"),
+      about =
+        "`WireFormat.encodeQueryComponent` and `WireFormat.url`. `URLEncoder.encode` is the JDK's\n" +
+          "(`WireFormat.urlEncoderEncode`, modelled from its javadoc); a value of type `Any` is its\n" +
+          "`toString` text, the only thing `url` does with it."
+    ),
+    ProductionExtract.Target(
+      name = "multipart",
+      source =
+        "ws-client-core/src/main/scala/io/cequence/wsclient/service/ws/MultipartFormData.scala",
+      obj = "MultipartParams",
+      out = "formal/lean/WsClientProofs/Multipart/Extracted.lean",
+      namespace = "WsClientProofs.Multipart.Extracted",
+      imports = List("WsClientProofs.Scala", "WsClientProofs.JavaString"),
+      take = List("escape", "quoted", "dataPartName", "isTokenChar"),
+      about =
+        "`MultipartParams`: the encoding of caller-supplied `Content-Disposition` values."
+    ),
+    ProductionExtract.Target(
+      name = "frame",
+      source =
+        "ws-client-core/src/main/scala/io/cequence/wsclient/service/JsonStreamFrames.scala",
+      obj = "JsonStreamFrames",
+      out = "formal/lean/WsClientProofs/SseFrames/Extracted.lean",
+      namespace = "WsClientProofs.SseFrames.Extracted",
+      imports = List("WsClientProofs.Scala"),
+      take = List("FrameResult", "EndOfStreamToken", "isComment", "LineBreak", "parseFrame"),
+      about = "`JsonStreamFrames.parseFrame`. `Json.parse` is the free constructor\n" +
+        "`Scala.JsValue.parsed` (the parse itself is not modelled: the frame result is the string\n" +
+        "handed to it), and a `try` whose handlers all rethrow is its body (the exception paths -\n" +
+        "a non-JSON payload - are outside the model)."
+    )
+  )
+
+  /**
+   * The hand-written Lean models of imperative code (loops over arrays: outside the
+   * extractable subset): each is PINNED to the Scala it models - the hash of the member's
+   * tokens, white space and comments left out, is recorded in `formal/lean/pins.txt`. A change
+   * to the member fails `leanExtract --check` until the model (and its proofs) are re-read and
+   * the pin is renewed on purpose (`leanExtract --pin`) - no silent drift between code and
+   * model.
+   */
+  private final case class Pin(
+    id: String,
+    source: String,
+    member: String,
+    model: String
+  )
+
+  private val PinFile = "formal/lean/pins.txt"
+
+  private val Pins: List[Pin] = {
+    val core = "ws-client-core/src/main/scala/io/cequence/wsclient/stream/"
+    val lean = "formal/lean/WsClientProofs/Framing/"
+    List(
+      Pin(
+        "ByteFraming.DelimiterFramer",
+        core + "ByteFraming.scala",
+        "class DelimiterFramer",
+        lean + "ByteFramingModel.lean"
+      ),
+      Pin(
+        "ByteFraming.delimiter",
+        core + "ByteFraming.scala",
+        "def delimiter",
+        lean + "ByteFramingModel.lean"
+      ),
+      Pin(
+        "StreamTransformers.DelimiterFramer",
+        core + "StreamTransformers.scala",
+        "class DelimiterFramer",
+        lean + "EngineFramerModel.lean"
+      )
+    )
+  }
+
+  // the tokens of a member without white space and comments, hashed
+  private def pinHash(
+    source: String,
+    member: String
+  ): String = {
+    implicit val dialect: Dialect = dialects.Scala213
+    val tree = source.parse[Source].get
+    val found: List[Tree] = member.split(" ", 2) match {
+      case Array("class", name) =>
+        tree.collect { case c: Defn.Class if c.name.value == name => c: Tree }
+      case Array("def", name) =>
+        tree.collect { case d: Defn.Def if d.name.value == name => d: Tree }
+      case _ => sys.error(s"unknown pin member: $member")
+    }
+    require(found.size == 1, s"pin member '$member' matches ${found.size} definitions")
+    val tokens = found.head.tokens.filterNot {
+      case _: Token.Space | _: Token.Tab | _: Token.CR | _: Token.LF | _: Token.LFLF |
+          _: Token.FF | _: Token.Comment | _: Token.BOF | _: Token.EOF =>
+        true
+      case _ => false
+    }
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+    tokens.foreach(t => digest.update((t.syntax + "\u0000").getBytes(StandardCharsets.UTF_8)))
+    digest.digest().map(b => f"${b & 0xff}%02x").mkString
+  }
+
+  private def pinLines(root: Path): List[String] =
+    Pins.map { p =>
+      s"${p.id}  ${pinHash(read(root.resolve(p.source)), p.member)}  ${p.source}  ${p.model}"
+    }
+
+  private val PinHeader =
+    """# The Scala members whose hand-written Lean models (the imperative framers) the proofs are about.
+      |# Each line: member, SHA-256 of its tokens (white space and comments left out), source, model.
+      |# `sbt "leanExtract --check"` fails when a member changed: re-read the model and its proofs,
+      |# change them if the behavior changed, then renew with `sbt "leanExtract --pin"`.
+      |""".stripMargin
+
   def main(args: Array[String]): Unit = {
     val root = locateRoot()
     val extraction = Extraction(read(root.resolve(ModelFile)))
-    val output = root.resolve(OutputFile)
+    // every generated file: path -> text
+    val generated: List[(String, String)] =
+      (OutputFile -> extraction.lean) :: Targets.map(t =>
+        t.out -> ProductionExtract.lean(t, read(root.resolve(t.source)))
+      )
 
     args.toList match {
       case Nil =>
-        Files.createDirectories(output.getParent)
-        Files.write(output, extraction.lean.getBytes(StandardCharsets.UTF_8))
-        println(s"wrote $OutputFile (${extraction.lean.linesIterator.size} lines)")
+        generated.foreach { case (path, text) =>
+          val file = root.resolve(path)
+          Files.createDirectories(file.getParent)
+          Files.write(file, text.getBytes(StandardCharsets.UTF_8))
+          println(s"wrote $path (${text.linesIterator.size} lines)")
+        }
+
+      case "--pin" :: Nil =>
+        val text = PinHeader + pinLines(root).mkString("\n") + "\n"
+        Files.write(root.resolve(PinFile), text.getBytes(StandardCharsets.UTF_8))
+        println(s"wrote $PinFile (${Pins.size} pins)")
 
       case "--check" :: Nil =>
-        val current =
-          if (Files.exists(output)) read(output) else ""
-        if (current != extraction.lean) {
-          println(s"FAIL  $OutputFile is not what the extraction of CallModel.scala produces")
+        val stale = generated.filter { case (path, text) =>
+          val file = root.resolve(path)
+          val current = if (Files.exists(file)) read(file) else ""
+          current != text
+        }
+        if (stale.nonEmpty) {
+          stale.foreach { case (path, _) =>
+            println(s"FAIL  $path is not what the extraction of its Scala source produces")
+          }
           println("      run `sbt leanExtract` and commit the result")
           sys.exit(1)
         }
-        println(s"PASS  $OutputFile is the extraction of CallModel.scala")
+        generated.foreach { case (path, _) =>
+          println(s"PASS  $path is the extraction of its source")
+        }
+        checkPins(root)
 
       case "--cases" :: count :: Nil =>
         val ok = validate(root, extraction, count.toInt)
@@ -63,6 +208,29 @@ object LeanExtract {
         System.err.println(s"unknown arguments: ${other.mkString(" ")}")
         sys.exit(2)
     }
+  }
+
+  private def checkPins(root: Path): Unit = {
+    val file = root.resolve(PinFile)
+    val recorded: Map[String, String] =
+      if (!Files.exists(file)) Map.empty
+      else
+        read(file).linesIterator
+          .filterNot(l => l.startsWith("#") || l.trim.isEmpty)
+          .map(_.split("  ").toList)
+          .collect { case id :: hash :: _ => id -> hash }
+          .toMap
+    val changed = Pins.filter { p =>
+      recorded.get(p.id) != Some(pinHash(read(root.resolve(p.source)), p.member))
+    }
+    if (changed.nonEmpty) {
+      changed.foreach { p =>
+        println(s"FAIL  ${p.id} (${p.source}) changed since its Lean model was last checked")
+        println(s"      re-read ${p.model} and its proofs; then `sbt \"leanExtract --pin\"`")
+      }
+      sys.exit(1)
+    }
+    Pins.foreach(p => println(s"PASS  ${p.id} is as its Lean model (${p.model}) was checked"))
   }
 
   // --------------------------------------------------------------------- translation check
@@ -528,7 +696,7 @@ object LeanExtract {
       "λ"
     )
 
-    private[LeanExtract] def esc(n: String): String =
+    private[calls] def esc(n: String): String =
       if (keywords.contains(n)) s"«$n»" else n
 
     def apply(source: String): Extraction = {
