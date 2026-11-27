@@ -15,7 +15,7 @@ SSE frame parsing.
 | Small-scope (bounded-exhaustive) specs | the code against a list model written from the scaladoc alone, on EVERY input of a small scope | part of `sbt test` | framing: every string up to 5 bytes x every chunking x 4 frame limits x 5 delimiters (about 130,000 cases); operators: every pipeline of up to 2 operators over small sources, with a failure injected at every user function (38,740 pipelines on each of 4 backends); calls: every `AsyncCall` plan of up to 3 operators over 25 leaves (698,275 plans on each of 2 interpreters), and plan TREES - an operator's function returns plans of its own - with a cancellation at the first gate (895,400 plans of depth 3 plus 200,000 random deep ones, on both interpreters and a model of the run loop) |
 | Model checks ([Lincheck](https://github.com/JetBrains/lincheck)) | the real classes under the interleavings of a scenario's threads: deadlocks, hangs, lost signals | `sbt modelCheck` (about 7 minutes) | 35 scenarios x 1000 interleavings: `TransformPublisher`, `CursorPublisher`, `SubscriberCursor`, `AsyncBroadcastHub`, `ZioCursor`, a run of an `AsyncCall`, the neutral preflight |
 | TLA+ specs (TLC) | the synchronization *designs*, every interleaving of a model, deadlock freedom and termination included | `formal/tla/check.sh --fetch` (about 5 minutes) | 4 specs (`ZioCursor`, the `CursorPublisher` drain loop, two chained `TransformPublisher`s, the preflight's hand-over), 10 configurations of up to 4 million states, 11 mutants |
-| Lean proofs ([Lean 4](https://lean-lang.org)) | the code itself (query encoding, multipart parameters, SSE frames: EXTRACTED from the shipped Scala; the framers: hand models, pinned to the code) against a spec written from the scaladoc / RFC, for EVERY input; a conformance check runs the shipped code and the Lean on the same random cases | `formal/lean/check.sh` (about 30 seconds), then `sbt leanConformance` (about a minute) | 34 theorems: both framers, `WireFormat.encodeQueryComponent` / `url`, `MultipartParams`, `JsonStreamFrames.parseFrame`; 20,000 conformance cases per piece by default (500,000 in the audit run) - and the run loop of `AsyncCall`, whose Lean model is extracted from the Scala source the tests run |
+| Lean proofs ([Lean 4](https://lean-lang.org)) | the code itself (query encoding, multipart parameters, SSE frames, both delimiter framers: EXTRACTED from the shipped Scala) against a spec written from the scaladoc / RFC, for EVERY input; a conformance check runs the shipped code and the Lean on the same random cases | `formal/lean/check.sh` (about 30 seconds), then `sbt leanConformance` (about a minute) | 51 theorems: both framers, `WireFormat.encodeQueryComponent` / `url`, `MultipartParams`, `JsonStreamFrames.parseFrame`; 20,000 conformance cases per piece by default (500,000 in the audit run) - and the run loop of `AsyncCall`, whose Lean model is extracted from the Scala source the tests run |
 
 ```mermaid
 flowchart LR
@@ -99,9 +99,22 @@ is its body, and a value of type `Any` is its `toString`.
 A change to one of these methods regenerates the Lean and the proofs are re-checked against the
 new code. Shown on a planted bug in the shipped `parseFrame` (`substring(1)` to `substring(2)`):
 `leanExtract --check` fails (stale file) and, regenerated, `parseFrame_eq_reference` no longer
-builds. The framers' loops over arrays are outside the extractable subset: their models stay
-hand-written, and each Scala member they model is pinned (`formal/lean/pins.txt`, a hash of its
-tokens) - a change fails `leanExtract --check` until the model and its proofs are re-read.
+builds. The two framers are imperative classes (private `var` fields, `while` loops over byte arrays with
+an early `return`, `System.arraycopy`, `throw`): a second extractor, `ClassExtract`, translates
+them the same way - the fields a state, the loops recursive functions over a step counter (the
+`fuel` of every method; running out of it is its own failure, and the extraction decides
+nothing about termination), the exceptions `Except`. The older proofs are about a hand-written
+model with `Nat` indices; `ByteFramingRefinement` / `EngineFramerRefinement` prove the extracted
+code equal to it, function by function, so every framer theorem (`framers_equivalent`, the
+`*_frames_prefix` / `*_tooLong_of_reference` / `*_eq_reference_*` / `*_chunking_independent`
+family) is restated about the shipped code (`ExtractedTheorems`) - together with the fact that
+the loops never run out of the fuel the stage gives them. A bug planted in either framer's
+compaction fails `leanExtract --check` and, regenerated, the refinement. What stays hand-written
+is what runs the framers - `ByteFraming.delimiter`'s stage and the engines' `TransformPublisher`
+(`push` / `onInput` per chunk, the first exception fails the stream, `finish` /
+`onUpstreamComplete` at the end): two small drivers, each pinned to its Scala member
+(`formal/lean/pins.txt`, a hash of its tokens) - a change fails `leanExtract --check` until the
+driver is re-read.
 
 ## One source for the tests and the proof (calls)
 
@@ -144,7 +157,7 @@ engines' HTTP paths are covered by example-based and scenario tests only. A call
 design-level spec (its suspension hand-over and the timeout race are model-checked, not
 specified in TLA+); the Lean proof of its run loop covers the sequential fragment and one
 cancellation (not time, `traverse`, races or streams: their model checks and the linear
-small-scope spec are what covers those). The Lean proofs of the two framers are about
-hand-transliterated models of the code: a pin catches a change to the code, the conformance
-check samples the link between model and code, and a transliteration mistake the samples do not
-reach would stay (the framers' loops over arrays are outside the extractable subset).
+small-scope spec are what covers those). The Lean proofs are about the shipped code through
+the extractors - what the extraction trusts is the library prelude, the translators and the
+decisions named in the generated files; the framers' stage drivers are hand-written and
+pinned, and the conformance check samples the link between the shipped code and the Lean.

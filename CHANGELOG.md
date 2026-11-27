@@ -107,10 +107,12 @@ Use one version for all ws-client artifacts on a classpath (see
   agree, and differ from their documented model only at the two known edges near the frame
   limit), `WireFormat.encodeQueryComponent` and `WireFormat.url` (RFC 3986), the multipart
   parameter encoding, and `JsonStreamFrames.parseFrame` - with a conformance check that runs the
-  code and each model on the same random cases. The last three are EXTRACTED from the shipped
-  Scala (`sbt leanExtract`), not modelled: the proofs are about a translation of the code the
-  engines run, over a small library prelude checked against the JVM; the framers' models are
-  hand-written and pinned to the code they model. See [Verification](docs/verification.md).
+  code and each model on the same random cases. All of it is EXTRACTED from the shipped Scala
+  (`sbt leanExtract`), not modelled: the proofs are about a translation of the code the engines
+  run, over a small library prelude checked against the JVM. The two framers' imperative loops
+  are extracted too (fuel-bounded recursion) and proved equal to the models the older proofs
+  are about, so every framer theorem holds for the shipped code; the stages that run them are
+  two small hand-written drivers pinned to their Scala. See [Verification](docs/verification.md).
 
 ## 1.2.2 (2026-11-16) - engine discovery on any thread
 

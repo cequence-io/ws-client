@@ -487,28 +487,37 @@ Four layers beyond the example-based and random specs:
   every proof and fails on `sorry` or a non-standard axiom - `Axioms.lean` lists the headline
   theorems): four pure parts - both delimiter framers, `WireFormat.encodeQueryComponent` /
   `url`, `MultipartParams`, `JsonStreamFrames.parseFrame` up to the `Json.parse` - proved
-  against specs written from the scaladoc / RFC alone, for EVERY input. The last three are
-  EXTRACTED from the shipped Scala: `sbt leanExtract` (`ProductionExtract`, scalameta) translates
-  the named members of `WireFormat`, `MultipartParams` and `JsonStreamFrames` into
-  `WireFormat/Extracted.lean`, `Multipart/Extracted.lean`, `SseFrames/Extracted.lean` (the
-  Scala quoted above each definition; a construct outside the subset fails the extraction), and
-  the proofs are about that translation. Trusted: the library prelude (`Scala.lean`,
-  `Java.lean`, `JavaString.lean`, `WireFormat/JdkUrlEncoder.lean` - written from the library's
-  docs, run against the JVM by the `lib` conformance target), the translator (a mistranslation
-  breaks a proof or the end-to-end conformance), and three stated decisions: `Json.parse` is
-  the free constructor `JsValue.parsed`, a `try` whose handlers all rethrow is its body, an
-  `Any` is its `toString` text. A new Java / Scala library call in extracted code needs a prelude
-  function, an entry in `ProductionExtract.method` / `.static`, and a `lib` case. The framers'
-  loops over arrays are outside the subset: their models (`*Model.lean`) are hand-written and
-  PINNED (`formal/lean/pins.txt`, a hash of the Scala member's tokens; `leanExtract --check`
-  fails on a change - re-read the model and proofs, then `leanExtract --pin`). `sbt
-  leanConformance` (a forked main in ws-client-verification, NOT part of `test`;
-  `-Dwsclient.verify.lean.cases` / `.seed` / `.only` / `.exe`) runs the shipped code and the Lean
-  on the same random cases: 20,000 per target by default (framing, url, multipart, frame, lib),
-  outputs identical. A change to an extracted method = `sbt leanExtract` + `lake build` in the
-  same commit; to a pinned framer = model + proofs + `--pin`. `Int` is Lean's unbounded `Int`
-  (the framer models: natural arithmetic where non-negative, each place where it can be
-  negative says how it is translated). See `formal/lean/README.md`.
+  against specs written from the scaladoc / RFC alone, for EVERY input, and ALL of them about
+  the shipped Scala: `sbt leanExtract` (`ProductionExtract` for the pure objects,
+  `ClassExtract` for the two imperative framer classes; scalameta) translates the named members
+  into `WireFormat/Extracted.lean`, `Multipart/Extracted.lean`, `SseFrames/Extracted.lean`,
+  `Framing/ByteFramingExtracted.lean`, `Framing/EngineFramerExtracted.lean` (the Scala quoted
+  above each definition; a construct outside the subset fails the extraction). Trusted: the
+  library prelude (`Scala.lean`, `Java.lean`, `JavaString.lean`, `WireFormat/JdkUrlEncoder.lean`
+  - written from the library's docs, run against the JVM by the `lib` conformance target), the
+  translators (a mistranslation breaks a proof or the end-to-end conformance), and the decisions
+  named in the generated files: `Json.parse` is the free constructor `JsValue.parsed`, a `try`
+  whose handlers all rethrow is its body, an `Any` is its `toString` text, `Int` / `Long` are
+  Lean's unbounded `Int`, a `Bytes` / `ByteBuffer` is its content, an array read out of bounds
+  is `none`, a thrown exception is its class (messages are not modelled). A new Java / Scala
+  library call in extracted code needs a prelude function, an entry in `ProductionExtract.method`
+  / `.static`, and a `lib` case. The framers' loops: each method takes `fuel` (a `while` is a
+  recursive def over a step counter, `Failure.outOfFuel` when it runs out - the extraction decides
+  nothing about termination); `Framing/ByteFramingRefinement.lean` / `EngineFramerRefinement.lean`
+  prove the extracted code equal to the hand-written `*Model.lean` the older proofs
+  (`ByteFramingProof`, `EngineFramerProof`, `Theorems`) are about, function by function, and
+  `Framing/ExtractedTheorems.lean` restates the headline theorems about the extracted code
+  (plus `*_never_outOfFuel`: the stage's `fuelFor` is enough). What stays hand-written is what
+  RUNS the framers: `Framing/ExtractedDrivers.lean` (`ByteFraming.delimiter`'s stage, the
+  engines' `TransformPublisher`), PINNED to its Scala (`formal/lean/pins.txt`, a hash of each
+  member's tokens; `leanExtract --check` fails on a change - re-read the driver, then
+  `leanExtract --pin`). `sbt leanConformance` (a forked main in ws-client-verification, NOT part
+  of `test`; `-Dwsclient.verify.lean.cases` / `.seed` / `.only` / `.exe`) runs the shipped code
+  and the extracted Lean on the same random cases: 20,000 per target by default (framing, url,
+  multipart, frame, lib), outputs identical. A change to an extracted method = `sbt leanExtract`
+  + `lake build` in the same commit (a framer change that alters behavior fails the refinement
+  proofs: update the model and proofs); to a pinned driver member = driver + `--pin`. See
+  `formal/lean/README.md`.
 
 CI runs the last three in a job of their own (`verification`; first run on GitHub 2026-11-11:
 13 minutes on the hosted runner, tools-jar download included). The `test` job takes about 20
@@ -524,17 +533,17 @@ backend, 2 minutes - manual, not in CI); calls 698,275 plans per interpreter (30
 Lincheck 35 scenarios x 1000 interleavings (the 25 of 1.2.x: 398 s; the 8 of a call's run: 70
 s; the 2 of the neutral preflight: 7 s);
 TLC 10 configurations + 11 mutants, about 5 minutes (state counts in `formal/tla/README.md`);
-Lean (2026-11-27): 34 headline theorems, standard axioms only, build from scratch 30 s; the
+Lean (2026-11-27): 51 headline theorems, standard axioms only, build from scratch 30 s; the
 conformance check 5 targets x 500,000 cases (framing 143 s, url 17 s, frame 10 s, multipart 6 s,
 lib 3 s), the default 5 x 20,000 about 50 s; `leanExtract --check` covers the call model, the
-three extracted pieces and the three pins; the call plan trees: 895,400 plans of depth 3 +
+five extracted pieces and the two pins; the call plan trees: 895,400 plans of depth 3 +
 200,000 random deep ones per interpreter and for the machine, 76 s.
 
 Coverage per subject (`-` = nothing):
 
 | Subject | Small-scope | Lincheck (scenarios) | TLA+ | Lean (proof + conformance) |
 |---|---|---|---|---|
-| `ByteFraming.delimiter`, `DelimiterFramer` | `FramingSmallScopeSpec` (2 pinned edges) | - | - | both = `chunkSpec`; the 2 edges are the only differences from the model |
+| `ByteFraming.delimiter`, `DelimiterFramer` | `FramingSmallScopeSpec` (2 pinned edges) | - | - | both = `chunkSpec`; the 2 edges are the only differences from the model; EXTRACTED from the shipped Scala and proved equal to the model, loops never out of fuel |
 | operators on neutral / Akka / fs2 / ZIO | `OperatorSmallScopeSpec` (20 sources, 44 operators) | - | - | - |
 | `TransformPublisher` (two chained) | - | 5 | `TransformChain`: 4 configs + `Legacy`, 3 mutants | - |
 | `CursorPublisher` | - | 4 x sync / async cursor, + 1 with `SubscriberCursor` | `CursorDrain`: 2 configs, 4 mutants | - |
@@ -561,17 +570,17 @@ What a pass does NOT say (the known gaps, most valuable first):
 3. Nothing ties a TLA+ label to the code but review, and Lincheck checks no liveness. Each
    spec'd class has model-check scenarios for the same races - keep that pairing for every new
    spec (a spec without a model check of the real class, or the reverse, is half a result).
-4. The Lean proofs of the framers are about hand-written MODELS: what ties a model to its code is
-   the transliteration (review), the pin (a change to the Scala member fails `leanExtract
-   --check`) and the conformance check, which samples - a transliteration mistake the samples do
-   not reach would stay. Next: extract the framers too (imperative: `var`, `while` with an early
-   `return`, arrays, `throw` - a fuel-bounded translation plus a refinement proof to the
-   existing models). The extracted pieces (query encoding, multipart, `parseFrame`) are the
-   shipped code through a library prelude; `parseFrame`'s JSON parse and its error mapping are
-   not modelled; Java strings with unpaired surrogates are outside the text models. A multipart
-   name with a backslash goes out as it is (as browsers send it), which an RFC 9110
-   quoted-string reader takes as an escape (proved witnesses in `Multipart/Proofs.lean`) - a
-   behavior decision, left open.
+4. The Lean proofs are about the shipped code through the extractors and a library prelude: what
+   stays on trust is the prelude (checked against the JVM by sampling), the translators (their
+   output is checked end to end by sampling, and a mistranslation that changes a modelled
+   property fails a proof), the decisions named in the generated files, and the hand-written
+   stage drivers of the framers (`ExtractedDrivers.lean`, pinned: a change fails the pin check,
+   the link is sampled by the conformance check). `parseFrame`'s JSON parse and its error
+   mapping are not modelled; Java strings with unpaired surrogates are outside the text
+   models; `Int` overflow is not modelled (the framer theorems bound the input by
+   `Int.MaxValue - 8` bytes). A multipart name with a backslash goes out as it is (as browsers
+   send it), which an RFC 9110 quoted-string reader takes as an escape (proved witnesses in
+   `Multipart/Proofs.lean`) - a behavior decision, left open.
 5. `AsyncCall`: the linear small-scope spec observes outcome + hook calls only; `CallTreeSpec`
    adds trees and ONE cancellation (the run parked at its first gate) - no cancel racing a
    step, no timing, no `traverse` / race / stream in the trees. Its model-check scenarios are 8
@@ -600,8 +609,9 @@ is for (revert the fix locally, or run it against the last release jar); a TLA+ 
 a mutant, and an invariant TLC rejects is first read as a fact about the class (see
 `CancelCompletes` in the README) before the spec is weakened; never put an exact state count
 of a counterexample run into a doc (it varies per run); a Lean spec is written from the
-scaladoc / RFC alone, extracted code is the shipped Scala (`leanExtract`; a hand model follows
-its code line by line and is pinned), every model and extraction gets a conformance
+scaladoc / RFC alone, extracted code is the shipped Scala (`leanExtract`; a hand-written part
+that mirrors Scala - the framers' stage drivers - follows it line by line and is pinned), every
+model and extraction gets a conformance
 target that is first shown to fail on a bug planted in the Scala code, and a divergence from
 the spec is a theorem (proved the only one, or shown by a computed witness).
 
