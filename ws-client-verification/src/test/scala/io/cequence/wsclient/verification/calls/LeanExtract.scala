@@ -79,13 +79,41 @@ object LeanExtract {
     )
   )
 
+  // The imperative framers, extracted by `ClassExtract`: their loops over arrays become
+  // fuel-bounded recursive defs, their fields a state
+  private val ClassTargets: List[ClassExtract.Target] = List(
+    ClassExtract.Target(
+      name = "byteFraming",
+      source = "ws-client-core/src/main/scala/io/cequence/wsclient/stream/ByteFraming.scala",
+      cls = "DelimiterFramer",
+      out = "formal/lean/WsClientProofs/Framing/ByteFramingExtracted.lean",
+      namespace = "WsClientProofs.Framing.ByteFramingExtracted",
+      imports = List("WsClientProofs.Scala", "WsClientProofs.Java"),
+      methods = List("push", "finish", "append", "indexOfDelimiter"),
+      about = "`ByteFraming.DelimiterFramer`: the per-run state of `ByteFraming.delimiter`."
+    ),
+    ClassExtract.Target(
+      name = "engineFramer",
+      source =
+        "ws-client-core/src/main/scala/io/cequence/wsclient/stream/StreamTransformers.scala",
+      cls = "DelimiterFramer",
+      out = "formal/lean/WsClientProofs/Framing/EngineFramerExtracted.lean",
+      namespace = "WsClientProofs.Framing.EngineFramerExtracted",
+      imports = List("WsClientProofs.Scala", "WsClientProofs.Java"),
+      methods = List("onInput", "onUpstreamComplete", "indexOfDelimiter"),
+      about =
+        "`StreamTransformers.DelimiterFramer`: the SSE framer of the jdk and zio-http engines."
+    )
+  )
+
   /**
-   * The hand-written Lean models of imperative code (loops over arrays: outside the
-   * extractable subset): each is PINNED to the Scala it models - the hash of the member's
-   * tokens, white space and comments left out, is recorded in `formal/lean/pins.txt`. A change
-   * to the member fails `leanExtract --check` until the model (and its proofs) are re-read and
-   * the pin is renewed on purpose (`leanExtract --pin`) - no silent drift between code and
-   * model.
+   * The hand-written Lean DRIVERS of the extracted framers (`Framing/ExtractedDrivers.lean`:
+   * what runs them - the `stateful` stage of `ByteFraming.delimiter`, the `TransformPublisher`
+   * of the jdk / zio-http engines - is not extractable): each is PINNED to the Scala it models
+   * \- the hash of the member's tokens, white space and comments left out, is recorded in
+   * `formal/lean/pins.txt`. A change to the member fails `leanExtract --check` until the
+   * driver is re-read and the pin is renewed on purpose (`leanExtract --pin`) - no silent
+   * drift between code and model.
    */
   private final case class Pin(
     id: String,
@@ -98,25 +126,14 @@ object LeanExtract {
 
   private val Pins: List[Pin] = {
     val core = "ws-client-core/src/main/scala/io/cequence/wsclient/stream/"
-    val lean = "formal/lean/WsClientProofs/Framing/"
+    val drivers = "formal/lean/WsClientProofs/Framing/ExtractedDrivers.lean"
     List(
+      Pin("ByteFraming.delimiter", core + "ByteFraming.scala", "def delimiter", drivers),
       Pin(
-        "ByteFraming.DelimiterFramer",
-        core + "ByteFraming.scala",
-        "class DelimiterFramer",
-        lean + "ByteFramingModel.lean"
-      ),
-      Pin(
-        "ByteFraming.delimiter",
-        core + "ByteFraming.scala",
-        "def delimiter",
-        lean + "ByteFramingModel.lean"
-      ),
-      Pin(
-        "StreamTransformers.DelimiterFramer",
-        core + "StreamTransformers.scala",
-        "class DelimiterFramer",
-        lean + "EngineFramerModel.lean"
+        "TransformPublisher",
+        core + "TransformPublisher.scala",
+        "class TransformPublisher",
+        drivers
       )
     )
   }
@@ -153,7 +170,7 @@ object LeanExtract {
     }
 
   private val PinHeader =
-    """# The Scala members whose hand-written Lean models (the imperative framers) the proofs are about.
+    """# The Scala members whose hand-written Lean drivers (what runs the extracted framers) the proofs are about.
       |# Each line: member, SHA-256 of its tokens (white space and comments left out), source, model.
       |# `sbt "leanExtract --check"` fails when a member changed: re-read the model and its proofs,
       |# change them if the behavior changed, then renew with `sbt "leanExtract --pin"`.
@@ -166,7 +183,7 @@ object LeanExtract {
     val generated: List[(String, String)] =
       (OutputFile -> extraction.lean) :: Targets.map(t =>
         t.out -> ProductionExtract.lean(t, read(root.resolve(t.source)))
-      )
+      ) ::: ClassTargets.map(t => t.out -> ClassExtract.lean(t, read(root.resolve(t.source))))
 
     args.toList match {
       case Nil =>

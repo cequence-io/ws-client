@@ -103,6 +103,11 @@ theorem decide_indexOfChar (s : List Char) (c : Char) :
 /-- `String.substring(beginIndex)`, for `0 ≤ beginIndex ≤ length`. -/
 def substring (s : List Char) (i : Int) : List Char := s.drop i.toNat
 
+/-- `array(i)`: the element, or `none` out of bounds - where Java throws (the extracted code
+only reads in bounds: the proofs show it). -/
+def arrayGet {α : Type} (a : List α) (i : Int) : Option α :=
+  if i < 0 then none else a[i.toNat]?
+
 /-- `mkString(sep)` of a list of texts. -/
 def mkString (sep : List Char) : List (List Char) → List Char
   | [] => []

@@ -45,12 +45,13 @@ def toHex (bytes : List UInt8) : String :=
   if bytes.isEmpty then "."
   else String.mk (bytes.flatMap fun b => [hexChar (b.toNat / 16), hexChar (b.toNat % 16)])
 
-def endingName : End → String
+def endingName : WsClientProofs.Framing.ExtractedDrivers.End → String
   | .completed => "completed"
   | .tooLong => "tooLong"
   | .truncated => "truncated"
+  | .outOfFuel => "outOfFuel"
 
-def showResult (r : Result UInt8) : String :=
+def showResult (r : WsClientProofs.Framing.ExtractedDrivers.Result) : String :=
   " ".intercalate (endingName r.ending :: toString r.frames.length :: r.frames.map toHex)
 
 def parseNat (s : String) : Except String Nat :=
@@ -111,10 +112,11 @@ def framing : List String → Except String String
     let n ← parseNat nS
     let chunks ← rest.mapM parseHex
     if chunks.length != n then throw s!"expected {n} chunks, got {chunks.length}"
-    if h : d = [] then throw "empty delimiter"
+    if d = [] then throw "empty delimiter"
     else
-      let byteFraming := ByteFramingModel.run d h max (tS == "1") chunks
-      let engine := EngineFramerModel.run d h max chunks
+      let byteFraming :=
+        WsClientProofs.Framing.ExtractedDrivers.byteRun d (Int.ofNat max) (tS == "1") chunks
+      let engine := WsClientProofs.Framing.ExtractedDrivers.engineRun d (Int.ofNat max) chunks
       return s!"{showResult byteFraming} | {showResult engine}"
   | _ => throw "framing: expected <delimiter> <max> <allowTruncation> <n> <chunks>"
 

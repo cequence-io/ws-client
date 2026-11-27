@@ -57,6 +57,8 @@ object ProductionExtract {
   case object TInt extends Ty { val lean = "Int" }
   case object TBool extends Ty { val lean = "Bool" }
   case object TChar extends Ty { val lean = "Char" }
+  case object TByte extends Ty { val lean = "UInt8" }
+  case object TUnit extends Ty { val lean = "Unit" }
   case object TText extends Ty { val lean = "List Char" }
   final case class TList(elem: Ty) extends Ty { def lean = s"List ${elem.atom}" }
   final case class TOpt(elem: Ty) extends Ty { def lean = s"Option ${elem.atom}" }
@@ -70,7 +72,7 @@ object ProductionExtract {
   private val JsValueType = TUser("Scala.JsValue")
 
   // a type known on one side only is the other's
-  private def join(
+  private[calls] def join(
     a: Ty,
     b: Ty
   ): Ty = (a, b) match {
@@ -103,7 +105,7 @@ object ProductionExtract {
   }
 
   // an operand: a name, a literal, a bracketed expression stands as it is
-  private def atom(s: String): String = {
+  private[calls] def atom(s: String): String = {
     val simple = s.matches("[A-Za-z0-9_.«»']+")
     if (simple || wrapped(s)) s else s"($s)"
   }
@@ -138,15 +140,58 @@ object ProductionExtract {
       closedAt == s.length - 1
     }
 
+  private val foreignTypes: Map[String, Ty] = Map("JsValue" -> JsValueType)
+
+  /** A Scala type of the subset as its Lean type. */
+  private[calls] def scalaTypeOf(
+    t: Type,
+    userTypes: Set[String]
+  ): Ty = {
+    def go(x: Type): Ty = scalaTypeOf(x, userTypes)
+    t match {
+      case Type.Name("Int") | Type.Name("Long") => TInt
+      case Type.Name("Boolean")                 => TBool
+      case Type.Name("Char")                    => TChar
+      case Type.Name("Byte")                    => TByte
+      case Type.Name("Unit")                    => TUnit
+      case Type.Name("String")                  => TText
+      // a value of type Any is used only through toString: its text
+      case Type.Name("Any") => TText
+      // a Bytes / a ByteBuffer is its content (the backing array's offset only says where)
+      case Type.Name("Bytes") | Type.Name("ByteBuffer") => TList(TByte)
+      case Type.Name(n) if foreignTypes.contains(n)     => foreignTypes(n)
+      case Type.Name(n) if userTypes(n)                 => TUser(n)
+      case a: Type.Apply
+          if a.tpe.isInstanceOf[Type.Name] &&
+            Set("Seq", "List", "Array", "Vector")(a.tpe.asInstanceOf[Type.Name].value) &&
+            a.argClause.values.size == 1 =>
+        TList(go(a.argClause.values.head))
+      // StreamTransformer.Output[X]: the frames it carries
+      case a: Type.Apply
+          if a.tpe.isInstanceOf[Type.Select] &&
+            a.tpe.asInstanceOf[Type.Select].name.value == "Output" &&
+            a.argClause.values.size == 1 =>
+        TList(go(a.argClause.values.head))
+      case a: Type.Apply
+          if a.tpe.isInstanceOf[Type.Name] &&
+            a.tpe.asInstanceOf[Type.Name].value == "Option" && a.argClause.values.size == 1 =>
+        TOpt(go(a.argClause.values.head))
+      case Type.Tuple(ts) => TTuple(ts.map(go))
+      case other          => sys.error(s"outside the extractable subset: type ${other.syntax}")
+    }
+  }
+
   // ------------------------------------------------------------------------------- context
 
   /** What the target's members declare, for the translator to resolve names against. */
-  private final class Ctx(
+  private[calls] final class Ctx(
     val funs: Map[String, (List[Ty], Ty)],
     val consts: Map[String, Ty],
     val ctorOwner: Map[String, String],
     val ctorFields: Map[String, List[Ty]],
-    val userTypes: Set[String]
+    val userTypes: Set[String],
+    // the fields of the class being extracted: read as `s.<name>` of the state `s`
+    val fields: Map[String, Ty] = Map.empty
   )
 
   private final case class Decl(
@@ -203,29 +248,7 @@ object ProductionExtract {
     }.toSet
     val userTypes = sealedTraits
 
-    val foreign: Map[String, Ty] = Map("JsValue" -> JsValueType)
-
-    def scalaType(t: Type): Ty = t match {
-      case Type.Name("Int")     => TInt
-      case Type.Name("Boolean") => TBool
-      case Type.Name("Char")    => TChar
-      case Type.Name("String")  => TText
-      // a value of type Any is used only through toString: its text
-      case Type.Name("Any")                    => TText
-      case Type.Name(n) if foreign.contains(n) => foreign(n)
-      case Type.Name(n) if userTypes(n)        => TUser(n)
-      case a: Type.Apply
-          if a.tpe.isInstanceOf[Type.Name] &&
-            Set("Seq", "List", "Array", "Vector")(a.tpe.asInstanceOf[Type.Name].value) &&
-            a.argClause.values.size == 1 =>
-        TList(scalaType(a.argClause.values.head))
-      case a: Type.Apply
-          if a.tpe.isInstanceOf[Type.Name] &&
-            a.tpe.asInstanceOf[Type.Name].value == "Option" && a.argClause.values.size == 1 =>
-        TOpt(scalaType(a.argClause.values.head))
-      case Type.Tuple(ts) => TTuple(ts.map(scalaType))
-      case other          => sys.error(s"outside the extractable subset: type ${other.syntax}")
-    }
+    def scalaType(t: Type): Ty = scalaTypeOf(t, userTypes)
 
     def fieldsOf(c: Defn.Class): List[(String, Ty)] =
       c.ctor.paramClauses.flatMap(_.values).toList.map { p =>
@@ -354,15 +377,15 @@ object ProductionExtract {
     done.toList.map(byName)
   }
 
-  private def esc(n: String): String = LeanExtract.Extraction.esc(n)
+  private[calls] def esc(n: String): String = LeanExtract.Extraction.esc(n)
 
   // -------------------------------------------------------------------------- the translator
 
-  private type Env = Map[String, Ty]
+  private[calls] type Env = Map[String, Ty]
 
-  private final class Translator(ctx: Ctx) {
+  private[calls] final class Translator(ctx: Ctx) {
 
-    private def fail(
+    def fail(
       what: String,
       tree: Tree
     ): Nothing =
@@ -410,6 +433,7 @@ object ProductionExtract {
       case Lit.Boolean(b) => (b.toString, TBool)
       case Lit.String(s)  => (charList(s), TText)
       case Lit.Char(c)    => (leanChar(c), TChar)
+      case Lit.Long(n)    => (s"($n : Int)", TInt)
 
       case Term.Name("None") =>
         ("none", expected match { case o: TOpt => o; case _ => TOpt(TUnknown) })
@@ -420,6 +444,7 @@ object ProductionExtract {
           .get(n)
           .map(ty => (esc(n), ty))
           .orElse(ctx.consts.get(n).map(ty => (esc(n), ty)))
+          .orElse(ctx.fields.get(n).map(ty => (s"s.${esc(n)}", ty)))
           .orElse {
             ctx.ctorOwner.get(n).map { owner =>
               require(ctx.ctorFields(n).isEmpty, s"$n needs arguments")
@@ -430,6 +455,18 @@ object ProductionExtract {
       case Term.Placeholder() =>
         env.get("_").map(ty => ("x_", ty)).getOrElse(fail("a placeholder", t))
 
+      // List.empty[T]
+      case a: Term.ApplyType if a.targClause.values.size == 1 && (a.fun match {
+            case Term.Select(Term.Name("List" | "Seq"), Term.Name("empty")) => true
+            case _                                                          => false
+          }) =>
+        ("[]", TList(ProductionExtract.scalaTypeOf(a.targClause.values.head, ctx.userTypes)))
+      case Term.Select(Term.Name("Int"), Term.Name("MaxValue")) => ("(2147483647 : Int)", TInt)
+      case Term.Select(Term.Name("Array"), Term.Name("emptyByteArray")) => ("[]", TList(TByte))
+      case n: Term.New if arrayByteSize(n).isDefined =>
+        val (size, st) = operand(arrayByteSize(n).get, env, ind)
+        require(st == TInt, "new Array[Byte] of a non-Int size")
+        (s"List.replicate ($size).toNat 0", TList(TByte))
       case Term.Select(qual, Term.Name(m)) => method(qual, m, Nil, env, ind, t)
 
       case a: Term.Apply => apply(a, env, ind, expected)
@@ -541,7 +578,7 @@ object ProductionExtract {
 
     private def paren(s: String): String = if (s.contains('\n')) s"($s)" else s
 
-    private def operand(
+    def operand(
       t: Term,
       env: Env,
       ind: Int,
@@ -603,6 +640,16 @@ object ProductionExtract {
       a.fun match {
         case Term.Select(Term.Name(q), Term.Name(m)) if isStatic(q) =>
           static(q, m, args, env, ind, a)
+        case Term.Select(qual, Term.Name(m)) if dotted(qual).contains("java.util.Arrays") =>
+          static("Arrays", m, args, env, ind, a)
+        // an index into a byte array: the element, or none out of bounds (Java throws; the
+        // proofs show the reads are in bounds)
+        case Term.Name(f)
+            if args.size == 1 && env.get(f).orElse(ctx.fields.get(f)).contains(TList(TByte)) =>
+          val (arr, _) = operand(a.fun, env, ind)
+          val (i, it) = operand(args.head, env, ind)
+          require(it == TInt, "an array index that is not an Int")
+          (s"(Scala.arrayGet $arr $i)", TOpt(TByte))
         case Term.Select(qual, Term.Name(m)) => method(qual, m, args, env, ind, a)
         case Term.Name("Some") =>
           require(args.size == 1)
@@ -631,7 +678,38 @@ object ProductionExtract {
       }
     }
 
-    private def isStatic(q: String): Boolean = Set("URLEncoder", "Pattern", "Json")(q)
+    private def isStatic(q: String): Boolean =
+      Set(
+        "URLEncoder",
+        "Pattern",
+        "Json",
+        "math",
+        "Arrays",
+        "Bytes",
+        "ByteBuffer",
+        "StreamTransformer"
+      )(q)
+
+    // `new Array[Byte](n)`: n
+    private def arrayByteSize(n: Term.New): Option[Term] =
+      n.init.tpe match {
+        case a: Type.Apply
+            if a.tpe
+              .isInstanceOf[Type.Name] && a.tpe.asInstanceOf[Type.Name].value == "Array" &&
+              a.argClause.values.map(_.syntax) == List("Byte") =>
+          n.init.argClauses.flatMap(_.values) match {
+            case List(size) => Some(size)
+            case _          => None
+          }
+        case _ => None
+      }
+
+    // `a.b.C` as the text "a.b.C"
+    private def dotted(t: Term): Option[String] = t match {
+      case Term.Name(n)                 => Some(n)
+      case Term.Select(q, Term.Name(n)) => dotted(q).map(_ + "." + n)
+      case _                            => None
+    }
 
     // library functions called on an object
     private def static(
@@ -652,7 +730,26 @@ object ProductionExtract {
         val (v, vt) = operand(text, env, ind)
         require(vt == TText, "Json.parse of a non-text")
         (s"Scala.JsValue.parsed $v", JsValueType)
-      case _ => fail("a library call", whole)
+      case ("math", "max" | "min", List(a, b)) =>
+        val (x, xt) = operand(a, env, ind)
+        val (y, yt) = operand(b, env, ind, xt)
+        require(xt == TInt && yt == TInt, s"math.$m of a non-Int")
+        (s"($m $x $y)", TInt)
+      case ("Arrays", "copyOfRange", List(a, i, j)) =>
+        val (arr, at) = operand(a, env, ind)
+        val (from, _) = operand(i, env, ind, TInt)
+        val (to, _) = operand(j, env, ind, TInt)
+        (s"(Java.copyOfRange $arr ($from).toNat ($to).toNat)", at)
+      case ("Arrays", "copyOf", List(a, n)) =>
+        val (arr, at) = operand(a, env, ind)
+        val (size, _) = operand(n, env, ind, TInt)
+        (s"(Java.copyOf $arr ($size).toNat)", at)
+      // a Bytes / a ByteBuffer is its content
+      case ("Bytes", "unsafeWrap", List(x)) => operand(x, env, ind, TList(TByte))
+      case ("ByteBuffer", "wrap", List(x))  => operand(x, env, ind, TList(TByte))
+      // StreamTransformer.Output(frames): the frames (no `done` flag in the extracted code)
+      case ("StreamTransformer", "Output", List(x)) => operand(x, env, ind)
+      case _                                        => fail("a library call", whole)
     }
 
     // a function argument: a lambda, a placeholder lambda or the name of a def
@@ -756,6 +853,17 @@ object ProductionExtract {
         case (TText, "equals") => (s"($r == ${one(TText)._1})", TBool)
         case (TText, "forall") => (s"$r.all ${predicate(TChar)}", TBool)
         case (TText, "exists") => (s"$r.any ${predicate(TChar)}", TBool)
+
+        // ---- numbers: no overflow in the model (the proofs bound the sizes)
+        case (TInt, "toLong" | "toInt") => (r, TInt)
+
+        // ---- arrays, byte buffers, builders (a builder is the list it has built)
+        case (TList(_), "length")           => (s"($r.length : Int)", TInt)
+        case (TList(_), "reverse")          => (s"$r.reverse", rt)
+        case (TList(TByte), "remaining")    => (s"($r.length : Int)", TInt)
+        case (TList(_), "result")           => (r, rt)
+        case (TList(TByte), "unsafeArray")  => (r, rt)
+        case (TList(TByte), "unsafeOffset") => ("(0 : Int)", TInt)
 
         // ---- patterns
         case (PatternType, "split") =>

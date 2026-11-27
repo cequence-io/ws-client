@@ -1,5 +1,8 @@
 import WsClientProofs.Java
 import WsClientProofs.Framing.Spec
+import WsClientProofs.Framing.ByteFramingExtracted
+import WsClientProofs.Framing.EngineFramerExtracted
+import WsClientProofs.Framing.ExtractedDrivers
 import WsClientProofs.Framing.SplitLemmas
 import WsClientProofs.Framing.ChunkSpecProofs
 import WsClientProofs.Framing.ByteFramingModel

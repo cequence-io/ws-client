@@ -1,7 +1,6 @@
-# The Scala members whose hand-written Lean models (the imperative framers) the proofs are about.
+# The Scala members whose hand-written Lean drivers (what runs the extracted framers) the proofs are about.
 # Each line: member, SHA-256 of its tokens (white space and comments left out), source, model.
 # `sbt "leanExtract --check"` fails when a member changed: re-read the model and its proofs,
 # change them if the behavior changed, then renew with `sbt "leanExtract --pin"`.
-ByteFraming.DelimiterFramer  c0c0ad7a5140228df39b36b04c34e7d668be8530fc8494b474aeab10816bd229  ws-client-core/src/main/scala/io/cequence/wsclient/stream/ByteFraming.scala  formal/lean/WsClientProofs/Framing/ByteFramingModel.lean
-ByteFraming.delimiter  b73311c24aad847c163d9a69039cae74ca645258b1b661fbfd9a9eaee51ef901  ws-client-core/src/main/scala/io/cequence/wsclient/stream/ByteFraming.scala  formal/lean/WsClientProofs/Framing/ByteFramingModel.lean
-StreamTransformers.DelimiterFramer  a8edff102dbb2f90c9421d3d06e2bbc39879ad57adefedcf08f632c315a4e278  ws-client-core/src/main/scala/io/cequence/wsclient/stream/StreamTransformers.scala  formal/lean/WsClientProofs/Framing/EngineFramerModel.lean
+ByteFraming.delimiter  b73311c24aad847c163d9a69039cae74ca645258b1b661fbfd9a9eaee51ef901  ws-client-core/src/main/scala/io/cequence/wsclient/stream/ByteFraming.scala  formal/lean/WsClientProofs/Framing/ExtractedDrivers.lean
+TransformPublisher  1062ecc09a664f1467129f6f27d60781fd070931661efb2336d88b071bbf9d30  ws-client-core/src/main/scala/io/cequence/wsclient/stream/TransformPublisher.scala  formal/lean/WsClientProofs/Framing/ExtractedDrivers.lean
