@@ -1,0 +1,11 @@
+--- a/CallTraverse.tla	2026-11-27 14:17:53.227387129 +0100
++++ b/CallTraverse.tla	2026-11-27 14:17:53.227387129 +0100
+@@ -63,7 +63,7 @@
+ procedure Launch(idx)
+ variables added = FALSE;
+ begin
+-LA1: if ~finished then
++LA1: if TRUE then                      \* (mutant) a launch racing the end still adds the child
+        running := running \cup {idx};
+        addedAny := addedAny \cup {idx};
+        added := TRUE;

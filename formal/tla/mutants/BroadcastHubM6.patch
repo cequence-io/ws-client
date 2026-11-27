@@ -1,0 +1,10 @@
+--- a/BroadcastHub.tla
++++ b/BroadcastHub.tla
+@@ -147,7 +147,6 @@
+ begin
+ Q1: if ~cancelledC[who] then
+       cancelledC[who] := TRUE;
+-      members := members \ {who};
+       outstanding := {p \in {waiting[who], delivering[who]} : p # 0};
+       waiting[who] := 0;
+       delivering[who] := 0;

@@ -1,0 +1,13 @@
+--- a/SubscriberCursor.tla	2026-11-27 13:50:09.836528205 +0100
++++ b/SubscriberCursor.tla	2026-11-27 13:50:09.836528205 +0100
+@@ -325,9 +325,7 @@
+ K3:   if first /\ handedOver # 0 /\ pr[handedOver] = "open" then
+         pr[handedOver] := "none";     \* handedOver.trySuccess(None)
+       end if;
+-K4:   if first then
+-        call CancelSubscription();
+-      end if;
++K4:   skip;                           \* (mutant) the subscription is not cancelled
+     end if;
+ K5: skip;
+ end process;

@@ -1,0 +1,18 @@
+--- a/SubscriberCursor.tla	2026-11-27 13:50:09.825528180 +0100
++++ b/SubscriberCursor.tla	2026-11-27 13:50:09.825528180 +0100
+@@ -79,13 +79,8 @@
+ procedure Drain()
+ variables missed = 0, n = 0, s = FALSE;
+ begin
+-D1: if wip = 0 then
+-      wip := 1;
+-      missed := 1;
+-    else
+-      wip := wip + 1;                 \* a caller of the loop: it records and leaves
+-      return;
+-    end if;
++D1: wip := wip + 1;                   \* (mutant) every caller runs the loop: not serialized
++    missed := 1;
+ D2: s := subscribed;                  \* lock.synchronized(subscription) != null
+     n := 0;
+ D3: if s /\ cancelPending /\ ~cancelSent then

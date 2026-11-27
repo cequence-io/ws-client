@@ -1,0 +1,11 @@
+--- a/CallTraverse.tla	2026-11-27 14:17:53.231387082 +0100
++++ b/CallTraverse.tla	2026-11-27 14:17:53.231387082 +0100
+@@ -140,7 +140,7 @@
+       if out = "ok" then
+         running := running \ {self};
+         okResults := okResults \cup {self};
+-        remaining := remaining - 1;
++        remaining := remaining;            \* (mutant) the count never reaches zero
+         if remaining = 0 then
+           finished := TRUE;
+           sig := "ok";

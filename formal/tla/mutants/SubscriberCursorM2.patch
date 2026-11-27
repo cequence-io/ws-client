@@ -1,0 +1,13 @@
+--- a/SubscriberCursor.tla	2026-11-27 13:50:09.827528185 +0100
++++ b/SubscriberCursor.tla	2026-11-27 13:50:09.827528185 +0100
+@@ -98,8 +98,8 @@
+ D4: if n > 0 then
+       call SubRequest(n);
+     end if;
+-D5: wip := wip - missed;              \* missed = wip.addAndGet(-missed)
+-    missed := wip;                    \* (the updated value: a PlusCal step is sequential)
++D5: wip := 0;                         \* (mutant) the counter is reset: a record that came
++    missed := 0;                      \* meanwhile is lost
+     if missed # 0 then
+       goto D2;
+     end if;

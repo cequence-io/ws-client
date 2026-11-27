@@ -1,0 +1,13 @@
+--- a/CallTimeout.tla	2026-11-27 14:13:17.270022308 +0100
++++ b/CallTimeout.tla	2026-11-27 14:13:17.270022308 +0100
+@@ -181,9 +181,7 @@
+       parent := waiting;                      \* waiting.getAndSet(null)
+       waiting := "null";
+     else
+-      if outcome = "own" /\ WithLate then
+-        lateReports := lateReports + 1;       \* onLate.foreach(f => f(finished))
+-      end if;
++      skip;                                   \* (mutant) the loser's outcome is dropped
+     end if;
+ D5: if won then
+       if parent = "susp" then

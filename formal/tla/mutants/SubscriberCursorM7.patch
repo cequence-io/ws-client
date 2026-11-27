@@ -1,0 +1,11 @@
+--- a/SubscriberCursor.tla	2026-11-27 13:50:09.838528210 +0100
++++ b/SubscriberCursor.tla	2026-11-27 13:50:09.838528210 +0100
+@@ -152,7 +152,7 @@
+ procedure OnNext(e)
+ variables handOver = 0, overflow = FALSE, more = 0;
+ begin
+-O1: if ~done /\ ~cancelled then       \* lock.synchronized { ... }
++O1: if ~done then                     \* (mutant) elements after a cancel are kept
+       if pending # 0 then
+         handOver := pending;
+         pending := 0;

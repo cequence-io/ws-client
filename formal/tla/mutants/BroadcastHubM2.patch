@@ -1,0 +1,15 @@
+--- a/BroadcastHub.tla
++++ b/BroadcastHub.tla
+@@ -261,10 +261,8 @@
+ variables result = "none", taken = {};
+ begin
+ H1: shutdownCalled := TRUE;                   \* lock.synchronized { ... }
+-    if terminal = "none" then
+-      terminal := "ok";
+-      termHead := head;
+-    end if;
++    terminal := "ok";                         \* (mutant) overwrites what the upstream decided
++    termHead := head;
+     result := terminal;
+     taken := {<<c, waiting[c], "none", 0>> : c \in {d \in members : waiting[d] # 0}};
+     delivering := [c \in Consumers |-> IF c \in members /\ waiting[c] # 0 THEN waiting[c] ELSE delivering[c]];

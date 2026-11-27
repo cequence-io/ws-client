@@ -2,7 +2,9 @@
 # Model-checks the TLA+ specs of the stream layer with TLC and compares every outcome with the
 # expected one: the specs must hold, the mutants (one seeded bug each) must be rejected.
 #
-#   check.sh [--fetch] [--list] [name...]     names as printed by --list; default: all
+#   check.sh [--fetch] [--list] [--slow] [name...]   names as printed by --list; default: all
+#                                                    but the slow ones (--slow adds them; a name
+#                                                    given explicitly always runs)
 #
 # The TLA+ tools jar is not part of the repository: point TLA2TOOLS_JAR at one, or pass --fetch
 # to download the pinned release into target/ (checked against its SHA-256).
@@ -27,9 +29,11 @@ jar_version="v1.7.4"
 jar_url="https://github.com/tlaplus/tlaplus/releases/download/$jar_version/tla2tools.jar"
 jar_sha256="936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
 
-# name | module | config | mutant patch (- for none) | expected outcome
+# name | module | config | mutant patch (- for none) | expected outcome | slow (optional)
 #
 # Outcomes: ok (no error), deadlock, invariant, property (a temporal property), assert.
+# A check marked `slow` (a minute or more on 20 cores, over a million states) runs only with
+# --slow or by name.
 checks="
 ZioCursor            ZioCursor      ZioCursor            -               ok
 CursorDrain          CursorDrain    CursorDrain          -               ok
@@ -52,14 +56,62 @@ PreflightHandover    PreflightHandover PreflightHandover  -               ok
 PreflightWindow      PreflightHandover PreflightHandoverWindow -          invariant
 PreflightHandoverM1  PreflightHandover PreflightHandover  PreflightHandoverM1 invariant
 PreflightHandoverM2  PreflightHandover PreflightHandover  PreflightHandoverM2 invariant
+SubscriberCursor       SubscriberCursor SubscriberCursor       -                    ok
+SubscriberCursorError  SubscriberCursor SubscriberCursorError  -                    ok
+SubscriberCursorCancel SubscriberCursor SubscriberCursorCancel -                    ok
+SubscriberCursorWide   SubscriberCursor SubscriberCursorWide   -                    ok
+SubscriberCursorAsync  SubscriberCursor SubscriberCursorAsync  -                    ok
+SubscriberCursorM1     SubscriberCursor SubscriberCursor       SubscriberCursorM1   invariant
+SubscriberCursorM2     SubscriberCursor SubscriberCursor       SubscriberCursorM2   deadlock
+SubscriberCursorM3     SubscriberCursor SubscriberCursorCancel SubscriberCursorM3   invariant
+SubscriberCursorM4     SubscriberCursor SubscriberCursor       SubscriberCursorM4   deadlock
+SubscriberCursorM5     SubscriberCursor SubscriberCursor       SubscriberCursorM5   deadlock
+SubscriberCursorM6     SubscriberCursor SubscriberCursorCancel SubscriberCursorM6   invariant
+SubscriberCursorM7     SubscriberCursor SubscriberCursorCancel SubscriberCursorM7   invariant
+CallTimeout            CallTimeout      CallTimeout            -                    ok
+CallTimeoutNoLate      CallTimeout      CallTimeoutNoLate      -                    ok
+CallTimeoutNoCancel    CallTimeout      CallTimeoutNoCancel    -                    ok
+CallTimeoutM1          CallTimeout      CallTimeout            CallTimeoutM1        invariant
+CallTimeoutM2          CallTimeout      CallTimeout            CallTimeoutM2        invariant
+CallTimeoutM3          CallTimeout      CallTimeout            CallTimeoutM3        invariant
+CallTimeoutM4          CallTimeout      CallTimeout            CallTimeoutM4        invariant
+CallTimeoutM5          CallTimeout      CallTimeout            CallTimeoutM5        invariant
+CallTraverse           CallTraverse     CallTraverse           -                    ok
+CallTraverseNoCancel   CallTraverse     CallTraverseNoCancel   -                    ok
+CallTraverseWide       CallTraverse     CallTraverseWide       -                    ok
+CallTraverseSerial     CallTraverse     CallTraverseSerial     -                    ok
+CallTraverseM1         CallTraverse     CallTraverse           CallTraverseM1       invariant
+CallTraverseM2         CallTraverse     CallTraverse           CallTraverseM2       invariant
+CallTraverseM3         CallTraverse     CallTraverseNoCancel   CallTraverseM3       invariant
+CallTraverseM4         CallTraverse     CallTraverse           CallTraverseM4       deadlock
+CallTraverseM5         CallTraverse     CallTraverse           CallTraverseM5       invariant
+BroadcastHub           BroadcastHub     BroadcastHub           -                    ok
+BroadcastHubWide       BroadcastHub     BroadcastHubWide       -                    ok
+BroadcastHubError      BroadcastHub     BroadcastHubError      -                    ok
+BroadcastHubDrain      BroadcastHub     BroadcastHubDrain      -                    ok
+BroadcastHubSync       BroadcastHub     BroadcastHubSync       -                    ok
+BroadcastHubTwo        BroadcastHub     BroadcastHubTwo        -                    ok
+BroadcastHubShutdown   BroadcastHub     BroadcastHubShutdown   -                    ok
+BroadcastHubCancel     BroadcastHub     BroadcastHubCancel     -                    ok
+BroadcastHubShutdown2  BroadcastHub     BroadcastHubShutdown2  -                    ok        slow
+BroadcastHubCancel2    BroadcastHub     BroadcastHubCancel2    -                    ok        slow
+BroadcastHubM1         BroadcastHub     BroadcastHub           BroadcastHubM1       invariant
+BroadcastHubM2         BroadcastHub     BroadcastHubShutdown   BroadcastHubM2       invariant
+BroadcastHubM3         BroadcastHub     BroadcastHubShutdown   BroadcastHubM3       invariant
+BroadcastHubM4         BroadcastHub     BroadcastHubCancel     BroadcastHubM4       invariant
+BroadcastHubM5         BroadcastHub     BroadcastHubWide       BroadcastHubM5       deadlock
+BroadcastHubM6         BroadcastHub     BroadcastHubWide       BroadcastHubM6       deadlock
+BroadcastHubM7         BroadcastHub     BroadcastHubWide       BroadcastHubM7       deadlock
 "
 
 fetch=false
+all_slow=false
 selected=()
 for arg in "$@"; do
   case "$arg" in
     --fetch) fetch=true ;;
-    --list) echo "$checks" | awk 'NF { printf "%-22s expected: %s\n", $1, $5 }'; exit 0 ;;
+    --slow) all_slow=true ;;
+    --list) echo "$checks" | awk 'NF { printf "%-22s expected: %-10s %s\n", $1, $5, $6 }'; exit 0 ;;
     -*) echo "unknown option $arg" >&2; exit 2 ;;
     *) selected+=("$arg") ;;
   esac
@@ -124,9 +176,10 @@ run_check() {
 
 failed=0
 ran=0
-while read -r name module config mutant expected; do
+while read -r name module config mutant expected flag; do
   [ -z "$name" ] && continue
   if [ ${#selected[@]} -gt 0 ] && [[ ! " ${selected[*]} " == *" $name "* ]]; then continue; fi
+  if [ ${#selected[@]} -eq 0 ] && [ "$flag" = "slow" ] && ! $all_slow; then continue; fi
   ran=$((ran + 1))
   start=$SECONDS
   run_check "$name" "$module" "$config" "$mutant"

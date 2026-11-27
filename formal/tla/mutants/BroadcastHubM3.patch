@@ -1,0 +1,13 @@
+--- a/BroadcastHub.tla
++++ b/BroadcastHub.tla
+@@ -87,9 +87,7 @@
+ variables batch = {}, term = "none";
+ begin
+ U1: pulling := FALSE;
+-    if terminal # "none" then
+-      skip;                                   \* the first terminal event stands: dropped
+-    elsif res = "element" then
++    if res = "element" then               \* (mutant) a late element is not dropped
+       head := head + 1;
+       batch := {<<c, waiting[c], "some", head>> : c \in {d \in members : waiting[d] # 0}};
+       delivering := [c \in Consumers |-> IF c \in members /\ waiting[c] # 0 THEN waiting[c] ELSE delivering[c]];

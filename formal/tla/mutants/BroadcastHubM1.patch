@@ -1,0 +1,11 @@
+--- a/BroadcastHub.tla
++++ b/BroadcastHub.tla
+@@ -74,7 +74,7 @@
+ 
+ define
+   MinOffset == IF members # {}
+-                 THEN CHOOSE o \in {offset[c] : c \in members} : \A p \in {offset[c] : c \in members} : o <= p
++                 THEN CHOOSE o \in {offset[c] : c \in members} : \A p \in {offset[c] : c \in members} : o >= p    \* (mutant) the FASTEST consumer
+                  ELSE IF Drain THEN head ELSE base
+ 
+   \* the next result of the upstream cursor

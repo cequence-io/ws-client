@@ -1,0 +1,17 @@
+--- a/CallTimeout.tla	2026-11-27 14:13:17.267022294 +0100
++++ b/CallTimeout.tla	2026-11-27 14:13:17.267022294 +0100
+@@ -58,11 +58,9 @@
+ \* Suspension.complete(signal): the compare-and-set decides who resumes the parent
+ procedure Complete(sig)
+ begin
+-C1: if suspState = "open" then
+-      suspState := "completed";
+-      resumes := resumes + 1;
+-      resumeSignal := sig;
+-    end if;
++C1: suspState := "completed";         \* (mutant) no compare-and-set: every completer resumes
++    resumes := resumes + 1;
++    resumeSignal := sig;
+ C2: return;
+ end procedure;
+ 

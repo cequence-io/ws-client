@@ -1,0 +1,17 @@
+--- a/CallTimeout.tla	2026-11-27 14:13:17.268022299 +0100
++++ b/CallTimeout.tla	2026-11-27 14:13:17.268022299 +0100
+@@ -171,12 +171,8 @@
+     end while;
+ D2: outcome := childOutcome;                  \* the handler
+     timerCancelled := TRUE;                   \* timer.cancel()
+-D3: if race = "Racing" then                   \* race.compareAndSet(Racing, ChildEnded)
+-      race := "ChildEnded";
+-      won := TRUE;
+-    else
+-      won := FALSE;
+-    end if;
++D3: race := "ChildEnded";                  \* (mutant) the child always wins the race
++    won := TRUE;
+ D4: if won then
+       parent := waiting;                      \* waiting.getAndSet(null)
+       waiting := "null";

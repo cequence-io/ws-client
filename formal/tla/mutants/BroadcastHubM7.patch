@@ -1,0 +1,11 @@
+--- a/BroadcastHub.tla
++++ b/BroadcastHub.tla
+@@ -235,7 +235,7 @@
+         goto N5;
+       end either;
+     end if;
+-N3: call PullUpstream();
++N3: skip;                                     \* (mutant) no pull after next()
+ N4: await pr[self][k] # "open";
+     if pr[self][k] = "some" then
+       obs[self] := Append(obs[self], pv[self][k]);

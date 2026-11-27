@@ -1,0 +1,15 @@
+--- a/SubscriberCursor.tla	2026-11-27 13:50:09.833528199 +0100
++++ b/SubscriberCursor.tla	2026-11-27 13:50:09.833528199 +0100
+@@ -157,11 +157,7 @@
+         handOver := pending;
+         pending := 0;
+         delivering := handOver;
+-        delivered := delivered + 1;   \* countDelivery()
+-        if delivered + 1 - deliveredAtLast >= Batch then
+-          more := Batch;
+-          deliveredAtLast := delivered + 1;
+-        end if;
++        delivered := delivered + 1;   \* (mutant) never requests more
+       elsif Len(queue) >= BufferSize then
+         overflow := TRUE;
+       else

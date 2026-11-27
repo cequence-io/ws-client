@@ -1,0 +1,11 @@
+--- a/CallTraverse.tla	2026-11-27 14:17:53.229387106 +0100
++++ b/CallTraverse.tla	2026-11-27 14:17:53.229387106 +0100
+@@ -150,7 +150,7 @@
+         end if;
+       else
+         sig := "err";
+-        toCancel := running \ {self};      \* drainLocked(): the others still running
++        toCancel := {};                    \* (mutant) the others are not cancelled, nor waited for
+         wasRunning := running \ {self};    \* (what the failure has to wait for)
+         finished := TRUE;
+         running := {};

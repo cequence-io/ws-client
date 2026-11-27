@@ -1,0 +1,15 @@
+--- a/SubscriberCursor.tla	2026-11-27 13:50:09.831528194 +0100
++++ b/SubscriberCursor.tla	2026-11-27 13:50:09.831528194 +0100
+@@ -186,11 +186,7 @@
+ T1: if ~done then
+       done := TRUE;
+       failed := f;
+-      if pending # 0 then
+-        handOver := pending;
+-        pending := 0;
+-        delivering := handOver;
+-      end if;
++      pending := 0;                   \* (mutant) a waiting next() is not handed the end
+     end if;
+ T2: if handOver # 0 then
+       ecq := ecq \cup {<<handOver, IF f THEN "fail" ELSE "none", 0>>};

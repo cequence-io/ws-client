@@ -1,0 +1,13 @@
+--- a/CallTraverse.tla	2026-11-27 14:17:53.236387023 +0100
++++ b/CallTraverse.tla	2026-11-27 14:17:53.236387023 +0100
+@@ -101,8 +101,8 @@
+ variables li = 1, first = 0;
+ begin
+ P1: suspSet := TRUE;                       \* the suspension; traversal.start(owner)
+-    nextIndex := Min(Parallelism, M);
+-    first := Min(Parallelism, M);
++    nextIndex := M;                        \* (mutant) the parallelism is ignored
++    first := M;
+ P2: while li <= first do
+       call Launch(li);
+ P3:   li := li + 1;

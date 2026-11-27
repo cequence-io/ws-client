@@ -1,0 +1,11 @@
+--- a/BroadcastHub.tla
++++ b/BroadcastHub.tla
+@@ -161,7 +161,7 @@
+       end with;
+     end while;
+ Q4: settled[who] := TRUE;
+-Q5: call PullUpstream();                       \* ec.execute(pullUpstream)
++Q5: skip;                                      \* (mutant) no refill after a cancel
+     return;
+ end procedure;
+ 

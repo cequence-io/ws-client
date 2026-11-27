@@ -1,0 +1,17 @@
+--- a/CallTimeout.tla	2026-11-27 14:14:06.555252170 +0100
++++ b/CallTimeout.tla	2026-11-27 14:14:06.555252170 +0100
+@@ -119,11 +119,9 @@
+ M1: either
+       await timerSet /\ ~timerCancelled;       \* the scheduler runs the task: cancel() can no
+                                               \* longer stop it
+-M2:   if race = "Racing" then                   \* race.compareAndSet(Racing, TimedOut)
+-        race := "TimedOut";
+-        onTimerPending := TRUE;
+-        timerFired := TRUE;
+-      end if;
++M2:   race := "TimedOut";                     \* (mutant) no compare-and-set: the timer always takes it
++      onTimerPending := TRUE;
++      timerFired := TRUE;
+     or
+       await (race # "Racing" \/ timerCancelled \/ (setupDone /\ ~timerSet)) ;
+     end either;

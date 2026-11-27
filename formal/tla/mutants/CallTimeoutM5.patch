@@ -1,0 +1,15 @@
+--- a/CallTimeout.tla	2026-11-27 14:13:17.273022322 +0100
++++ b/CallTimeout.tla	2026-11-27 14:13:17.273022322 +0100
+@@ -82,10 +82,8 @@
+ \* Stop once the child ended
+ procedure SuspCancel()
+ begin
+-X1: if suspState = "open" then
+-      suspState := "cancelled";
+-      cancelWait := TRUE;
+-    end if;
++X1: suspState := "cancelled";          \* (mutant) no compare-and-set: a cancel always claims
++    cancelWait := TRUE;
+ X2: if cancelWait then
+       timerCancelled := TRUE;              \* the handle: timer.cancel() ...
+       childCancelRequested := TRUE;        \* ... child.cancel()

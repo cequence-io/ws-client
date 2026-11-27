@@ -1,0 +1,13 @@
+--- a/SubscriberCursor.tla	2026-11-27 13:50:09.829528189 +0100
++++ b/SubscriberCursor.tla	2026-11-27 13:50:09.829528189 +0100
+@@ -322,9 +322,7 @@
+ K2:   if first /\ waiting # 0 /\ pr[waiting] = "open" then
+         pr[waiting] := "none";        \* waiting.trySuccess(None)
+       end if;
+-K3:   if first /\ handedOver # 0 /\ pr[handedOver] = "open" then
+-        pr[handedOver] := "none";     \* handedOver.trySuccess(None)
+-      end if;
++K3:   skip;                           \* (mutant) the promise handed over to the ec is left
+ K4:   if first then
+         call CancelSubscription();
+       end if;
