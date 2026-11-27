@@ -50,14 +50,43 @@ object SseFrameConformance extends LeanConformance.Target {
     "retry: 10",
     "data: \"s\""
   )
+  private val fragments = Vector(
+    ":",
+    "\n",
+    "\r",
+    "\r\n",
+    "data",
+    "data:",
+    "data: ",
+    " ",
+    "\t",
+    "\u0000",
+    "\u000b",
+    "[DONE]",
+    "[",
+    "]",
+    "{}",
+    "1",
+    "é",
+    "😀",
+    "x"
+  )
   private val breaks = Vector("\n", "\r\n", "\r", "")
   private val itemPrefixes = Vector("data: ", "data: ", "data:", "event: ", "x", "data:  ")
   private val strips = Vector(None, None, Some("["), Some(","), Some("]"), Some(""))
 
   def generate(random: Random): (String, String) = {
-    val frame = (0 until 1 + random.nextInt(4)).map { _ =>
-      pieces(random.nextInt(pieces.size)) + breaks(random.nextInt(breaks.size))
-    }.mkString
+    // most frames are lines from the pool; one in four is a string of the characters the rules
+    // react to (colons, line breaks, the field and the sentinel in pieces, white space, controls),
+    // which mostly are not JSON: there the comparison is of the classification (skip / done /
+    // payload-or-failure), which is exact
+    val frame =
+      if (random.nextInt(4) == 0)
+        Seq.fill(random.nextInt(14))(fragments(random.nextInt(fragments.size))).mkString
+      else
+        (0 until 1 + random.nextInt(4)).map { _ =>
+          pieces(random.nextInt(pieces.size)) + breaks(random.nextInt(breaks.size))
+        }.mkString
     val itemPrefix = itemPrefixes(random.nextInt(itemPrefixes.size))
     val stripPrefix = strips(random.nextInt(strips.size))
     val stripSuffix = strips(random.nextInt(strips.size))

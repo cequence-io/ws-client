@@ -45,7 +45,13 @@ object LeanConformance {
   }
 
   private val targets: List[Target] =
-    List(FramingConformance, WireFormatConformance, MultipartConformance, SseFrameConformance)
+    List(
+      FramingConformance,
+      WireFormatConformance,
+      MultipartConformance,
+      SseFrameConformance,
+      LibConformance
+    )
 
   private def knob(
     name: String,
