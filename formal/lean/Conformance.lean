@@ -122,6 +122,36 @@ def framing : List String → Except String String
 
 def boolText (b : Bool) : String := if b then "true" else "false"
 
+def parseInt (s : String) : Except String Int :=
+  match s.toInt? with
+  | some n => pure n
+  | none => throw s!"bad integer '{s}'"
+
+/-- A checked Java step: the value as the JVM prints it, or the failure's name. -/
+def throwName : WsClientProofs.Java.Throw → String
+  | .indexOutOfBounds => "indexOutOfBounds"
+  | .illegalArgument => "illegalArgument"
+  | .negativeSize => "negativeSize"
+
+def showBytes (r : Except WsClientProofs.Java.Throw (List UInt8)) : String :=
+  match r with
+  | .ok a => toHex a
+  | .error e => throwName e
+
+/-- The JVM's exact `addExact` / `subtractExact` / `multiplyExact`: the checked extraction
+(`i32` / `i64`) is `int32?` / `int64?` of the unbounded result. -/
+def arith (op : String) (x y : Int) : Except String Int :=
+  match op with
+  | "add" => pure (x + y)
+  | "sub" => pure (x - y)
+  | "mul" => pure (x * y)
+  | _ => throw s!"unknown operation '{op}'"
+
+def showChecked (r : Option Int) : String :=
+  match r with
+  | some v => toString v
+  | none => "overflow"
+
 def libCase : List String → Except String String
   | ["trim", a] => do return textHex (WsClientProofs.Scala.trim (← parseText a))
   | ["startsWith", a, b] => do
@@ -147,6 +177,27 @@ def libCase : List String → Except String String
       ((WsClientProofs.Scala.Pattern.split .lineBreak (← parseText a)).map textHex)
   | ["urlEncode", a] => do
     return textHex (WsClientProofs.WireFormat.urlEncoderEncode (← parseText a))
+  | ["readChecked", a, i] => do
+    let a ← parseHex a
+    match WsClientProofs.Java.readChecked a (← parseInt i) with
+    | .ok b => return toString b.toNat
+    | .error e => return throwName e
+  | ["copyOfRangeChecked", a, f, t] => do
+    return showBytes (WsClientProofs.Java.copyOfRangeChecked (← parseHex a) (← parseInt f)
+      (← parseInt t))
+  | ["copyOfChecked", a, n] => do
+    return showBytes (WsClientProofs.Java.copyOfChecked (← parseHex a) (← parseInt n))
+  | ["newArrayChecked", n] => do
+    return showBytes (WsClientProofs.Java.newArrayChecked (α := UInt8) (← parseInt n))
+  | ["arraycopyChecked", src, sp, dst, dp, len] => do
+    return showBytes (WsClientProofs.Java.arraycopyChecked (← parseHex src) (← parseInt sp)
+      (← parseHex dst) (← parseInt dp) (← parseInt len))
+  | ["concatChecked", a, b] => do
+    return showBytes (WsClientProofs.Java.concatChecked (← parseHex a) (← parseHex b))
+  | ["int32", op, x, y] => do
+    return showChecked (WsClientProofs.Scala.int32? (← arith op (← parseInt x) (← parseInt y)))
+  | ["int64", op, x, y] => do
+    return showChecked (WsClientProofs.Scala.int64? (← arith op (← parseInt x) (← parseInt y)))
   | "mkString" :: sep :: n :: parts => do
     let parts ← parts.mapM parseText
     if parts.length != (← parseNat n) then throw "mkString: wrong part count"

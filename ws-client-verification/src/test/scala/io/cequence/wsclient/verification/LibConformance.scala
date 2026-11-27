@@ -76,7 +76,7 @@ object LibConformance extends LeanConformance.Target {
 
   def generate(random: Random): (String, String) = {
     val s = text(random, 10)
-    random.nextInt(12) match {
+    random.nextInt(20) match {
       case 0 => (s"lib trim ${hex(s)}", hex(s.trim))
       case 1 =>
         val p = needle(random, s)
@@ -129,13 +129,141 @@ object LibConformance extends LeanConformance.Target {
         )
       case 10 =>
         (s"lib urlEncode ${hex(s)}", hex(URLEncoder.encode(s, "UTF-8")))
-      case _ =>
+      case 11 =>
         val sep = text(random, 2)
         val parts = Seq.fill(random.nextInt(4))(text(random, 3))
         (
           s"lib mkString ${hex(sep)} ${parts.size} ${parts.map(hex).mkString(" ")}".trim,
           hex(parts.mkString(sep))
         )
+      // ---- the Java failures of the CHECKED extraction (`Java.*Checked`, `Scala.int32?`)
+      case 12 =>
+        val a = bytes(random)
+        val i = random.nextInt(a.length + 4) - 2
+        (s"lib readChecked ${hexOf(a)} $i", outcome(a(i).toInt & 0xff).toString)
+      case 13 =>
+        val a = bytes(random)
+        val from = random.nextInt(a.length + 5) - 2
+        val to = random.nextInt(a.length + 7) - 2
+        (
+          s"lib copyOfRangeChecked ${hexOf(a)} $from $to",
+          bytesOutcome(java.util.Arrays.copyOfRange(a, from, to))
+        )
+      case 14 =>
+        val a = bytes(random)
+        val n = random.nextInt(a.length + 6) - 2
+        (s"lib copyOfChecked ${hexOf(a)} $n", bytesOutcome(java.util.Arrays.copyOf(a, n)))
+      case 15 =>
+        val n = random.nextInt(8) - 2
+        (s"lib newArrayChecked $n", bytesOutcome(new Array[Byte](n)))
+      case 16 =>
+        val src = bytes(random)
+        val dst = bytes(random)
+        val sp = random.nextInt(src.length + 4) - 2
+        val dp = random.nextInt(dst.length + 4) - 2
+        val len = random.nextInt(8) - 2
+        (
+          s"lib arraycopyChecked ${hexOf(src)} $sp ${hexOf(dst)} $dp $len",
+          bytesOutcome {
+            val target = dst.clone()
+            System.arraycopy(src, sp, target, dp, len)
+            target
+          }
+        )
+      case 17 =>
+        val a = bytes(random)
+        val b = bytes(random)
+        (s"lib concatChecked ${hexOf(a)} ${hexOf(b)}", bytesOutcome(a ++ b))
+      case 18 =>
+        // int arithmetic near the boundaries (Java wraps; the checked extraction fails)
+        val x = edge(random)
+        val y = edge(random)
+        val (op, run) = random.nextInt(3) match {
+          case 0 => ("add", () => Math.addExact(x, y))
+          case 1 => ("sub", () => Math.subtractExact(x, y))
+          case _ => ("mul", () => Math.multiplyExact(x, y))
+        }
+        (s"lib int32 $op $x $y", outcome(run()))
+      case _ =>
+        val x = edgeLong(random)
+        val y = edgeLong(random)
+        val (op, run) = random.nextInt(3) match {
+          case 0 => ("add", () => Math.addExact(x, y))
+          case 1 => ("sub", () => Math.subtractExact(x, y))
+          case _ => ("mul", () => Math.multiplyExact(x, y))
+        }
+        (s"lib int64 $op $x $y", outcome(run()))
     }
   }
+
+  // what a Java call returns, or the name of what it throws (the failures the checked
+  // extraction models: `Failure.indexOutOfBounds` / `illegalArgument` / `negativeSize` /
+  // `intOverflow` - `longOverflow` for the long case)
+  private def outcome[A](run: => A): String =
+    try run.toString
+    catch {
+      case _: ArrayIndexOutOfBoundsException | _: IndexOutOfBoundsException =>
+        "indexOutOfBounds"
+      case _: IllegalArgumentException   => "illegalArgument"
+      case _: NegativeArraySizeException => "negativeSize"
+      case _: ArithmeticException        => "overflow"
+    }
+
+  private def bytesOutcome(run: => Array[Byte]): String =
+    try hexOf(run)
+    catch {
+      case _: ArrayIndexOutOfBoundsException | _: IndexOutOfBoundsException =>
+        "indexOutOfBounds"
+      case _: IllegalArgumentException   => "illegalArgument"
+      case _: NegativeArraySizeException => "negativeSize"
+    }
+
+  private def hexOf(a: Array[Byte]): String = LeanConformance.hex(a)
+
+  private def bytes(random: Random): Array[Byte] =
+    Array.fill(random.nextInt(6))((random.nextInt(256) - 128).toByte)
+
+  private def edge(random: Random): Int =
+    random.nextInt(4) match {
+      case 0 =>
+        Vector(
+          0,
+          1,
+          -1,
+          2,
+          Int.MaxValue,
+          Int.MinValue,
+          Int.MaxValue - 1,
+          Int.MinValue + 1,
+          46340,
+          46341,
+          65536,
+          -65536,
+          1 << 30
+        )(random.nextInt(13))
+      case 1 => random.nextInt(11) - 5
+      case _ => random.nextInt()
+    }
+
+  private def edgeLong(random: Random): Long =
+    random.nextInt(4) match {
+      case 0 =>
+        Vector(
+          0L,
+          1L,
+          -1L,
+          Long.MaxValue,
+          Long.MinValue,
+          Long.MaxValue - 1,
+          Long.MinValue + 1,
+          3037000499L,
+          3037000500L,
+          1L << 32,
+          -(1L << 32),
+          1L << 62
+        )(random.nextInt(12))
+      case 1 => random.nextInt(11).toLong - 5
+      case 2 => random.nextInt().toLong
+      case _ => random.nextLong()
+    }
 }
